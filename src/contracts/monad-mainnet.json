@@ -222,6 +222,18 @@
         "AUSD": "0x4806902Ec0320e5334c2B2679FFB58C830348F1c"
       },
       "AUSD-DynamicIRM": "0xb526Fa1D4e8D680FFDCAcdd977C2c912dD1CA43A"
+    },
+    "eBTC | WBTC": {
+      "address": "0xBc4cd7bbd8d38027A88838B88BA04561FA778C35",
+      "plugins": {
+        "simplePositionManager": "0x5e339724818c4b46E1Bc6966FeB4ea2924Ca17D9"
+      },
+      "eBTC-DynamicIRM": "0x2A0Ed67E41662339281A9c9697241d964152B782",
+      "tokens": {
+        "eBTC": "0x2840772E14fFbe337aB966727B7D1Dd09BDc76E4",
+        "WBTC": "0xdB3e888c3b50771821226d30Ab6eC14eB5ba85bA"
+      },
+      "WBTC-DynamicIRM": "0x95B961B9aD06dB25831FcdA3c7A79b1EB7c3AFA8"
     }
   },
   "ProtocolReader": "0x4Fa99687a90948A930BE2c1Cc540C12fD525bE73",
