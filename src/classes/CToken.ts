@@ -716,19 +716,28 @@ export class CToken extends Calldata<ICToken> {
     // TODO: Hack to remove
     async ensureUnderlyingAmount(amount: TokenInput, zap: ZapperInstructions) : Promise<TokenInput> {
         const balance = await this.getZapBalance(zap);
-        const assets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
+        const isZapping = typeof zap === 'object' && zap.type !== 'none';
+
+        // Use the zap input token's decimals when zapping, otherwise the deposit token's decimals
+        let decimals = this.asset.decimals;
+        if (isZapping && zap.inputToken) {
+            const inputErc20 = new ERC20(this.provider, zap.inputToken as address);
+            decimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
+        }
+
+        const assets = FormatConverter.decimalToBigInt(amount, decimals);
 
         if(assets > balance) {
             console.warn('[WARNING] Detected higher deposit amount then underlying balance, changing to the underlying balance. Diff: ', {
                 balance: balance,
-                formatted: FormatConverter.bigIntToDecimal(balance, this.asset.decimals),
+                formatted: FormatConverter.bigIntToDecimal(balance, decimals),
                 attempt: {
                     raw: assets,
                     formatted: amount
                 },
             });
 
-            return FormatConverter.bigIntToDecimal(balance, this.asset.decimals);
+            return FormatConverter.bigIntToDecimal(balance, decimals);
         }
 
         return amount;
