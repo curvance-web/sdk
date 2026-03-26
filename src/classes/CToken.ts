@@ -1103,12 +1103,10 @@ export class CToken extends Calldata<ICToken> {
 
         let calldata: bytes;
 
-        const borrowAmount = this.convertTokenToToken(
-            this,
-            borrow,
-            depositAmount.mul(multiplier.sub(1)),
-            true
-        );
+        // Calculate borrow amount based on target leverage for the total position
+        // (existing collateral + new deposit), not just the new deposit amount.
+        const depositAssets = FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals);
+        const { borrowAmount } = this.previewLeverageUp(multiplier, borrow, depositAssets);
 
         switch(type) {
             case 'simple': {
