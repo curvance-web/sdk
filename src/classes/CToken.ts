@@ -116,26 +116,26 @@ export class CToken extends Calldata<ICToken> {
         this.isVault = chain_config.vaults.some(vault => vault.contract.toLowerCase() == assetAddr);
         this.isWrappedNative = chain_config.wrapped_native.toLowerCase() == assetAddr;
 
-        // if([
-        //     'csAUSD',
-        //     'cwsrUSD',
-        //     'cezETH',
-        //     'csyzUSD',
-        //     'cearnAUSD',
-        //     'cYZM'
-        // ].includes(this.symbol)) {
-        //     return;
-        // }
+        if([
+            'csAUSD',
+            'cwsrUSD',
+            'cezETH',
+            'csyzUSD',
+            'cearnAUSD',
+            'cYZM'
+        ].includes(this.symbol)) {
+            return;
+        }
 
-        // if(this.isNativeVault) this.zapTypes.push('native-vault');
-        // if("nativeVaultPositionManager" in this.market.plugins && this.isNativeVault) this.leverageTypes.push('native-vault');
-        // if(this.isWrappedNative) this.zapTypes.push('native-simple');
+        if(this.isNativeVault) this.zapTypes.push('native-vault');
+        if("nativeVaultPositionManager" in this.market.plugins && this.isNativeVault) this.leverageTypes.push('native-vault');
+        if(this.isWrappedNative) this.zapTypes.push('native-simple');
 
-        // if(this.isVault) this.zapTypes.push('vault');
-        // if("vaultPositionManager" in this.market.plugins && this.isVault) this.leverageTypes.push('vault');
+        if(this.isVault) this.zapTypes.push('vault');
+        if("vaultPositionManager" in this.market.plugins && this.isVault) this.leverageTypes.push('vault');
 
-        // if("simplePositionManager" in this.market.plugins) this.leverageTypes.push('simple');
-        // this.zapTypes.push('simple');
+        if("simplePositionManager" in this.market.plugins) this.leverageTypes.push('simple');
+        this.zapTypes.push('simple');
     }
 
     get adapters() { return this.cache.adapters; }
@@ -966,6 +966,62 @@ export class CToken extends Calldata<ICToken> {
             newCollateral: targetCollateralUsd,
             newCollateralInAssets: this.convertUsdToTokens(targetCollateralUsd, true)
         };
+    }
+
+    /**
+     * Pre-validates whether a leverage swap quote will succeed at the given parameters.
+     * Use this to gate UI confirm buttons before attempting the actual transaction.
+     *
+     * @param borrow - The borrowable token to borrow from
+     * @param targetLeverage - Target leverage for the total position
+     * @param slippage - Slippage tolerance (e.g. Decimal(0.005) for 0.5%)
+     * @param direction - 'up' for leverage up / deposit+leverage, 'down' for deleverage
+     * @param depositAmount - Additional deposit amount (raw bigint, only for deposit+leverage)
+     * @param currentLeverage - Current leverage (required for 'down' direction)
+     */
+    async checkLeverageQuote(
+        borrow: BorrowableCToken,
+        targetLeverage: Decimal,
+        slippage: Percentage = Decimal(0.05),
+        direction: 'up' | 'down' = 'up',
+        depositAmount?: bigint,
+        currentLeverage?: Decimal,
+    ): Promise<{ success: boolean; error?: string }> {
+        try {
+            const config = getChainConfig();
+            const slippageBps = toBps(slippage);
+
+            if (direction === 'down') {
+                if (!currentLeverage) {
+                    return { success: false, error: 'Current leverage is required for deleverage check' };
+                }
+                const { collateralAssetReduction } = this.previewLeverageDown(targetLeverage, currentLeverage);
+                const collateralWithBuffer = collateralAssetReduction + (collateralAssetReduction * 10n / BPS);
+
+                await config.dexAgg.quoteAction(
+                    this.getPositionManager('simple').address,
+                    this.asset.address,
+                    borrow.asset.address,
+                    targetLeverage.equals(1) ? collateralWithBuffer : collateralAssetReduction,
+                    slippageBps,
+                );
+            } else {
+                const { borrowAmount } = this.previewLeverageUp(targetLeverage, borrow, depositAmount);
+
+                await config.dexAgg.quoteAction(
+                    this.getPositionManager('simple').address,
+                    borrow.asset.address,
+                    this.asset.address,
+                    FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
+                    slippageBps,
+                );
+            }
+
+            return { success: true };
+        } catch (error: any) {
+            const message = error?.message || 'Unknown error';
+            return { success: false, error: message };
+        }
     }
 
     async leverageUp(
