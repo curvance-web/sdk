@@ -997,12 +997,14 @@ export class CToken extends Calldata<ICToken> {
                 }
                 const { collateralAssetReduction } = this.previewLeverageDown(targetLeverage, currentLeverage);
                 const collateralWithBuffer = collateralAssetReduction + (collateralAssetReduction * 10n / BPS);
+                const swapInput = targetLeverage.equals(1) ? collateralWithBuffer : collateralAssetReduction;
 
+                // Verify KyberSwap has a valid route for this swap
                 await config.dexAgg.quoteAction(
                     this.getPositionManager('simple').address,
                     this.asset.address,
                     borrow.asset.address,
-                    targetLeverage.equals(1) ? collateralWithBuffer : collateralAssetReduction,
+                    swapInput,
                     slippageBps,
                 );
             } else {
@@ -1036,6 +1038,9 @@ export class CToken extends Calldata<ICToken> {
 
         let calldata: bytes;
         const { borrowAmount } = this.previewLeverageUp(newLeverage, borrow);
+
+        // Do approvals BEFORE fetching the quote so the quote is as fresh as possible
+        await this._checkPositionManagerApproval(manager);
 
         switch(type) {
             case 'simple': {
@@ -1081,8 +1086,6 @@ export class CToken extends Calldata<ICToken> {
 
             default: throw new Error("Unsupported position manager type");
         }
-
-        await this._checkPositionManagerApproval(manager);
         return this.oracleRoute(calldata, {
             to: manager.address
         });
@@ -1106,11 +1109,12 @@ export class CToken extends Calldata<ICToken> {
         const manager = this.getPositionManager(type);
         let calldata: bytes;
 
-        const { collateralAssetReduction } = this.previewLeverageDown(newLeverage, currentLeverage);
-        const repay_balance = newLeverage.equals(1) ? await borrowToken.fetchDebtBalanceAtTimestamp(100n, false) : null;
+        const { collateralAssetReduction, collateralAssetReductionUsd } = this.previewLeverageDown(newLeverage, currentLeverage);
         // For full deleverage, use collateral reduction (in collateral token units) with buffer.
-        // repay_balance is in borrow token units — only valid for repayAssets, NOT for swap amountIn.
         const collateralWithBuffer = collateralAssetReduction + (collateralAssetReduction * 10n / BPS);
+
+        // Do approvals BEFORE fetching the quote so the quote is as fresh as possible
+        await this._checkPositionManagerApproval(manager);
 
         switch(type) {
             case 'simple': {
@@ -1122,7 +1126,25 @@ export class CToken extends Calldata<ICToken> {
                     slippage
                 );
 
-                const minRepay = newLeverage.equals(1) ? repay_balance as bigint : quote.out - (BigInt(Decimal(quote.out).mul(.05).toFixed(0)));
+                // Use quote.min_out so repayAssets <= assetsHeld always passes.
+                // The contract caps repayment at totalDebt, so surplus is returned.
+                const minRepay = newLeverage.equals(1) ? quote.min_out : quote.out - (BigInt(Decimal(quote.out).mul(.05).toFixed(0)));
+
+                // Dynamically calculate the contract slippage based on actual equity loss
+                // from the swap, so the contract's slippage check passes.
+                const collateralUsd = this.convertTokensToUsd(this.cache.userCollateral, false);
+                const currentDebt = this.market.userDebt;
+                const valueIn = collateralUsd.sub(currentDebt);
+                const swapOutputUsd = borrowToken.getPrice(true).mul(
+                    FormatConverter.bigIntToDecimal(quote.out, borrowToken.asset.decimals)
+                );
+                const newCollateralUsd = collateralUsd.sub(collateralAssetReductionUsd);
+                const repaid = swapOutputUsd.gt(currentDebt) ? currentDebt : swapOutputUsd;
+                const valueOut = newCollateralUsd.sub(currentDebt.sub(repaid));
+                // Calculate actual loss percentage + 2% margin, minimum user's slippage
+                const actualLossPct = valueIn.gt(valueOut) ? valueIn.sub(valueOut).div(valueIn) : Decimal(0);
+                const dynamicSlippagePct = Decimal.max(actualLossPct.plus(Decimal(0.02)), Decimal(slippage).div(BPS));
+                const dynamicSlippageBps = BigInt(dynamicSlippagePct.mul(BPS).toFixed(0));
 
                 calldata = manager.getDeleverageCalldata({
                     cToken: this.address,
@@ -1131,7 +1153,7 @@ export class CToken extends Calldata<ICToken> {
                     repayAssets: BigInt(minRepay),
                     swapActions: [ action ],
                     auxData: "0x",
-                }, FormatConverter.bpsToBpsWad(slippage));
+                }, FormatConverter.bpsToBpsWad(newLeverage.equals(1) ? dynamicSlippageBps : slippage));
 
                 break;
             }
@@ -1139,8 +1161,6 @@ export class CToken extends Calldata<ICToken> {
             default: throw new Error("Unsupported position manager type");
         }
 
-
-        await this._checkPositionManagerApproval(manager);
         return this.oracleRoute(calldata, {
             to: manager.address
         });
@@ -1167,6 +1187,14 @@ export class CToken extends Calldata<ICToken> {
         // (existing collateral + new deposit), not just the new deposit amount.
         const depositAssets = FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals);
         const { borrowAmount } = this.previewLeverageUp(multiplier, borrow, depositAssets);
+
+        // Do approvals BEFORE fetching the quote so the quote is as fresh as possible
+        await this._checkErc20Approval(
+            this.asset.address,
+            FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals),
+            manager.address
+        );
+        await this._checkPositionManagerApproval(manager);
 
         switch(type) {
             case 'simple': {
@@ -1215,12 +1243,6 @@ export class CToken extends Calldata<ICToken> {
             default: throw new Error("Unsupported position manager type");
         }
 
-        await this._checkErc20Approval(
-            this.asset.address,
-            FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals),
-            manager.address
-        );
-        await this._checkPositionManagerApproval(manager);
         return this.oracleRoute(calldata, {
             to: manager.address
         });
