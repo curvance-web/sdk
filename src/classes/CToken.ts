@@ -1170,6 +1170,239 @@ export class CToken extends Calldata<ICToken> {
         });
     }
 
+    // ── Simulation methods (eth_call, no transaction sent) ──────────────
+
+    async simulateDepositAndLeverage(
+        depositAmount: TokenInput,
+        borrow: BorrowableCToken,
+        multiplier: Decimal,
+        type: PositionManagerTypes,
+        slippage_: Percentage = Decimal(0.05)
+    ): Promise<{ success: boolean; error?: string }> {
+        try {
+            if(multiplier.lte(Decimal(1))) {
+                return { success: false, error: "Multiplier must be greater than 1" };
+            }
+
+            depositAmount = await this.ensureUnderlyingAmount(depositAmount, 'none');
+            const slippage = toBps(slippage_);
+            const manager = this.getPositionManager(type);
+            let calldata: bytes;
+
+            const depositAssets = FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals);
+            const { borrowAmount } = this.previewLeverageUp(multiplier, borrow, depositAssets);
+
+            switch(type) {
+                case 'simple': {
+                    const { action, quote } = await chain_config[setup_config.chain].dexAgg.quoteAction(
+                        manager.address,
+                        borrow.asset.address,
+                        this.asset.address,
+                        FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
+                        slippage
+                    );
+                    calldata = manager.getDepositAndLeverageCalldata(
+                        FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals),
+                        {
+                            borrowableCToken: borrow.address,
+                            borrowAssets: FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
+                            cToken: this.address,
+                            expectedShares: this.virtualConvertToShares(BigInt(quote.min_out)),
+                            swapAction: action,
+                            auxData: "0x",
+                        },
+                        FormatConverter.bpsToBpsWad(slippage));
+                    break;
+                }
+                case 'native-vault':
+                case 'vault': {
+                    calldata = manager.getDepositAndLeverageCalldata(
+                        FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals),
+                        {
+                            borrowableCToken: borrow.address,
+                            borrowAssets: FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
+                            cToken: this.address,
+                            expectedShares: await PositionManager.getVaultExpectedShares(this, borrow, borrowAmount),
+                            swapAction: PositionManager.emptySwapAction(),
+                            auxData: "0x",
+                        },
+                        FormatConverter.bpsToBpsWad(slippage));
+                    break;
+                }
+                default: return { success: false, error: "Unsupported position manager type" };
+            }
+
+            return this.simulateOracleRoute(calldata, { to: manager.address });
+        } catch (error: any) {
+            return { success: false, error: error?.reason || error?.message || String(error) };
+        }
+    }
+
+    async simulateLeverageUp(
+        borrow: BorrowableCToken,
+        newLeverage: Decimal,
+        type: PositionManagerTypes,
+        slippage_: Percentage = Decimal(0.05)
+    ): Promise<{ success: boolean; error?: string }> {
+        try {
+            validateProviderAsSigner(this.provider);
+            const slippage = FormatConverter.percentageToBps(slippage_);
+            const manager = this.getPositionManager(type);
+            let calldata: bytes;
+
+            const { borrowAmount } = this.previewLeverageUp(newLeverage, borrow);
+
+            switch(type) {
+                case 'simple': {
+                    const { action, quote } = await chain_config[setup_config.chain].dexAgg.quoteAction(
+                        manager.address,
+                        borrow.asset.address,
+                        this.asset.address,
+                        FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
+                        slippage
+                    );
+                    calldata = manager.getLeverageCalldata(
+                        {
+                            borrowableCToken: borrow.address,
+                            borrowAssets: FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
+                            cToken: this.address,
+                            expectedShares: this.virtualConvertToShares(BigInt(quote.min_out)),
+                            swapAction: action,
+                            auxData: "0x",
+                        },
+                        FormatConverter.bpsToBpsWad(slippage));
+                    break;
+                }
+                case 'native-vault':
+                case 'vault': {
+                    calldata = manager.getLeverageCalldata(
+                        {
+                            borrowableCToken: borrow.address,
+                            borrowAssets: FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
+                            cToken: this.address,
+                            expectedShares: await PositionManager.getVaultExpectedShares(this, borrow, borrowAmount),
+                            swapAction: PositionManager.emptySwapAction(),
+                            auxData: "0x",
+                        },
+                        FormatConverter.bpsToBpsWad(slippage));
+                    break;
+                }
+                default: return { success: false, error: "Unsupported position manager type" };
+            }
+
+            return this.simulateOracleRoute(calldata, { to: manager.address });
+        } catch (error: any) {
+            return { success: false, error: error?.reason || error?.message || String(error) };
+        }
+    }
+
+    async simulateLeverageDown(
+        borrowToken: BorrowableCToken,
+        currentLeverage: Decimal,
+        newLeverage: Decimal,
+        type: PositionManagerTypes,
+        slippage_: Percentage = Decimal(0.05)
+    ): Promise<{ success: boolean; error?: string }> {
+        try {
+            if(newLeverage.gte(currentLeverage)) {
+                return { success: false, error: "New leverage must be less than current leverage" };
+            }
+
+            validateProviderAsSigner(this.provider);
+            const config = getChainConfig();
+            const slippage = toBps(slippage_);
+            const manager = this.getPositionManager(type);
+            let calldata: bytes;
+
+            const { collateralAssetReduction } = this.previewLeverageDown(newLeverage, currentLeverage);
+            const repay_balance = newLeverage.equals(1) ? await borrowToken.fetchDebtBalanceAtTimestamp(100n, false) : null;
+            const collateralWithBuffer = collateralAssetReduction + (collateralAssetReduction * 10n / BPS);
+
+            switch(type) {
+                case 'simple': {
+                    const { action, quote } = await config.dexAgg.quoteAction(
+                        manager.address,
+                        this.asset.address,
+                        borrowToken.asset.address,
+                        newLeverage.equals(1) ? collateralWithBuffer : collateralAssetReduction,
+                        slippage
+                    );
+                    const minRepay = newLeverage.equals(1) ? repay_balance as bigint : quote.out - (BigInt(Decimal(quote.out).mul(.05).toFixed(0)));
+                    calldata = manager.getDeleverageCalldata({
+                        cToken: this.address,
+                        collateralAssets: newLeverage.equals(1) ? collateralWithBuffer : collateralAssetReduction,
+                        borrowableCToken: borrowToken.address,
+                        repayAssets: BigInt(minRepay),
+                        swapActions: [ action ],
+                        auxData: "0x",
+                    }, FormatConverter.bpsToBpsWad(slippage));
+                    break;
+                }
+                default: return { success: false, error: "Unsupported position manager type" };
+            }
+
+            return this.simulateOracleRoute(calldata, { to: manager.address });
+        } catch (error: any) {
+            return { success: false, error: error?.reason || error?.message || String(error) };
+        }
+    }
+
+    async simulateDeposit(
+        amount: TokenInput,
+        zap: ZapperInstructions = 'none',
+        receiver: address | null = null
+    ): Promise<{ success: boolean; error?: string }> {
+        try {
+            amount = await this.ensureUnderlyingAmount(amount, zap);
+            const signer = validateProviderAsSigner(this.provider);
+            receiver ??= signer.address as address;
+
+            const isZapping = typeof zap === 'object' && zap.type !== 'none';
+            const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
+            let zapAssets = depositAssets;
+            if (isZapping && (zap as any).inputToken) {
+                const inputErc20 = new ERC20(this.provider, (zap as any).inputToken as address);
+                const zapDecimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
+                zapAssets = FormatConverter.decimalToBigInt(amount, zapDecimals);
+            }
+
+            const default_calldata = this.getCallData("deposit", [depositAssets, receiver]);
+            const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, false, default_calldata);
+
+            return this.simulateOracleRoute(calldata, calldata_overrides);
+        } catch (error: any) {
+            return { success: false, error: error?.reason || error?.message || String(error) };
+        }
+    }
+
+    async simulateDepositAsCollateral(
+        amount: TokenInput,
+        zap: ZapperInstructions = 'none',
+        receiver: address | null = null
+    ): Promise<{ success: boolean; error?: string }> {
+        try {
+            amount = await this.ensureUnderlyingAmount(amount, zap);
+            const signer = validateProviderAsSigner(this.provider);
+            receiver ??= signer.address as address;
+
+            const isZapping = typeof zap === 'object' && zap.type !== 'none';
+            const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
+            let zapAssets = depositAssets;
+            if (isZapping && (zap as any).inputToken) {
+                const inputErc20 = new ERC20(this.provider, (zap as any).inputToken as address);
+                const zapDecimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
+                zapAssets = FormatConverter.decimalToBigInt(amount, zapDecimals);
+            }
+
+            const default_calldata = this.getCallData("depositAsCollateral", [depositAssets, receiver]);
+            const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, true, default_calldata);
+
+            return this.simulateOracleRoute(calldata, calldata_overrides);
+        } catch (error: any) {
+            return { success: false, error: error?.reason || error?.message || String(error) };
+        }
+    }
+
     async zap(assets: bigint, zap: ZapperInstructions, collateralize = false, default_calldata : bytes) {
         let calldata: bytes;
         let calldata_overrides = {};
@@ -1449,6 +1682,17 @@ export class CToken extends Calldata<ICToken> {
         await this.market.reloadUserData(signer.address as address);
 
         return tx;
+    }
+
+    async simulateOracleRoute(calldata: bytes, override: { [key: string]: any } = {}): Promise<{ success: boolean; error?: string }> {
+        const price_updates = await this.getPriceUpdates();
+
+        if(price_updates.length > 0) {
+            const token_action = this.buildMultiCallAction(calldata);
+            calldata = this.getCallData("multicall", [[...price_updates, token_action]]);
+        }
+
+        return this.simulateCallData(calldata, override);
     }
 
     async getPriceUpdates(): Promise<MulticallAction[]> {
