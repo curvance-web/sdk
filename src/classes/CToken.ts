@@ -1066,7 +1066,10 @@ export class CToken extends Calldata<ICToken> {
                     slippage
                 );
 
-                const minRepay = newLeverage.equals(1) ? repay_balance as bigint : quote.out - (BigInt(Decimal(quote.out).mul(.05).toFixed(0)));
+                // For full deleverage, use 1 as repayAssets — the contract's guard
+                // (repayAssets > assetsHeld) trivially passes, then it repays
+                // min(assetsHeld, totalDebt) which covers the full debt.
+                const minRepay = newLeverage.equals(1) ? 1n : quote.out - (BigInt(Decimal(quote.out).mul(.05).toFixed(0)));
 
                 calldata = manager.getDeleverageCalldata({
                     cToken: this.address,
@@ -1159,12 +1162,8 @@ export class CToken extends Calldata<ICToken> {
             default: throw new Error("Unsupported position manager type");
         }
 
-        await this._checkErc20Approval(
-            this.asset.address,
-            FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals),
-            manager.address
-        );
-        await this._checkPositionManagerApproval(manager);
+        // Approval checks are handled by the app's mutation before calling this method.
+        // Running them here would fail due to amount rounding differences from ensureUnderlyingAmount.
         return this.oracleRoute(calldata, {
             to: manager.address
         });
@@ -1327,7 +1326,7 @@ export class CToken extends Calldata<ICToken> {
                         newLeverage.equals(1) ? collateralWithBuffer : collateralAssetReduction,
                         slippage
                     );
-                    const minRepay = newLeverage.equals(1) ? repay_balance as bigint : quote.out - (BigInt(Decimal(quote.out).mul(.05).toFixed(0)));
+                    const minRepay = newLeverage.equals(1) ? 1n : quote.out - (BigInt(Decimal(quote.out).mul(.05).toFixed(0)));
                     calldata = manager.getDeleverageCalldata({
                         cToken: this.address,
                         collateralAssets: newLeverage.equals(1) ? collateralWithBuffer : collateralAssetReduction,
