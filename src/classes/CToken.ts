@@ -699,7 +699,7 @@ export class CToken extends Calldata<ICToken> {
         let asset: ERC20 | NativeToken;
 
         if(typeof zap === 'object') {
-            if(zap.type === 'native-vault' || zap.type === 'native-simple') {
+            if(zap.type === 'native-vault' || zap.type === 'native-simple' || zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
                 asset = new NativeToken(setup_config.chain, this.provider);
             } else {
                 asset = new ERC20(this.provider, zap.inputToken);
@@ -888,6 +888,16 @@ export class CToken extends Calldata<ICToken> {
         if(this.zapTypes.includes('simple')) {
             let dexAggSearch = await chain_config[setup_config.chain].dexAgg.getAvailableTokens(this.provider, search);
             tokens = tokens.concat(dexAggSearch.filter(token => !tokens_exclude.includes(token.interface.address.toLocaleLowerCase())));
+
+            // Add native MON as a zap option for any token with a simple zapper
+            // (not just wrapped native). The simple zapper handles wrapping + swapping.
+            if (!tokens_exclude.includes(NATIVE_ADDRESS.toLowerCase()) && !this.isWrappedNative) {
+                tokens.push({
+                    interface: new NativeToken(setup_config.chain, this.provider),
+                    type: 'simple'
+                });
+                tokens_exclude.push(NATIVE_ADDRESS.toLowerCase());
+            }
         }
 
         if(search) {
@@ -1441,7 +1451,8 @@ export class CToken extends Calldata<ICToken> {
             case 'simple':
                 if(inputToken == null) throw new Error("Input token must be provided for simple zap");
                 calldata = await zapper.getSimpleZapCalldata(this, inputToken, this.asset.address, assets, collateralize, slippage);
-                calldata_overrides = { to: zapper.address };
+                const isNativeSimpleZap = inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
+                calldata_overrides = isNativeSimpleZap ? { value: assets, to: zapper.address } : { to: zapper.address };
                 break;
             case 'vault':
                 calldata = await zapper.getVaultZapCalldata(this, assets, collateralize);
