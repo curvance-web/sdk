@@ -1065,34 +1065,62 @@ export class CToken extends Calldata<ICToken> {
         let calldata: bytes;
 
         const { collateralAssetReduction } = this.previewLeverageDown(newLeverage, currentLeverage);
-        const repay_balance = newLeverage.equals(1) ? await borrowToken.fetchDebtBalanceAtTimestamp(100n, false) : null;
-        // For full deleverage, use collateral reduction (in collateral token units) with buffer.
-        // repay_balance is in borrow token units — only valid for repayAssets, NOT for swap amountIn.
-        const collateralWithBuffer = collateralAssetReduction + (collateralAssetReduction * 10n / BPS);
+        const isFullDeleverage = newLeverage.equals(1);
+        const repay_balance = isFullDeleverage ? await borrowToken.fetchDebtBalanceAtTimestamp(100n, false) : null;
 
         switch(type) {
             case 'simple': {
+                let swapCollateral = collateralAssetReduction;
+
+                if (isFullDeleverage) {
+                    // For full deleverage: get initial quote, then scale collateral
+                    // so the swap output covers the full debt. This avoids a fixed
+                    // buffer that trips the on-chain slippage check.
+                    const initialQuote = await config.dexAgg.quote(
+                        manager.address,
+                        this.asset.address,
+                        borrowToken.asset.address,
+                        collateralAssetReduction,
+                        slippage
+                    );
+                    if (initialQuote.out < (repay_balance as bigint)) {
+                        // Scale up collateral proportionally: collateral * (debt / quoteOut)
+                        // Add 0.5% on top to account for execution vs quote difference
+                        swapCollateral = collateralAssetReduction * (repay_balance as bigint) * 1005n / (initialQuote.out * 1000n);
+                    }
+                }
+
                 const { action, quote } = await config.dexAgg.quoteAction(
                     manager.address,
                     this.asset.address,
                     borrowToken.asset.address,
-                    newLeverage.equals(1) ? collateralWithBuffer : collateralAssetReduction,
+                    swapCollateral,
                     slippage
                 );
 
-                // For full deleverage, use 1 as repayAssets — the contract's guard
+                // For full deleverage, repayAssets = 1: the contract's guard
                 // (repayAssets > assetsHeld) trivially passes, then it repays
                 // min(assetsHeld, totalDebt) which covers the full debt.
-                const minRepay = newLeverage.equals(1) ? 1n : quote.out - (BigInt(Decimal(quote.out).mul(.05).toFixed(0)));
+                // Excess borrow tokens are returned to the user.
+                const minRepay = isFullDeleverage ? 1n : quote.out - (BigInt(Decimal(quote.out).mul(.05).toFixed(0)));
+
+                // The contract's checkSlippage modifier is a sanity check on position value
+                // (before vs after). For full deleverage, oracle price updates in the same
+                // tx can cause apparent value change beyond the user's swap slippage.
+                // Add 50bps buffer to the contract-level check to account for oracle variance.
+                // The user's actual swap protection comes from the DEX quote slippage above.
+                const contractSlippage = isFullDeleverage
+                    ? slippage + 50n
+                    : slippage;
 
                 calldata = manager.getDeleverageCalldata({
                     cToken: this.address,
-                    collateralAssets: newLeverage.equals(1) ? collateralWithBuffer : collateralAssetReduction,
+                    collateralAssets: swapCollateral,
                     borrowableCToken: borrowToken.address,
                     repayAssets: BigInt(minRepay),
                     swapActions: [ action ],
                     auxData: "0x",
-                }, FormatConverter.bpsToBpsWad(slippage));
+                }, FormatConverter.bpsToBpsWad(contractSlippage));
 
                 break;
             }
@@ -1328,27 +1356,45 @@ export class CToken extends Calldata<ICToken> {
             let calldata: bytes;
 
             const { collateralAssetReduction } = this.previewLeverageDown(newLeverage, currentLeverage);
-            const repay_balance = newLeverage.equals(1) ? await borrowToken.fetchDebtBalanceAtTimestamp(100n, false) : null;
-            const collateralWithBuffer = collateralAssetReduction + (collateralAssetReduction * 10n / BPS);
+            const isFullDeleverage = newLeverage.equals(1);
+            const repay_balance = isFullDeleverage ? await borrowToken.fetchDebtBalanceAtTimestamp(100n, false) : null;
 
             switch(type) {
                 case 'simple': {
+                    let swapCollateral = collateralAssetReduction;
+
+                    if (isFullDeleverage) {
+                        const initialQuote = await config.dexAgg.quote(
+                            manager.address,
+                            this.asset.address,
+                            borrowToken.asset.address,
+                            collateralAssetReduction,
+                            slippage
+                        );
+                        if (initialQuote.out < (repay_balance as bigint)) {
+                            swapCollateral = collateralAssetReduction * (repay_balance as bigint) * 1005n / (initialQuote.out * 1000n);
+                        }
+                    }
+
                     const { action, quote } = await config.dexAgg.quoteAction(
                         manager.address,
                         this.asset.address,
                         borrowToken.asset.address,
-                        newLeverage.equals(1) ? collateralWithBuffer : collateralAssetReduction,
+                        swapCollateral,
                         slippage
                     );
-                    const minRepay = newLeverage.equals(1) ? 1n : quote.out - (BigInt(Decimal(quote.out).mul(.05).toFixed(0)));
+                    const minRepay = isFullDeleverage ? 1n : quote.out - (BigInt(Decimal(quote.out).mul(.05).toFixed(0)));
+                    const contractSlippage = isFullDeleverage
+                        ? slippage + 50n
+                        : slippage;
                     calldata = manager.getDeleverageCalldata({
                         cToken: this.address,
-                        collateralAssets: newLeverage.equals(1) ? collateralWithBuffer : collateralAssetReduction,
+                        collateralAssets: swapCollateral,
                         borrowableCToken: borrowToken.address,
                         repayAssets: BigInt(minRepay),
                         swapActions: [ action ],
                         auxData: "0x",
-                    }, FormatConverter.bpsToBpsWad(slippage));
+                    }, FormatConverter.bpsToBpsWad(contractSlippage));
                     break;
                 }
                 default: return { success: false, error: "Unsupported position manager type" };
