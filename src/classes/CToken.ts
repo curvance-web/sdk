@@ -725,8 +725,12 @@ export class CToken extends Calldata<ICToken> {
         // Use the zap input token's decimals when zapping, otherwise the deposit token's decimals
         let decimals = this.asset.decimals;
         if (isZapping && zap.inputToken) {
-            const inputErc20 = new ERC20(this.provider, zap.inputToken as address);
-            decimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
+            if (zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
+                decimals = 18n;
+            } else {
+                const inputErc20 = new ERC20(this.provider, zap.inputToken as address);
+                decimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
+            }
         }
 
         const assets = FormatConverter.decimalToBigInt(amount, decimals);
@@ -1360,9 +1364,12 @@ export class CToken extends Calldata<ICToken> {
             const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
             let zapAssets = depositAssets;
             if (isZapping && (zap as any).inputToken) {
-                const inputErc20 = new ERC20(this.provider, (zap as any).inputToken as address);
-                const zapDecimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
-                zapAssets = FormatConverter.decimalToBigInt(amount, zapDecimals);
+                const isNative = (zap as any).inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
+                const zapDecimals = isNative ? 18n : (() => {
+                    const inputErc20 = new ERC20(this.provider, (zap as any).inputToken as address);
+                    return inputErc20.decimals ?? inputErc20.contract.decimals();
+                })();
+                zapAssets = FormatConverter.decimalToBigInt(amount, await zapDecimals);
             }
 
             const default_calldata = this.getCallData("deposit", [depositAssets, receiver]);
@@ -1388,9 +1395,12 @@ export class CToken extends Calldata<ICToken> {
             const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
             let zapAssets = depositAssets;
             if (isZapping && (zap as any).inputToken) {
-                const inputErc20 = new ERC20(this.provider, (zap as any).inputToken as address);
-                const zapDecimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
-                zapAssets = FormatConverter.decimalToBigInt(amount, zapDecimals);
+                const isNative = (zap as any).inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
+                const zapDecimals = isNative ? 18n : (() => {
+                    const inputErc20 = new ERC20(this.provider, (zap as any).inputToken as address);
+                    return inputErc20.decimals ?? inputErc20.contract.decimals();
+                })();
+                zapAssets = FormatConverter.decimalToBigInt(amount, await zapDecimals);
             }
 
             const default_calldata = this.getCallData("depositAsCollateral", [depositAssets, receiver]);
@@ -1462,9 +1472,13 @@ export class CToken extends Calldata<ICToken> {
         const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
         let zapAssets = depositAssets;
         if (isZapping && zap.inputToken) {
-            const inputErc20 = new ERC20(this.provider, zap.inputToken as address);
-            const zapDecimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
-            zapAssets = FormatConverter.decimalToBigInt(amount, zapDecimals);
+            if (zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
+                zapAssets = FormatConverter.decimalToBigInt(amount, 18n);
+            } else {
+                const inputErc20 = new ERC20(this.provider, zap.inputToken as address);
+                const zapDecimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
+                zapAssets = FormatConverter.decimalToBigInt(amount, zapDecimals);
+            }
         }
         const zapType = typeof zap == 'object' ? zap.type : zap;
         const isNative = zapType == 'native-simple' || zapType == 'native-vault' || zapType == 'none'
@@ -1500,9 +1514,13 @@ export class CToken extends Calldata<ICToken> {
         const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
         let zapAssets = depositAssets;
         if (isZapping && zap.inputToken) {
-            const inputErc20 = new ERC20(this.provider, zap.inputToken as address);
-            const zapDecimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
-            zapAssets = FormatConverter.decimalToBigInt(amount, zapDecimals);
+            if (zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
+                zapAssets = FormatConverter.decimalToBigInt(amount, 18n);
+            } else {
+                const inputErc20 = new ERC20(this.provider, zap.inputToken as address);
+                const zapDecimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
+                zapAssets = FormatConverter.decimalToBigInt(amount, zapDecimals);
+            }
         }
 
         if (!isZapping) {
