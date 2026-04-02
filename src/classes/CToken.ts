@@ -150,7 +150,13 @@ export class CToken extends Calldata<ICToken> {
     get isBorrowable() { return this.cache.isBorrowable; }
     get exchangeRate() { return this.cache.exchangeRate; }
     get canZap() { return this.zapTypes.length > 0; }
-    get maxLeverage() { return Decimal(this.cache.maxLeverage).div(BPS); }
+    get maxLeverage() {
+        // Cap max leverage slightly below theoretical max (1% of leverage factor)
+        // to account for share rounding and fee losses that prevent reaching the exact max.
+        const theoretical = Decimal(this.cache.maxLeverage).div(BPS);
+        const factor = theoretical.sub(1);
+        return Decimal(1).add(factor.mul(Decimal(0.99)));
+    }
     get canLeverage() { return this.leverageTypes.length > 0; }
     get totalAssets() { return this.cache.totalAssets; }
     get totalSupply() { return this.cache.totalSupply; }
@@ -921,6 +927,20 @@ export class CToken extends Calldata<ICToken> {
         )
     }
 
+    /**
+     * Compute slippage BPS for the contract's checkSlippage modifier when leveraging up.
+     * Share rounding (vault + cToken) causes equity loss ≈ 20bps × (leverage - 1).
+     * The user's swap slippage is preserved for DEX protection; this adds a buffer
+     * so the on-chain sanity check doesn't reject legitimate leverage operations.
+     */
+    private _leverageUpSlippage(slippage: bigint, leverage: Decimal): bigint {
+        const leverageFactor = leverage.sub(1);
+        if (leverageFactor.lte(0)) return slippage;
+        // ~20bps per unit of leverage factor for rounding losses
+        const buffer = BigInt(leverageFactor.mul(20).ceil().toFixed(0));
+        return slippage + buffer;
+    }
+
     previewLeverageUp(newLeverage: Decimal, borrow: BorrowableCToken, depositAmount?: bigint) {
         const currentLeverage = this.getLeverage() ?? Decimal(0);
         if(newLeverage.lte(currentLeverage)) {
@@ -928,14 +948,21 @@ export class CToken extends Calldata<ICToken> {
         }
         
         if(newLeverage.gt(this.maxLeverage)) {
-            throw new Error(`New leverage must be less than max leverage of ${this.maxLeverage.toFixed(2)}x`);
+            newLeverage = this.maxLeverage;
         }
 
         const collateralAvail = this.cache.userCollateral + (depositAmount ? depositAmount : BigInt(0));
         const collateralInUsd = this.convertTokensToUsd(collateralAvail, false);
         const currentDebt     = this.market.userDebt;
         const notional        = collateralInUsd.sub(currentDebt);
-        const newDebtInUsd    = notional.mul(newLeverage).sub(notional);
+        // Cap effective leverage slightly below target to account for protocol
+        // leverage fee and rounding losses. The fee reduces collateral gained
+        // relative to debt incurred, causing equity loss ≈ fee% × (leverage-1).
+        // Capping at 98% of the leverage factor ensures the on-chain slippage
+        // check passes even at max leverage.
+        const leverageFactor  = newLeverage.sub(1);
+        const effectiveLeverage = Decimal(1).add(leverageFactor.mul(Decimal(0.99)));
+        const newDebtInUsd    = notional.mul(effectiveLeverage).sub(notional);
         const borrowPrice     = borrow.getPrice(true);
         const borrowAmount    = newDebtInUsd.sub(currentDebt).div(borrowPrice);
 
@@ -989,7 +1016,7 @@ export class CToken extends Calldata<ICToken> {
         slippage_: Percentage = Decimal(0.05)
     ) {
         validateProviderAsSigner(this.provider);
-        const slippage = FormatConverter.percentageToBps(slippage_);
+        const slippage = this._leverageUpSlippage(FormatConverter.percentageToBps(slippage_), newLeverage);
         const manager = this.getPositionManager(type);
 
         let calldata: bytes;
@@ -1147,7 +1174,7 @@ export class CToken extends Calldata<ICToken> {
         }
 
         depositAmount = await this.ensureUnderlyingAmount(depositAmount, 'none');
-        const slippage = toBps(slippage_);
+        const slippage = this._leverageUpSlippage(toBps(slippage_), multiplier);
         const manager = this.getPositionManager(type);
 
         let calldata: bytes;
@@ -1226,7 +1253,7 @@ export class CToken extends Calldata<ICToken> {
             }
 
             depositAmount = await this.ensureUnderlyingAmount(depositAmount, 'none');
-            const slippage = toBps(slippage_);
+            const slippage = this._leverageUpSlippage(toBps(slippage_), multiplier);
             const manager = this.getPositionManager(type);
             let calldata: bytes;
 
@@ -1287,7 +1314,7 @@ export class CToken extends Calldata<ICToken> {
     ): Promise<{ success: boolean; error?: string }> {
         try {
             validateProviderAsSigner(this.provider);
-            const slippage = FormatConverter.percentageToBps(slippage_);
+            const slippage = this._leverageUpSlippage(FormatConverter.percentageToBps(slippage_), newLeverage);
             const manager = this.getPositionManager(type);
             let calldata: bytes;
 
