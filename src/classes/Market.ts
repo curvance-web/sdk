@@ -439,8 +439,12 @@ export class Market {
         // Leverage up: borrowed tokens are swapped into collateral asset and deposited.
         // Both collateral and debt increase. Compute the collateral increase from
         // the borrow amount via USD conversion so the on-chain reader sees both sides.
+        // Reduce collateral by a leverage-scaled factor to account for protocol fee +
+        // share rounding losses that compound with each unit of leverage.
+        const leverageFactor = newLeverage.sub(1);
+        const collateralLoss = Decimal(1).sub(leverageFactor.mul(Decimal(0.005)));
         const borrowUsd = borrowAmount.mul(borrow_ctoken.getPrice(true));
-        const collateralIncrease = borrowUsd.div(deposit_ctoken.getPrice(true));
+        const collateralIncrease = borrowUsd.div(deposit_ctoken.getPrice(true)).mul(collateralLoss);
 
         return this.previewPositionHealth(
             deposit_ctoken,
