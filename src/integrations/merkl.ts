@@ -1,4 +1,4 @@
-const MERKL_API_BASE_URL = 'https://api-merkl.angle.money/v4';
+const MERKL_API_BASE_URL = 'https://api.merkl.xyz/v4';
 const PROTOCOL_ID = 'curvance';
 
 export type MerklChainInfo = {

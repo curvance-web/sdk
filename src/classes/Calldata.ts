@@ -19,4 +19,19 @@ export abstract class Calldata<T> {
             ...overrides
         });
     }
+
+    async simulateCallData(calldata: bytes, overrides: { [key: string]: any } = {}): Promise<{ success: boolean; error?: string }> {
+        const signer = validateProviderAsSigner(this.provider);
+        try {
+            await signer.call({
+                to: this.address,
+                data: calldata,
+                from: signer.address,
+                ...overrides
+            });
+            return { success: true };
+        } catch (error: any) {
+            return { success: false, error: error?.reason || error?.message || String(error) };
+        }
+    }
 }

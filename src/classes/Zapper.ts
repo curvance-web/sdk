@@ -59,15 +59,21 @@ export class Zapper extends Calldata<IZapper> {
     }
 
     async getSimpleZapCalldata(ctoken: CToken, inputToken: address, outputToken: address, amount: bigint, collateralize: boolean, slippage: bigint) {
-        if(inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
+        const isNative = inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
+        const config = getChainConfig();
+
+        // For native MON: if the deposit token IS wrapped native, just wrap (no swap needed)
+        if (isNative && outputToken.toLowerCase() === config.wrapped_native.toLowerCase()) {
             return this.getNativeZapCalldata(ctoken, amount, collateralize, true);
         }
 
-        const config = getChainConfig();
-        const quote = await config.dexAgg.quote(this.address, inputToken, outputToken, amount, slippage);
+        // For native MON into non-WMON tokens: wrap first, then swap WMON → target
+        // The contract handles wrapping when depositAsWrappedNative=true
+        const swapInputToken = isNative ? config.wrapped_native as address : inputToken;
+        const quote = await config.dexAgg.quote(this.address, swapInputToken, outputToken, amount, slippage);
 
         const swap: Swap = {
-            inputToken: inputToken,
+            inputToken: isNative ? NATIVE_ADDRESS : inputToken,
             inputAmount: amount,
             outputToken: outputToken,
             target: quote.to,
@@ -79,7 +85,7 @@ export class Zapper extends Calldata<IZapper> {
 
         return this.getCallData("swapAndDeposit", [
             ctoken.address,
-            false,
+            isNative,
             swap,
             expected_shares,
             collateralize,
