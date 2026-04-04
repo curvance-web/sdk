@@ -442,7 +442,15 @@ export class Market {
         // Use price-based conversion for collateral increase — this matches how the
         // on-chain health reader values positions (via oracle prices, not vault rates).
         const borrowUsd = borrowAmount.mul(borrow_ctoken.getPrice(true));
-        const collateralIncrease = borrowUsd.div(deposit_ctoken.getPrice(true));
+        const collateralFromBorrow = borrowUsd.div(deposit_ctoken.getPrice(true));
+
+        // Total collateral increase = initial deposit + borrowed amount swapped to collateral.
+        // The on-chain reader starts from the user's current position, so the deposit
+        // must be included or the preview will undercount collateral (showing ~0% health).
+        const depositInTokens = depositAssets
+            ? FormatConverter.bigIntToDecimal(depositAssets, deposit_ctoken.asset.decimals)
+            : Decimal(0);
+        const collateralIncrease = collateralFromBorrow.add(depositInTokens);
 
         return this.previewPositionHealth(
             deposit_ctoken,
