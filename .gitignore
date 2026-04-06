@@ -1,6 +1,6 @@
 .env
 node_modules
-# dist - TEMPORARILY COMMENT FOR TESTING. REMOVE BEFORE MERGING
+dist
 output
 storage
 diff.diff
