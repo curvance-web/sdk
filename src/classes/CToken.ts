@@ -1396,15 +1396,11 @@ export class CToken extends Calldata<ICToken> {
         if(isNative) {
             await this._checkAssetApproval(depositAssets);
         } else {
-            const isApproved = await this.isZapAssetApproved(zap, zapAssets);
-            if(!isApproved) {
-                throw new Error(`Zap asset is not approved for the plugin. Call approveZapAsset() first.`);
-            }
             const zapper = this.getZapper(zapType);
             if(!zapper) {
                 throw new Error(`No zapper contract found for type '${zapType}' on ${this.symbol}`);
             }
-            await this._checkZapperApproval(zapper);
+            await this._checkDepositApprovals(zapper, zapAssets);
         }
 
         return this.oracleRoute(calldata, calldata_overrides);
