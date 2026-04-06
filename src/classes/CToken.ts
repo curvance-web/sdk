@@ -122,7 +122,8 @@ export class CToken extends Calldata<ICToken> {
             'cezETH',
             'csyzUSD',
             'cearnAUSD',
-            'cYZM'
+            'cYZM',
+            'cvUSD'
         ].includes(this.symbol)) {
             return;
         }
