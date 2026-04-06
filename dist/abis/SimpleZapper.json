@@ -1,0 +1,478 @@
+[
+    {
+        "type": "constructor",
+        "inputs": [
+            {
+                "name": "cr",
+                "type": "address",
+                "internalType": "contract ICentralRegistry"
+            },
+            {
+                "name": "wNative",
+                "type": "address",
+                "internalType": "address"
+            }
+        ],
+        "stateMutability": "nonpayable"
+    },
+    {
+        "type": "receive",
+        "stateMutability": "payable"
+    },
+    {
+        "type": "function",
+        "name": "centralRegistry",
+        "inputs": [],
+        "outputs": [
+            {
+                "name": "",
+                "type": "address",
+                "internalType": "contract ICentralRegistry"
+            }
+        ],
+        "stateMutability": "view"
+    },
+    {
+        "type": "function",
+        "name": "multicall",
+        "inputs": [
+            {
+                "name": "calls",
+                "type": "tuple[]",
+                "internalType": "struct Multicall.MulticallAction[]",
+                "components": [
+                    {
+                        "name": "target",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "isPriceUpdate",
+                        "type": "bool",
+                        "internalType": "bool"
+                    },
+                    {
+                        "name": "data",
+                        "type": "bytes",
+                        "internalType": "bytes"
+                    }
+                ]
+            }
+        ],
+        "outputs": [
+            {
+                "name": "results",
+                "type": "bytes[]",
+                "internalType": "bytes[]"
+            }
+        ],
+        "stateMutability": "nonpayable"
+    },
+    {
+        "type": "function",
+        "name": "redeemAndSwap",
+        "inputs": [
+            {
+                "name": "redeemAction",
+                "type": "tuple",
+                "internalType": "struct BaseZapper.RedeemAction",
+                "components": [
+                    {
+                        "name": "cToken",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "shares",
+                        "type": "uint256",
+                        "internalType": "uint256"
+                    },
+                    {
+                        "name": "forceRedeemCollateral",
+                        "type": "bool",
+                        "internalType": "bool"
+                    }
+                ]
+            },
+            {
+                "name": "swapAction",
+                "type": "tuple",
+                "internalType": "struct SwapperLib.Swap",
+                "components": [
+                    {
+                        "name": "inputToken",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "inputAmount",
+                        "type": "uint256",
+                        "internalType": "uint256"
+                    },
+                    {
+                        "name": "outputToken",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "target",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "slippage",
+                        "type": "uint256",
+                        "internalType": "uint256"
+                    },
+                    {
+                        "name": "call",
+                        "type": "bytes",
+                        "internalType": "bytes"
+                    }
+                ]
+            },
+            {
+                "name": "receiver",
+                "type": "address",
+                "internalType": "address"
+            }
+        ],
+        "outputs": [
+            {
+                "name": "outAmount",
+                "type": "uint256",
+                "internalType": "uint256"
+            }
+        ],
+        "stateMutability": "nonpayable"
+    },
+    {
+        "type": "function",
+        "name": "redeemSwapAndDeposit",
+        "inputs": [
+            {
+                "name": "cToken",
+                "type": "address",
+                "internalType": "address"
+            },
+            {
+                "name": "redeemAction",
+                "type": "tuple",
+                "internalType": "struct BaseZapper.RedeemAction",
+                "components": [
+                    {
+                        "name": "cToken",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "shares",
+                        "type": "uint256",
+                        "internalType": "uint256"
+                    },
+                    {
+                        "name": "forceRedeemCollateral",
+                        "type": "bool",
+                        "internalType": "bool"
+                    }
+                ]
+            },
+            {
+                "name": "swapAction",
+                "type": "tuple",
+                "internalType": "struct SwapperLib.Swap",
+                "components": [
+                    {
+                        "name": "inputToken",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "inputAmount",
+                        "type": "uint256",
+                        "internalType": "uint256"
+                    },
+                    {
+                        "name": "outputToken",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "target",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "slippage",
+                        "type": "uint256",
+                        "internalType": "uint256"
+                    },
+                    {
+                        "name": "call",
+                        "type": "bytes",
+                        "internalType": "bytes"
+                    }
+                ]
+            },
+            {
+                "name": "expectedShares",
+                "type": "uint256",
+                "internalType": "uint256"
+            },
+            {
+                "name": "collateralizeFor",
+                "type": "bool",
+                "internalType": "bool"
+            },
+            {
+                "name": "receiver",
+                "type": "address",
+                "internalType": "address"
+            }
+        ],
+        "outputs": [
+            {
+                "name": "outAmount",
+                "type": "uint256",
+                "internalType": "uint256"
+            }
+        ],
+        "stateMutability": "nonpayable"
+    },
+    {
+        "type": "function",
+        "name": "swapAndDeposit",
+        "inputs": [
+            {
+                "name": "cToken",
+                "type": "address",
+                "internalType": "address"
+            },
+            {
+                "name": "depositAsWrappedNative",
+                "type": "bool",
+                "internalType": "bool"
+            },
+            {
+                "name": "swapAction",
+                "type": "tuple",
+                "internalType": "struct SwapperLib.Swap",
+                "components": [
+                    {
+                        "name": "inputToken",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "inputAmount",
+                        "type": "uint256",
+                        "internalType": "uint256"
+                    },
+                    {
+                        "name": "outputToken",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "target",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "slippage",
+                        "type": "uint256",
+                        "internalType": "uint256"
+                    },
+                    {
+                        "name": "call",
+                        "type": "bytes",
+                        "internalType": "bytes"
+                    }
+                ]
+            },
+            {
+                "name": "expectedShares",
+                "type": "uint256",
+                "internalType": "uint256"
+            },
+            {
+                "name": "collateralizeFor",
+                "type": "bool",
+                "internalType": "bool"
+            },
+            {
+                "name": "receiver",
+                "type": "address",
+                "internalType": "address"
+            }
+        ],
+        "outputs": [
+            {
+                "name": "outAmount",
+                "type": "uint256",
+                "internalType": "uint256"
+            }
+        ],
+        "stateMutability": "payable"
+    },
+    {
+        "type": "function",
+        "name": "swapAndRepay",
+        "inputs": [
+            {
+                "name": "borrowableCToken",
+                "type": "address",
+                "internalType": "address"
+            },
+            {
+                "name": "depositAsWrappedNative",
+                "type": "bool",
+                "internalType": "bool"
+            },
+            {
+                "name": "swapAction",
+                "type": "tuple",
+                "internalType": "struct SwapperLib.Swap",
+                "components": [
+                    {
+                        "name": "inputToken",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "inputAmount",
+                        "type": "uint256",
+                        "internalType": "uint256"
+                    },
+                    {
+                        "name": "outputToken",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "target",
+                        "type": "address",
+                        "internalType": "address"
+                    },
+                    {
+                        "name": "slippage",
+                        "type": "uint256",
+                        "internalType": "uint256"
+                    },
+                    {
+                        "name": "call",
+                        "type": "bytes",
+                        "internalType": "bytes"
+                    }
+                ]
+            },
+            {
+                "name": "repayAssets",
+                "type": "uint256",
+                "internalType": "uint256"
+            },
+            {
+                "name": "receiver",
+                "type": "address",
+                "internalType": "address"
+            }
+        ],
+        "outputs": [
+            {
+                "name": "outAmount",
+                "type": "uint256",
+                "internalType": "uint256"
+            }
+        ],
+        "stateMutability": "payable"
+    },
+    {
+        "type": "function",
+        "name": "wrappedNative",
+        "inputs": [],
+        "outputs": [
+            {
+                "name": "",
+                "type": "address",
+                "internalType": "address"
+            }
+        ],
+        "stateMutability": "view"
+    },
+    {
+        "type": "error",
+        "name": "BaseZapper__ExecutionError",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "BaseZapper__InsufficientAssetsForRepayment",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "BaseZapper__InvalidRepaymentAmount",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "BaseZapper__Unauthorized",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "BaseZapper__UnderlyingTokenIsNotInputToken",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "CentralRegistryLib__InvalidCentralRegistry",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "LowLevelCallsHelper__CallFailed",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "LowLevelCallsHelper__InsufficientBalance",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "Multicall__InvalidTarget",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "Multicall__UnknownCalldata",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "Reentrancy",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "SwapperLib__SameTokens",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "SwapperLib__Slippage",
+        "inputs": [
+            {
+                "name": "slippage",
+                "type": "uint256",
+                "internalType": "uint256"
+            }
+        ]
+    },
+    {
+        "type": "error",
+        "name": "SwapperLib__UnknownCalldata",
+        "inputs": []
+    }
+]

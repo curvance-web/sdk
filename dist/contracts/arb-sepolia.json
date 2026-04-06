@@ -1,0 +1,44 @@
+{
+    "CentralRegistry": "0xC7B36473cb7F4BC0b2F47376623615Da4e6fE57D",
+    "OracleManager": "0x440d0CC7ACC38DDA1E0E2E1DDa226EB44A72d4eE",
+    "adaptors": {
+        "ChainlinkAdaptor": "0x38c37f57a3b5c26B344671FdF3C3162BaCDA7bBa",
+        "RedstoneClassicAdaptor": "0x6a0bf34856F6B9cb42867aC0a6b9Dc9e49a0b2Ba",
+        "RedstoneCoreAdaptor": "0xD44861cF7ff4eCEe3d227a0e67E2e60244456E27"
+    },
+    "calldataCheckers": {
+        "RedstoneAdaptorMulticallChecker": "0x81607179829EFA9735E7413090Db247cFb6231E1"
+    },
+    "zappers": {
+        "nativeVaultZapper": "0xbDa98B38aFc8433a07bf291787A10c7470E3fA06",
+        "vaultZapper": "0x24cE639C53a1A0eCB0d5209fc8F548ceBbfF534A",
+        "simpleZapper": "0xCD602E77913114fd29CA5da0898c49996d504B13"
+    },
+    "MockOracle": "0x7f2b026da1e31109b7049DeeCb5aa852a1f2a728",
+    "USDC": "0xFAf10acC86Dd587B1a75B832FCeB01B2fe3379Db",
+    "AUSD": "0x2220a895C3B943838F606C67B488fec9FE9ADa4b",
+    "BTC": "0x955Cd836061481131b35Ac114ef96e17f9D1D402",
+    "ETH": "0xa0EF95Df879E7958281404B44f2065A72cF4A8FA",
+    "Faucet": "0xa47b3c31aeB952E60332869F7ED6F44D14890375",
+    "markets": {
+        "Stable Market": {
+            "address": "0x8fe35902B67D81c94CF81fd9a96558e8349215F5",
+            "USDC-DynamicIRM": "0x2a5d40ccbD99cf6aC202A32725e2E1680bd3B2A0",
+            "tokens": {
+                "USDC": "0x4Fd99EFd43d66F0eF854Ca58Ec0c9b9950514aF3",
+                "AUSD": "0xC9cfa1ABf23F672a0a75eC567cE13619d0062CAD"
+            },
+            "AUSD-DynamicIRM": "0xa8CAc481f9f8D690609f4A1EF1C32d58cFC687F0"
+        },
+        "Volatile Market": {
+            "address": "0x405793BfAC1A82F056fdE8A71580FCeDa68Ef8d6",
+            "BTC-DynamicIRM": "0xA6D76582F0cBaaBB512edCeB138c106185C8f0c6",
+            "tokens": {
+                "BTC": "0xe98D2e7EB66e504e26Dbc208601cb04F31652AA5",
+                "ETH": "0x79049726F807407eEa9eFc49DEa4010332Aa6d7f"
+            },
+            "ETH-DynamicIRM": "0xFae2a261D376acDCcf5fe6D63944650209f22C2C"
+        }
+    },
+    "ProtocolReader": "0xC57e4e42278CA815C5717eFA84a536f30Ee49637"
+}
