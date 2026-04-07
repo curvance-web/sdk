@@ -6,6 +6,7 @@ import { OracleManager } from "./classes/OracleManager";
 import { wrapProviderWithRetries } from "./retry-provider";
 import { chain_config } from "./chains";
 import { Api } from "./classes/Api";
+import { validateApiUrl } from "./validation";
 
 export let setup_config: {
     chain: ChainRpcPrefix;
@@ -21,6 +22,9 @@ export async function setupChain(chain: ChainRpcPrefix, provider: curvance_provi
     if(!(chain in chain_config)) {
         throw new Error("Chain does not have a corresponding config");
     }
+
+    // Validate api_url scheme before any network calls
+    validateApiUrl(api_url);
 
     if(provider == null) {
         provider = chain_config[chain].provider!;

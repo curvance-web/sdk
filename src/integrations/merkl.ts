@@ -1,3 +1,5 @@
+import { fetchWithTimeout } from "../validation";
+
 const MERKL_API_BASE_URL = 'https://api.merkl.xyz/v4';
 const PROTOCOL_ID = 'curvance';
 
@@ -101,7 +103,7 @@ export async function fetchMerklUserRewards({
 }: FetchRewardsParams): Promise<MerklUserRewardsResponse> {
     const url = new URL(`${MERKL_API_BASE_URL}/users/${wallet}/rewards?chainId=${chainId}`);
 
-    const response = await fetch(url.toString(), { signal: signal ?? null, cache: 'no-store' });
+    const response = await fetchWithTimeout(url.toString(), { signal: signal ?? null, cache: 'no-store' });
 
     if (!response.ok) {
         throw new Error('Failed to fetch Merkl rewards');
@@ -121,7 +123,7 @@ export async function fetchMerklCampaignsBySymbol({
     const url = new URL(`${MERKL_API_BASE_URL}/campaigns`);
     url.searchParams.set('tokenSymbol', tokenSymbol);
 
-    const response = await fetch(url.toString(), { signal: signal ?? null, cache: 'no-store' });
+    const response = await fetchWithTimeout(url.toString(), { signal: signal ?? null, cache: 'no-store' });
 
     if (!response.ok) {
         throw new Error('Failed to fetch Merkl campaigns');
@@ -144,7 +146,7 @@ export async function fetchMerklOpportunities({
         url.searchParams.set('action', action);
     }
 
-    const response = await fetch(url.toString(), { signal: signal ?? null, cache: 'no-store' });
+    const response = await fetchWithTimeout(url.toString(), { signal: signal ?? null, cache: 'no-store' });
 
     if (!response.ok) {
         throw new Error('Failed to fetch Merkl opportunities');
