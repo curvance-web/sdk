@@ -122,7 +122,9 @@ export class CToken extends Calldata<ICToken> {
             'cezETH',
             'csyzUSD',
             'cearnAUSD',
-            'cYZM'
+            'cYZM',
+            'cvUSD',
+            'ceBTC'
         ].includes(this.symbol)) {
             return;
         }
@@ -961,17 +963,25 @@ export class CToken extends Calldata<ICToken> {
         // Capping at 98% of the leverage factor ensures the on-chain slippage
         // check passes even at max leverage.
         const leverageFactor  = newLeverage.sub(1);
-        const effectiveLeverage = Decimal(1).add(leverageFactor.mul(Decimal(0.99)));
-        const newDebtInUsd    = notional.mul(effectiveLeverage).sub(notional);
         const borrowPrice     = borrow.getPrice(true);
-        const borrowAmount    = newDebtInUsd.sub(currentDebt).div(borrowPrice);
 
-        const newCollateralInUsd = notional.add(newDebtInUsd);
+        // Raw borrow amount — what the user actually owes as debt
+        const rawDebtInUsd    = notional.mul(newLeverage).sub(notional);
+        const rawBorrowAmount = rawDebtInUsd.sub(currentDebt).div(borrowPrice);
 
-        return { 
+        // Reduced borrow amount — what we send to the contract to avoid
+        // tripping the on-chain slippage check at max leverage
+        const effectiveLeverage = Decimal(1).add(leverageFactor.mul(Decimal(0.99)));
+        const effectiveDebtInUsd = notional.mul(effectiveLeverage).sub(notional);
+        const borrowAmount    = effectiveDebtInUsd.sub(currentDebt).div(borrowPrice);
+
+        const newCollateralInUsd = notional.add(rawDebtInUsd);
+
+        return {
             borrowAmount,
-            newDebt: newDebtInUsd,
-            newDebtInAssets: borrow.convertUsdToTokens(newDebtInUsd, true),
+            rawBorrowAmount,
+            newDebt: rawDebtInUsd,
+            newDebtInAssets: borrow.convertUsdToTokens(rawDebtInUsd, true),
             newCollateral: newCollateralInUsd,
             newCollateralInAssets: this.convertUsdToTokens(newCollateralInUsd, true)
         };
@@ -1388,15 +1398,11 @@ export class CToken extends Calldata<ICToken> {
         if(isNative) {
             await this._checkAssetApproval(depositAssets);
         } else {
-            const isApproved = await this.isZapAssetApproved(zap, zapAssets);
-            if(!isApproved) {
-                throw new Error(`Zap asset is not approved for the plugin. Call approveZapAsset() first.`);
-            }
             const zapper = this.getZapper(zapType);
             if(!zapper) {
                 throw new Error(`No zapper contract found for type '${zapType}' on ${this.symbol}`);
             }
-            await this._checkZapperApproval(zapper);
+            await this._checkDepositApprovals(zapper, zapAssets);
         }
 
         return this.oracleRoute(calldata, calldata_overrides);

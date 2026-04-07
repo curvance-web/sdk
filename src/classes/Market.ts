@@ -418,7 +418,7 @@ export class Market {
 
         const { collateralAssetReduction } = deposit_ctoken.previewLeverageDown(newLeverage, currentLeverage);
         const repayUsd = deposit_ctoken.convertTokensToUsd(collateralAssetReduction, true);
-        const repayTokens = borrow_ctoken.convertUsdToTokens(repayUsd, false);
+        const repayTokens = borrow_ctoken.convertUsdToTokens(repayUsd, true);
 
         return this.previewPositionHealth(
             deposit_ctoken,
@@ -433,18 +433,24 @@ export class Market {
     async previewPositionHealthLeverageUp(
         deposit_ctoken: CToken,
         borrow_ctoken: BorrowableCToken,
-        newLeverage: Decimal
+        newLeverage: Decimal,
+        depositAssets?: bigint
     ) {
-        const { borrowAmount } = deposit_ctoken.previewLeverageUp(newLeverage, borrow_ctoken);
-        // Leverage up: borrowed tokens are swapped into collateral asset and deposited.
-        // Both collateral and debt increase. Compute the collateral increase from
-        // the borrow amount via USD conversion so the on-chain reader sees both sides.
-        // Reduce collateral by a leverage-scaled factor to account for protocol fee +
-        // share rounding losses that compound with each unit of leverage.
-        const leverageFactor = newLeverage.sub(1);
-        const collateralLoss = Decimal(1).sub(leverageFactor.mul(Decimal(0.005)));
+        const { borrowAmount } = deposit_ctoken.previewLeverageUp(newLeverage, borrow_ctoken, depositAssets);
+        // borrowAmount is the reduced amount sent to the contract — this is both
+        // what enters the vault/swap (becomes collateral) and what the user owes (debt).
+        // Use price-based conversion for collateral increase — this matches how the
+        // on-chain health reader values positions (via oracle prices, not vault rates).
         const borrowUsd = borrowAmount.mul(borrow_ctoken.getPrice(true));
-        const collateralIncrease = borrowUsd.div(deposit_ctoken.getPrice(true)).mul(collateralLoss);
+        const collateralFromBorrow = borrowUsd.div(deposit_ctoken.getPrice(true));
+
+        // Total collateral increase = initial deposit + borrowed amount swapped to collateral.
+        // The on-chain reader starts from the user's current position, so the deposit
+        // must be included or the preview will undercount collateral (showing ~0% health).
+        const depositInTokens = depositAssets
+            ? FormatConverter.bigIntToDecimal(depositAssets, deposit_ctoken.asset.decimals)
+            : Decimal(0);
+        const collateralIncrease = collateralFromBorrow.add(depositInTokens);
 
         return this.previewPositionHealth(
             deposit_ctoken,
@@ -479,8 +485,12 @@ export class Market {
         const provider = validateProviderAsSigner(this.provider);
         const user = provider.address as address;
 
-        const onchain_collateral_amount = deposit_ctoken ? deposit_ctoken.convertTokenInputToShares(collateral_amount) : 0n;
-        const onchain_debt_amount = borrow_ctoken ? borrow_ctoken.convertTokenInputToShares(debt_amount) : 0n;
+        // Pass underlying asset amounts — NOT shares.
+        // The on-chain reader's _collateralValue calls previewDeposit(assets) internally,
+        // and _debtValue prices assets with the underlying token's oracle price.
+        // Passing shares here would cause double-conversion (shares treated as assets).
+        const onchain_collateral_amount = deposit_ctoken ? FormatConverter.decimalToBigInt(collateral_amount, deposit_ctoken.asset.decimals) : 0n;
+        const onchain_debt_amount = borrow_ctoken ? FormatConverter.decimalToBigInt(debt_amount, borrow_ctoken.asset.decimals) : 0n;
 
         const data = await this.reader.getPositionHealth(
             this.address,

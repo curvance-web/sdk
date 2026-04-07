@@ -51,19 +51,15 @@ export const DEFAULT_RETRY_CONFIG: RetryConfig = {
         'node error',
         'provider error',
         'endpoint error',
-        'method not found', // Sometimes temporary
-        'parse error', // Could be temporary JSON parsing issue
         
         // Temporary blockchain node issues
-        'block not found', // Sometimes temporary
         'header not found', // Sometimes temporary
         'missing trie node',
         
         // Generic temporary failures
         'temporary failure',
         'temporarily unavailable',
-        'try again',
-        'retry'
+        'try again'
     ]
 };
 
@@ -79,8 +75,10 @@ class RetryableProvider {
     }
 
     private calculateDelay(attempt: number): number {
-        const delay = this.config.baseDelay * Math.pow(this.config.backoffMultiplier, attempt);
-        return Math.min(delay, this.config.maxDelay);
+        const base = this.config.baseDelay * Math.pow(this.config.backoffMultiplier, attempt);
+        const capped = Math.min(base, this.config.maxDelay);
+        // Add jitter to prevent thundering herd when multiple clients retry simultaneously
+        return capped * (0.5 + Math.random() * 0.5);
     }
 
     private isRetryableError(error: any): boolean {
@@ -366,7 +364,7 @@ export function classifyError(error: any): {
     }
     
     // RPC errors
-    const rpcPatterns = ['rpc error', 'node error', 'provider error', 'parse error'];
+    const rpcPatterns = ['rpc error', 'node error', 'provider error'];
     
     if (rpcPatterns.some(pattern => errorMessage.includes(pattern))) {
         return { type: 'rpc', isRetryable: true, message: error.message };

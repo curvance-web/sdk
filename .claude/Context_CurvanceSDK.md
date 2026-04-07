@@ -1,24 +1,23 @@
 ---
-name: curvance-sdk-reference
-description: "Detailed API reference for curvance-web/contract-sdk. Contains every class, method signature, data shape, and integration pattern. Consult when you need exact method names, parameter types, return types, or implementation details. Pair with Skill_CurvanceSDK.md for rules and conventions."
+Context file for Curvance SDK (contract-sdk). Load specific sections via grep on `## [LABEL]` headers, routed from Skill_CurvanceSDK.md.
 ---
 
-# Curvance SDK Reference (v3.5.3)
+# Curvance SDK Context
 
-## Setup Flow
+## [SETUP_FLOW]
 
 ### `setupChain(chain, provider?, approval_protection?, api_url?)`
 
 Bootstrap entry point. Must run before any SDK usage.
 
 ```ts
-type ChainRpcPrefix = 'monad-testnet' | 'monad-mainnet' | 'arb-sepolia' | 'local-monad-mainnet';
+type ChainRpcPrefix = 'monad-mainnet' | 'arb-sepolia';
 
 async function setupChain(
   chain: ChainRpcPrefix,
   provider: curvance_provider | null = null,    // null → uses chain_config default
   approval_protection: boolean = false,          // throw on unapproved plugins
-  api_url: string = "https://api.floppy-backup.com"
+  api_url: string = "https://api.curvance.com"
 ): Promise<{
   markets: Market[],
   reader: ProtocolReader,
@@ -34,6 +33,13 @@ async function setupChain(
 
 **Data model:** `setupChain` bulk-loads ALL market, token, and user data via `Market.getAll()` → ProtocolReader in a single batch of RPC calls. This populates `.cache` on every CToken and Market instance. The app reads from this bulk-loaded data everywhere — no per-read RPC calls needed. Selective refreshes happen on mutations (`oracleRoute` calls `reloadUserData` after every write). Current architecture is single-chain focused; future evolution will move static market data to an API layer for multi-chain support.
 
+**`Market.getAll` data-loading sequence:**
+1. `reader.getAllMarketData(user)` — 3 parallel RPC calls (static, dynamic, user)
+2. In parallel: `Api.fetchNativeYields()` (filtered: excludes USDC — DeFiLlama misattributes YZM yield as USDC), `fetchMerklOpportunities({ action: 'LEND' })`, `fetchMerklOpportunities({ action: 'BORROW' })`
+3. Construct Market/CToken instances from RPC data. Markets without deploy data in `setup_config.contracts.markets` are skipped with console warning.
+4. Per-token enrichment: match Merkl LEND by `opp.identifier === token.address` → `incentiveSupplyApy = apr/100`; match Merkl BORROW same way → `incentiveBorrowApy = apr/100`
+5. Per-token: match native yields by symbol → `nativeApy = apy/100`
+
 ### `setup_config` (module global)
 
 ```ts
@@ -42,7 +48,7 @@ async function setupChain(
   contracts: ReturnType<typeof getContractAddresses>,  // from chains/*.json
   provider: curvance_provider,
   approval_protection: boolean,
-  api_url: string | null
+  api_url: string
 }
 ```
 
@@ -51,17 +57,18 @@ async function setupChain(
 Each chain entry in `chain_config`:
 ```ts
 {
+  chainId: number,                 // e.g. 143 for Monad
   dexAgg: IDexAgg,              // KyberSwap or Kuru instance
   provider: JsonRpcProvider,     // default RPC
   native_symbol: string,         // 'MON' | 'ETH'
   native_name: string,           // 'Monad' | 'Ether'
   wrapped_native: address,       // WMON/WETH address
   native_vaults: { name: string, contract: address }[],   // aprMON, shMON
-  vaults: { name: string, contract: address, underlying?: address }[]  // sAUSD
+  vaults: { name: string, contract: address, underlying: address }[]  // sAUSD
 }
 ```
 
-**Supported chains:** `monad-testnet`, `monad-mainnet`, `arb-sepolia`, `local-monad-mainnet`
+**Supported chains:** `monad-mainnet`, `arb-sepolia`
 
 ### Contract Addresses (from `chains/*.json`)
 
@@ -82,7 +89,7 @@ markets: {
 
 ---
 
-## Data Shapes (ProtocolReader types)
+## [DATA_SHAPES]
 
 Full type definitions: `src/classes/ProtocolReader.ts`. Key semantic notes for fields that aren't self-explanatory:
 
@@ -115,7 +122,7 @@ Full type definitions: `src/classes/ProtocolReader.ts`. Key semantic notes for f
 
 ---
 
-## Market API
+## [MARKET_API]
 
 **Constructor:** `new Market(provider, staticData, dynamicData, userData, deployData, oracleManager, reader)`
 
@@ -180,13 +187,21 @@ Full type definitions: `src/classes/ProtocolReader.ts`. Key semantic notes for f
 | Method | Return | Notes |
 |---|---|---|
 | `Market.getAll(reader, oracle, provider?, milestones?, incentives?)` | `Market[]` | Main factory — called by `setupChain()` |
-| `Market.fetchNativeYields()` | `{ symbol, apy }[]` | API call for native vault APYs |
 
 **`ChangeRate` type:** `'year' | 'month' | 'week' | 'day'`
 
+**`DeployData` interface** (passed to Market constructor via `Market.getAll`):
+```ts
+interface DeployData {
+    name: string,           // Market deploy key (e.g., "gMON | WMON")
+    plugins: { [key: string]: address }  // Plugin contract addresses
+}
+```
+`Market.getAll` looks up deploy data from `setup_config.contracts.markets` by matching market address. Markets without deploy data are skipped with a console warning.
+
 ---
 
-## CToken API
+## [CTOKEN_API]
 
 **Extends:** `Calldata<ICToken>`. Full source: `src/CToken.ts`.
 
@@ -195,6 +210,11 @@ Full type definitions: `src/classes/ProtocolReader.ts`. Key semantic notes for f
 - `zapTypes: ZapperTypes[]` — populated in constructor based on vault type and chain config (`'native-vault'`, `'native-simple'`, `'vault'`, `'simple'`)
 - `leverageTypes: string[]` — populated based on market plugins (position managers) and vault type
 - `isVault`, `isNativeVault`, `isWrappedNative` — boolean instance properties, set in constructor from chain config
+- `nativeApy: Decimal` — native vault yield (set during `Market.getAll` from API). Default `Decimal(0)`
+- `incentiveSupplyApy: Decimal` — Merkl LEND APR for this token (set during `Market.getAll`). Default `Decimal(0)`
+- `incentiveBorrowApy: Decimal` — Merkl BORROW APR for this token (set during `Market.getAll`). Default `Decimal(0)`
+
+**Constructor skip list:** Tokens with symbols `['csAUSD', 'cwsrUSD', 'cezETH', 'csyzUSD', 'cearnAUSD', 'cYZM']` skip ALL zapTypes and leverageTypes population. These are complex tokens that require custom zap/leverage logic not yet built. They will have empty `zapTypes` and `leverageTypes` arrays regardless of chain config.
 
 **Overload pattern (used throughout CToken and BorrowableCToken):**
 Many getters take a boolean: `(true)` → USD formatted, `(false)` → raw bigint or TokenInput. Examples:
@@ -256,7 +276,7 @@ interface ZapToken { interface: NativeToken | ERC20; type: ZapperTypes; quote?: 
 
 ---
 
-## BorrowableCToken API
+## [BORROWABLE_CTOKEN_API]
 
 **Extends:** `CToken`
 
@@ -288,7 +308,7 @@ Overrides `contract` type to `IBorrowableCToken` (adds borrow/repay/IRM methods)
 | `fetchSupplyRate()` | — | `bigint` | Updates cache |
 | `fetchLiquidity()` | — | `bigint` | `totalAssets - outstandingDebt` |
 | `fetchDebt(inUSD)` | `bool` | `USD \| bigint` | Total market debt |
-| `interestFee()` | — | `Promise<bigint>` | |
+| `fetchInterestFee()` | — | `Promise<bigint>` | |
 | `marketOutstandingDebt()` | — | `Promise<bigint>` | |
 | `debtBalance(account)` | `address` | `Promise<bigint>` | |
 
@@ -311,7 +331,7 @@ interface IDynamicIRM {
 
 ---
 
-## ProtocolReader API
+## [PROTOCOL_READER_API]
 
 **Constructor:** `new ProtocolReader(address: address)` — wraps the on-chain `ProtocolReader.sol` contract (1931 lines).
 
@@ -399,28 +419,28 @@ SDK converts: `Decimal(cache.maxLeverage).div(BPS)`
 
 ---
 
-## FormatConverter API
+## [FORMAT_CONVERTER_API]
 
 All methods are **static**. No instance needed.
 
 | Method | Params | Return | Notes |
 |---|---|---|---|
-| `bigIntToUsd(value, decimals)` | `bigint, bigint` | `USD` | `Decimal(value) / 10^decimals` |
-| `bigIntToDecimal(value, decimals)` | `bigint, bigint` | `Decimal` | Same as bigIntToUsd |
-| `decimalToBigInt(value, decimals)` | `Decimal, bigint` | `bigint` | `value * 10^decimals` truncated |
-| `bigIntTokensToUsd(tokenAmount, price, decimals)` | `bigint, Decimal, bigint` | `USD` | `(amount / 10^decimals) * price` |
-| `tokensToTokens(from, to, formatted)` | `{price, decimals, amount}, {price, decimals}, bool` | `TokenInput \| bigint` | Cross-token conversion |
-| `decimalTokensToUsd(amount, price)` | `Decimal, Decimal` | `USD` | `amount * price` |
-| `usdToDecimalTokens(usd, price)` | `USD, Decimal` | `Decimal` | `usd / price` |
-| `usdToBigIntTokens(usd, price, decimals)` | `USD, Decimal, bigint` | `bigint` | `(usd / price) * 10^decimals` |
-| `bpsToBpsWad(bps)` | `bigint` | `bigint` | `bps * 1e14` |
+| `bigIntToUsd(value)` | `bigint` | `USD` | Hardcodes 18 decimals. Alias for `bigIntToDecimal(value, 18)` |
+| `bigIntToDecimal(value, decimals)` | `bigint, number\|bigint` | `Decimal` | `Decimal(value) / 10^decimals`, ROUND_DOWN |
+| `decimalToBigInt(value, decimals)` | `Decimal, number\|bigint` | `bigint` | `value * 10^decimals` truncated (floor) |
+| `bigIntTokensToUsd(tokens, price, decimals)` | `bigint, bigint, number\|bigint` | `USD` | `(tokens / 10^decimals) * (price / 1e18)`. Price is WAD-scaled bigint |
+| `tokensToTokens(from, to, formatted)` | `{price, decimals, amount}, {price, decimals}, bool` | `TokenInput \| bigint` | Cross-token conversion via USD intermediate |
+| `decimalTokensToUsd(tokens, price)` | `Decimal, Decimal` | `USD` | `tokens * price`, 18dp ROUND_DOWN |
+| `usdToDecimalTokens(usd, price, decimals)` | `USD, USD\|bigint, number\|bigint` | `Decimal` | `usd / price`, rounded to token decimals. Price accepts Decimal or bigint |
+| `usdToBigIntTokens(usd, price, decimals)` | `USD, USD\|bigint, number\|bigint` | `bigint` | `usdToDecimalTokens` → `decimalToBigInt` |
+| `bpsToBpsWad(bps)` | `bigint` | `bigint` | `(bps * 1e18) / 10000` |
 | `percentageToBps(pct)` | `Percentage` | `bigint` | `pct * 10000` |
-| `percentageToBpsWad(pct)` | `Percentage` | `bigint` | `pct * 1e18` |
+| `percentageToBpsWad(pct)` | `Percentage` | `bigint` | `percentageToBps` → `bpsToBpsWad` |
 | `percentageToText(pct)` | `Percentage` | `string` | `"75.00%"` |
 
 ---
 
-## ERC20 API
+## [ERC20_API]
 
 **Constructor:** `new ERC20(provider, address, cache?)`. Source: `src/ERC20.ts`.
 
@@ -433,13 +453,13 @@ The optional `StaticMarketAsset` data is populated by ProtocolReader during bulk
 
 ---
 
-## ERC4626 API
+## [ERC4626_API]
 
 **Extends:** `ERC20`. Source: `src/ERC4626.ts`. Standard vault methods: `fetchAsset`, `convertToShares/Assets`, `previewDeposit`.
 
 ---
 
-## OracleManager API
+## [ORACLE_MANAGER_API]
 
 **Constructor:** `new OracleManager(address, provider?)`
 
@@ -449,7 +469,7 @@ The optional `StaticMarketAsset` data is populated by ProtocolReader during bulk
 
 ---
 
-## NativeToken API
+## [NATIVE_TOKEN_API]
 
 Represents chain native token (MON/ETH). No on-chain contract.
 
@@ -467,7 +487,7 @@ Represents chain native token (MON/ETH). No on-chain contract.
 
 ---
 
-## PositionManager API
+## [POSITION_MANAGER_API]
 
 **Constructor:** `new PositionManager(address, signer, type)`
 
@@ -495,7 +515,7 @@ interface DeleverageAction {
 
 ---
 
-## Zapper API
+## [ZAPPER_API]
 
 **Constructor:** `new Zapper(address, signer, type)`
 
@@ -520,7 +540,7 @@ interface Swap {
 
 ---
 
-## Calldata API
+## [CALLDATA_API]
 
 Abstract base for contract interaction.
 
@@ -531,7 +551,7 @@ Abstract base for contract interaction.
 
 ---
 
-## Redstone API
+## [REDSTONE_API]
 
 Oracle price update helper.
 
@@ -544,7 +564,7 @@ Uses 3-of-4 authorized signers from Redstone primary prod.
 
 ---
 
-## DexAggregators API
+## [DEX_AGGREGATORS_API]
 
 **IDexAgg interface:**
 ```ts
@@ -552,21 +572,24 @@ interface IDexAgg {
   dao: address;
   router: address;
   getAvailableTokens(provider, query): Promise<ZapToken[]>;
-  quoteAction(wallet, tokenIn, tokenOut, amount, slippage): Promise<{ action: Swap, quote: Quote }>;
-  quoteMin(wallet, tokenIn, tokenOut, amount, slippage): Promise<BigInt>;
-  quote(wallet, tokenIn, tokenOut, amount, slippage): Promise<Quote>;
+  quoteAction(...args: QuoteArgs): Promise<{ action: Swap, quote: Quote }>;
+  quoteMin(...args: QuoteArgs): Promise<BigInt>;
+  quote(...args: QuoteArgs): Promise<Quote>;
 }
 
+type QuoteArgs = [wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint];
 type Quote = { to: address; calldata: bytes; min_out: bigint; out: bigint; raw?: any; }
 ```
 
-**KyberSwap** (monad-mainnet): 2-step quote flow — GET `/api/v1/routes` → POST `/api/v1/route/build`. Client ID: `"curvance-sdk"`. Slippage in BPS.
+**KyberSwap** (monad-mainnet): 2-step quote flow — GET `/api/v1/routes` → POST `/api/v1/route/build`. Client ID: `"curvance-sdk"`. Slippage in BPS. Throws `Error` on non-OK HTTP responses (no null returns — errors propagate as exceptions).
 
-**Kuru** (monad-testnet): JWT-authenticated, rate-limited (1 RPS default). POST `/quote`. Has cached JWT and request tracking.
+**Kuru** (monad-mainnet): JWT-authenticated (`/generate-token`), rate-limited. POST `/quote`. Token search via `api.kuru.io/api/v2/tokens/search`. Cached JWT with request tracking.
+
+**MultiDexAgg** (multi-aggregator wrapper): Implements `IDexAgg`. Wraps 1+ aggregators — single aggregator = passthrough, multiple = parallel fan-out with best-quote selection. Config: `outlierThresholdPercent` (default 20, filters quotes deviating from median), `quoteTimeoutMs` (default 15000). Uses `Promise.allSettled` for fault tolerance. `_validateQuote` rejects responses missing `out`, `calldata`, or `to`. Monad mainnet chain config currently uses single `KyberSwap` instance (MultiDexAgg available but not yet default).
 
 ---
 
-## Helpers (src/helpers.ts)
+## [HELPERS]
 
 ### Constants
 
@@ -607,7 +630,7 @@ This is transparent — all `contractSetup()` results are already wrapped.
 
 ---
 
-## Retry Provider
+## [RETRY_PROVIDER]
 
 `wrapProviderWithRetries(provider, config?)` wraps any provider/signer with retry logic.
 
@@ -615,11 +638,13 @@ Default config: 3 retries, 1s base delay, 10s max, 2x backoff multiplier.
 
 Retryable errors: rate limits (429), network errors (timeout, ECONNRESET), server errors (500-504), RPC errors.
 
+Non-retryable errors are re-thrown wrapped in new Error objects — the original ethers `.code` property (e.g., `CALL_EXCEPTION`) does not survive the wrap. App-side error filtering must check `.message` content, not `.code`. The retry provider also logs directly via `console.error` in `forward-logs-shared.ts` — these blue "Provider method call failed" messages cannot be silenced from app code.
+
 ---
 
-## V1 Consumption Layer
+## [V1_CONSUMPTION_LAYER]
 
-All hooks live in `modules/marketv2/queries/index.ts`. Pattern: most hooks use `useSetupChainQuery` with a `select` function for synchronous data derivation.
+All hooks live in `modules/market/v2/queries/index.ts`. Pattern: most hooks use `useSetupChainQuery` with a `select` function for synchronous data derivation.
 
 ### `useSetupChainQuery<TResult>(options?)`
 
@@ -632,7 +657,6 @@ Post-processing: `sanitizeMarketNames()` (replaces `&` with `|`, uses token symb
 | Hook | Select function | Return type |
 |---|---|---|
 | `useMarketsQuery()` | `data.markets` | `Market[]` |
-| `useAllTokensQuery()` | Flattened + deduped tokens | `(CToken \| BorrowableCToken)[]` |
 | `useBorrowableTokensQuery()` | `getBorrowableCTokens()` per market, filtered by debt cap | `{ eligible, ineligible }` |
 | `useMarketStatsQuery()` | Sum TVL and debt | `{ totalDeposits: number, activeLoans: number }` |
 | `useGlobalTvlQuery()` | Sum TVL | `string` |
@@ -650,9 +674,9 @@ Post-processing: `sanitizeMarketNames()` (replaces `&` with `|`, uses token symb
 
 ---
 
-## V1 Action Patterns (Write Operations)
+## [V1_ACTION_PATTERNS]
 
-All writes live in `modules/marketv2/mutations/index.ts` and `modules/market/queries/mutations.ts`.
+All writes live in `modules/market/v2/mutations/index.ts` and `modules/market/queries/mutations.ts`.
 
 ### Architecture
 
@@ -675,18 +699,36 @@ invalidateUserStateQueries(queryClient) {
   queryClient.invalidateQueries({ queryKey: ['balance'] });
   queryClient.invalidateQueries({ queryKey: ['zap-tokens', 'balance'] });
   queryClient.invalidateQueries({ queryKey: ['user-debt'] });
+  queryClient.invalidateQueries({ queryKey: ['maxLeverage'] });
+  queryClient.invalidateQueries({ queryKey: ['previewPositionHealthLeverage'] });
+  queryClient.invalidateQueries({ queryKey: ['previewPositionHealthEditLeverage'] });
+  queryClient.invalidateQueries({ queryKey: ['previewPositionHealthDeposit'] });
+  queryClient.invalidateQueries({ queryKey: ['previewPositionHealthRedeem'] });
+  queryClient.invalidateQueries({ queryKey: ['previewPositionHealthBorrow'] });
+  queryClient.invalidateQueries({ queryKey: ['previewPositionHealthRepay'] });
+  queryClient.invalidateQueries({ queryKey: ['previewAssetImpact'] });
 }
 ```
 
+**Fresh token resolution:** Every mutation calls `resolveFreshToken(token)` (`modules/market/v2/utils/resolve-fresh-token.ts`) before any SDK write. Store-held CToken references become stale when `setupChain` re-runs with a signer — the old CToken carries a read-only provider. `resolveFreshToken` looks up the token by address in the module-level `all_markets` array (always current after latest `setupChain`).
+
+**Safe transaction waiting:** Every mutation wraps SDK calls in `safeWaitForTx(txPromise, providerSource)` (`shared/functions/safe-tx-wait.ts`) instead of direct `tx.wait()`. Handles a Monad RPC issue where pending tx responses contain `nonce: null` — ethers v6 throws BAD_DATA but the tx IS broadcast. The wrapper extracts the tx hash from the error object and falls back to `provider.waitForTransaction(hash)`. On error, `txStatusForError(error)` detects this specific failure and marks the transaction as `'success'` in the store (not `'failed'`).
+
+**Note:** All mutation code blocks below show the actual current patterns including `resolveFreshToken` and `safeWaitForTx`.
+
 ### `useBorrowTokenMutation()`
 
-Source: `modules/marketv2/mutations/index.ts`
+Source: `modules/market/v2/mutations/index.ts`
 Store: `useBorrowStore` → `token: BorrowableCToken`
 
 ```ts
 mutationFn: async ({ amount }) => {
-  const tx = await token.borrow(Decimal(amount), walletAddress);
-  return await tx.wait();
+  const freshToken = resolveFreshToken(token);
+  const receipt = await safeWaitForTx(
+    freshToken.borrow(Decimal(amount), walletAddress),
+    freshToken,
+  );
+  return receipt;
 }
 ```
 
@@ -699,9 +741,11 @@ Approval setting: `useApprovalSettingStore` → `'unlimited' | 'exact'`
 
 ```ts
 mutationFn: async ({ amount, onApprovalStart, onApprovalComplete, onTransactionStart }) => {
+  const freshToken = resolveFreshToken(token);
+
   // 1. Fetch current debt
-  const usdUserDebt = await token.fetchDebtBalanceAtTimestamp();
-  const userDebt = token.convertUsdToTokens(usdUserDebt);
+  const usdUserDebt = await freshToken.fetchDebtBalanceAtTimestamp();
+  const userDebt = freshToken.convertUsdToTokens(usdUserDebt);
 
   // 2. Full repay detection: ≥99.9% of debt → send 0
   const threshold = userDebt.mul(0.999);
@@ -709,20 +753,23 @@ mutationFn: async ({ amount, onApprovalStart, onApprovalComplete, onTransactionS
 
   // 3. Allowance (add 1% buffer for full repay)
   const allowanceAmount = isPayingAll ? Decimal(amount).mul(0.01).add(amount) : Decimal(amount);
-  const asset = token.getAsset(true);
-  const allowance = await asset.allowance(account.address, token.address);
-  if (toDecimal(allowance, token.asset.decimals).lt(allowanceAmount)) {
+  const asset = freshToken.getAsset(true);
+  const allowance = await asset.allowance(account.address, freshToken.address);
+  if (toDecimal(allowance, freshToken.asset.decimals).lt(allowanceAmount)) {
     onApprovalStart?.();
-    const tx = await asset.approve(token.address,
-      approvalSetting === 'unlimited' ? null : allowanceAmount);
-    await tx.wait();
+    await safeWaitForTx(
+      asset.approve(freshToken.address, approvalSetting === 'unlimited' ? null : allowanceAmount),
+      asset,
+    );
   }
 
   onApprovalComplete?.(); onTransactionStart?.();
 
   // 4. Repay — 0 = full repay, else partial
-  const tx = await token.repay(isPayingAll ? Decimal(0) : Decimal(amount));
-  return await tx.wait();
+  return await safeWaitForTx(
+    freshToken.repay(isPayingAll ? Decimal(0) : Decimal(amount)),
+    freshToken,
+  );
 }
 ```
 
@@ -732,30 +779,40 @@ Token passed as parameter (not from store).
 
 ```ts
 mutationFn: async ({ amount }) => {
-  const maxRedemption = await token.maxRedemption();
-  const tx = await token.redeem(
-    Decimal(maxRedemption).lt(amount) ? Decimal(maxRedemption) : Decimal(amount)
-  );
-  await tx?.wait();
-  return tx;
+  const freshToken = resolveFreshToken(token);
+  const maxRedemption = await freshToken.maxRedemption();
+  const wasCapped = Decimal(maxRedemption).lessThan(amount);
+  const effectiveAmount = wasCapped ? Decimal(maxRedemption) : Decimal(amount);
+  const receipt = await safeWaitForTx(freshToken.redeem(effectiveAmount), freshToken);
+  return { receipt, wasCapped, effectiveAmount };
 }
 ```
+
+On success: if `wasCapped`, updates the transaction record with the effective (capped) amount.
 
 ### `useAddCollateralMutation()` / `useRemoveCollateralMutation()`
 
 Store: `useSelectedManageCollateral` → `token: CToken | BorrowableCToken`
 
 ```ts
-// Add
+// Add — isMax from useSelectedManageCollateral store
 mutationFn: async ({ amount }) => {
-  const tx = await token.postCollateral(Decimal(amount));
-  return await tx.wait();
+  const freshToken = resolveFreshToken(token);
+  // For MAX add: pass full asset balance so SDK's share clamping
+  // (balance - collateral) avoids dust from asset↔share conversion
+  const effectiveAmount = isMax
+    ? Decimal(freshToken.getUserAssetBalance(false) || 0)
+    : Decimal(amount);
+  return await safeWaitForTx(freshToken.postCollateral(effectiveAmount), freshToken);
 }
 
-// Remove
+// Remove — isMax passed as second arg to SDK
 mutationFn: async ({ amount }) => {
-  const tx = await token.removeCollateral(Decimal(amount));
-  return await tx.wait();
+  const freshToken = resolveFreshToken(token);
+  return await safeWaitForTx(
+    freshToken.removeCollateral(Decimal(amount), isMax),
+    freshToken,
+  );
 }
 ```
 
@@ -766,43 +823,50 @@ Approval setting from `useApprovalSettingStore`
 
 ```ts
 mutationFn: async ({ amount, leverage, onTransactionStart, slippage }) => {
-  // 1. Find debt token (first with existing debt, or fallback to borrowToken)
-  let debtToken = token.market?.tokens.find(t => t.getUserDebt(true).gt(0));
-  if (!debtToken) debtToken = borrowToken;
+  const freshToken = resolveFreshToken(token);
 
-  // 2. Get position manager
-  const leverageTypes = getHighestPriority(token.leverageTypes);
-  const positionManager = token.getPositionManager(leverageTypes);
+  // 1. Find debt token (first with existing debt, or fallback to borrowToken)
+  let debtToken = freshToken.market?.tokens.find(t => t.getUserDebt(true).gt(0));
+  if (!debtToken) debtToken = resolveFreshToken(borrowToken);
+
+  // 2. Get position manager — fallback to 'simple' if no leverageTypes
+  const leverageTypes = freshToken.leverageTypes?.length
+    ? getHighestPriority(freshToken.leverageTypes)
+    : 'simple';
+  const positionManager = freshToken.getPositionManager(leverageTypes);
 
   // 3. Asset approval to position manager
-  const asset = token.getAsset(true);
+  const asset = freshToken.getAsset(true);
   const allowance = await asset.allowance(account.address, positionManager.address);
-  const requiredAmount = FormatConverter.decimalToBigInt(Decimal(amount), token.asset.decimals);
+  const requiredAmount = FormatConverter.decimalToBigInt(Decimal(amount), freshToken.asset.decimals);
   if (allowance < requiredAmount) {
-    await (await asset.approve(positionManager.address,
-      approvalSetting === 'unlimited' ? null : amount)).wait();
+    await safeWaitForTx(
+      asset.approve(positionManager.address, approvalSetting === 'unlimited' ? null : amount),
+      asset,
+    );
   }
 
   // 4. Plugin approval
-  if (!(await token.isPluginApproved(leverageTypes, 'positionManager'))) {
-    await (await token.approvePlugin(leverageTypes, 'positionManager')).wait();
+  if (!(await freshToken.isPluginApproved(leverageTypes, 'positionManager'))) {
+    await safeWaitForTx(freshToken.approvePlugin(leverageTypes, 'positionManager'), freshToken);
   }
 
   onTransactionStart?.();
 
   // 5. Execute
-  const tx = await token.depositAndLeverage(
-    Decimal(amount), debtToken as BorrowableCToken,
-    Decimal(leverage), leverageTypes, slippage
+  return await safeWaitForTx(
+    freshToken.depositAndLeverage(
+      Decimal(amount), debtToken as BorrowableCToken,
+      Decimal(leverage), leverageTypes, slippage
+    ),
+    freshToken,
   );
-  await tx.wait();
-  return tx;
 }
 ```
 
 ---
 
-## Store Architecture
+## [STORE_ARCHITECTURE]
 
 ### `useDepositStore` (Zustand, persisted: currencyView only)
 
@@ -822,7 +886,7 @@ State:
   editLeverage: boolean,              // true when editing existing position leverage
   slippage: Decimal,                  // stored as decimal (0.005 = 0.5%)
   currencyView: 'dollar' | 'token',
-  depositStatus: DepositStatus,       // enum: Initial → AdvancedDetails → TransactionSummary → Processing → Completed/Failure
+  depositStatus: DepositStatus,       // enum: Initial → AdvancedDetails → TransactionSummary → Processing → Completed/Failure, AssetSelection
 }
 ```
 
@@ -838,7 +902,7 @@ State: `{ market, token, amount, usdAmount, tokenAmount, action: 'add'|'remove',
 
 ---
 
-## Validation Hooks
+## [VALIDATION_HOOKS]
 
 ### Borrow validation
 | Hook | Returns | Logic |
@@ -846,7 +910,6 @@ State: `{ market, token, amount, usdAmount, tokenAmount, action: 'add'|'remove',
 | `useMaxBorrowAmount()` | `string` | `min(userRemainingCredit, remainingDebt, liquidity)` converted to tokens |
 | `useBorrowError()` | `{type}` | Types: no_token, no_amount, zero_amount, debt_cap_zero, ineligible, exceeds_max, none |
 | `useDisableBorrow()` | `boolean` | No amount OR amount=0 OR exceeds max OR no market |
-| `useTooLowLiquidity()` | `boolean` | `amount > toDecimal(token.getLiquidity(false), decimals)` |
 | `useDebtBalanceQuery(token)` | `Decimal` | `token.fetchDebtBalanceAtTimestamp()` — staleTime: 2min |
 
 ### Repay validation
@@ -872,49 +935,41 @@ State: `{ market, token, amount, usdAmount, tokenAmount, action: 'add'|'remove',
 
 ---
 
-## Leverage Utilities
+## [LEVERAGE_UTILITIES]
 
-From `modules/marketv2/utils/leverage.ts`:
+From `modules/market/v2/utils/leverage.ts`:
 
 | Function | Params | Return | Notes |
 |---|---|---|---|
 | `calculateBorrowAmount(depositUsd, leverage)` | `Decimal, number` | `Decimal` | `depositUsd × (leverage - 1)` |
 | `calculatePositionSize(tokenAmount, leverage)` | `Decimal, number` | `Decimal` | `tokenAmount × leverage` |
-| `calculateLeverageRatio(totalValue, debtAmount)` | `Decimal, Decimal` | `Decimal` | `totalValue / (totalValue - debt)` |
-| `calculateDeleverageAmount(currentLev, targetLev, totalValue)` | `number, number, Decimal` | `Decimal` | Debt reduction needed |
-| `checkLeverageAmountBelowMinimum(input)` | complex | `boolean` | Checks debt change < $10.10 |
-| `checkBorrowExceedsLiquidity(borrowAmount, liquidity)` | `Decimal?, Decimal?` | `boolean` | |
-| `validateLeverageInput(input)` | `LeverageValidationInput` | `ValidationResult` | Full validation chain |
+| `checkLeverageAmountBelowMinimum(input)` | `CheckLeverageAmountBelowMinimumInput` | `boolean` | Terminal debt must be 0 (fully closed) or ≥ MIN_BORROW_USD. Checks both edit-leverage and new-leverage paths |
+| `checkBorrowExceedsLiquidity(borrowAmount, liquidity)` | `Decimal?, Decimal?` | `boolean` | Returns false if either input is undefined |
 
 **Constants:**
 ```ts
-MIN_DEPOSIT_USD = 10
 MIN_BORROW_USD = 10.1
-HIGH_LEVERAGE_THRESHOLD = 60
-MAX_LTV_RATIO = 0.85
 ```
-
-**Validation priority:** balance → min deposit → zero deposit → min borrow → liquidity → max leverage → high leverage warning → low liquidity warning
 
 ---
 
-## Position Preview Hooks
+## [POSITION_PREVIEW_HOOKS]
 
 ### `useDepositPositionSize(debouncedAmount?, debouncedLeverage?)`
 
-Returns `{ current: {usd, token}, new?: {usd, token} }`.
+Defined in `market/v2/stores/market.ts`. Returns `{ current: {usd, token}, new?: {usd, token} }`.
 
 Three modes:
-1. **editLeverage + increasing**: Uses `token.previewLeverageUp(newLev, debtToken)` → `{ newCollateral }`
+1. **editLeverage + increasing**: Uses `token.previewLeverageUp(newLev, debtToken)` → `{ newCollateral }` (USD), `{ newCollateralInAssets }` (token terms)
 2. **editLeverage + decreasing**: Proportional: `current × newLev / currentLev`
 3. **New deposit**: `calculatePositionSize(tokenAmount, leverage)` → add to current
 
 ### `useDepositDebt(debouncedAmount?, debouncedLeverage?)`
 
-Returns `{ current: {usd, token}, new?: {usd, token} }`.
+Defined in `market/v2/stores/market.ts`. Returns `{ current: {usd, token}, new?: {usd, token} }`.
 
 Three modes:
-1. **editLeverage + increasing**: `previewLeverageUp(leverage, debtToken)` → `current + newDebt`
+1. **editLeverage + increasing**: `previewLeverageUp(leverage, debtToken)` → `newDebt` used directly as `new.usd` (it's already a total, NOT added to current)
 2. **editLeverage + decreasing**: `current × (newLev-1) / (currentLev-1)`
 3. **New leverage deposit**: `calculateBorrowAmount(depositUsd, leverage)` → `current + borrowUsd`
 
@@ -924,9 +979,9 @@ Returns current/new debt for borrow or repay actions. Uses `calculateDebtPreview
 
 ---
 
-## Borrow Utilities
+## [BORROW_UTILITIES]
 
-From `modules/marketv2/utils/borrow.ts`:
+From `modules/market/v2/utils/borrow.ts`:
 
 | Function | Params | Return |
 |---|---|---|
@@ -938,9 +993,9 @@ From `modules/marketv2/utils/borrow.ts`:
 
 ---
 
-## Collateral Utilities
+## [COLLATERAL_UTILITIES]
 
-From `modules/marketv2/utils/collateral.ts`:
+From `modules/market/v2/utils/collateral.ts`:
 
 | Function | Params | Return |
 |---|---|---|
@@ -950,7 +1005,7 @@ From `modules/marketv2/utils/collateral.ts`:
 
 ---
 
-## Zap Flow (deposit with token swap)
+## [ZAP_FLOW]
 
 ```
 User wants to deposit TokenX into a CToken whose underlying is TokenY
@@ -971,11 +1026,11 @@ User wants to deposit TokenX into a CToken whose underlying is TokenY
 
 ---
 
-## Leverage Flow
+## [LEVERAGE_FLOW]
 
 ### Leverage Up
 ```
-token.leverageUp(borrowToken, newLeverage, positionManagerType, slippage)
+token.leverageUp(borrowToken, newLeverage, positionManagerType, slippage?, simulate?)
   ├── previewLeverageUp(newLev, borrowToken)
   │     └── calculates: borrowAmount = (notional × newLev - notional) - currentDebt
   ├── getPositionManager(type)
@@ -988,15 +1043,20 @@ token.leverageUp(borrowToken, newLeverage, positionManagerType, slippage)
 
 ### Leverage Down
 ```
-token.leverageDown(borrowToken, currentLev, newLev, type, slippage)
+token.leverageDown(borrowToken, currentLev, newLev, type, slippage?, simulate?)
   ├── previewLeverageDown(newLev, currentLev)
-  │     └── calculates collateralAssetReduction
-  ├── if newLev == 1: fetchDebtBalanceAtTimestamp(100n) → repay full debt + 0.05% buffer
+  │     └── calculates collateralAssetReduction, collateralAssetReductionUsd
+  ├── if newLev == 1 (full deleverage):
+  │     ├── fetchDebtBalanceAtTimestamp(100n, false) → repay_balance
+  │     ├── initial dexAgg.quote to check if output covers debt
+  │     └── if quote.out < repay_balance: scale swapCollateral = reduction × repay_balance × 1005 / (quote.out × 1000)
   ├── switch(type):
-  │     └── 'simple': dexAgg.quoteAction() → manager.getDeleverageCalldata()
+  │     └── 'simple': dexAgg.quoteAction(swapCollateral) → manager.getDeleverageCalldata()
+  │     └── default: throws (only 'simple' supported for deleverage)
   ├── _checkPositionManagerApproval()
   └── oracleRoute(calldata, { to: manager.address })
 ```
+Full deleverage (newLev == 1): `minRepay = 1n` (contract handles exact repayment). Contract slippage gets +50 BPS buffer (`slippage + 50n`) to account for oracle price variance in multicall. Partial deleverage: swap uses exact `collateralAssetReduction`, `minRepay = quote.out - 5%`.
 
 ### Deposit and Leverage
 ```
@@ -1011,7 +1071,7 @@ token.depositAndLeverage(depositAmount, borrowToken, multiplier, type, slippage)
 
 ---
 
-## Write Pattern (oracleRoute)
+## [WRITE_PATTERN]
 
 Every state-changing operation follows this path:
 
@@ -1034,7 +1094,7 @@ Every state-changing operation follows this path:
 
 ---
 
-## Rewards / Incentives
+## [REWARDS_INCENTIVES]
 
 ### MilestoneResponse
 ```ts
@@ -1053,7 +1113,7 @@ Fetched from `{api_url}/v1/rewards/active/{chain}` during `setupChain()`. Attach
 
 Fetched from `{api_url}/v1/{chain}/native_apy`. Matched by symbol. Stored in `token.nativeApy` (0-1 scale). Currently only available for `monad`/`monad-mainnet`.
 
-## Market Computed Properties
+## [MARKET_COMPUTED_PROPERTIES]
 
 All synchronous getters read from `Market.cache` (bulk-loaded by `setupChain()` → `Market.getAll()`, refreshed selectively on mutations). All USD values are `Decimal`.
 
@@ -1085,7 +1145,7 @@ All synchronous getters read from `Market.cache` (bulk-loaded by `setupChain()` 
 
 ### User Change Rate Methods
 
-Used for dashboard earnings display. `ChangeRate` = `'second' | 'minute' | 'hour' | 'day' | 'week' | 'month' | 'year'`.
+Used for dashboard earnings display. `ChangeRate` = `'year' | 'month' | 'week' | 'day'`.
 
 ```ts
 market.getUserDepositsChange(rate: ChangeRate): USD    // sum of token.earnChange(balance, rate)
@@ -1111,7 +1171,7 @@ market.formatPositionHealth(rawBigint: bigint): Percentage | null
 
 ---
 
-## CToken Synchronous Getters
+## [CTOKEN_SYNC_GETTERS]
 
 All read from `this.cache` (bulk-loaded data). Use for display. No RPC calls.
 
@@ -1127,7 +1187,7 @@ All read from `this.cache` (bulk-loaded data). Use for display. No RPC calls.
 | `getDebtCap(inUSD)` | `USD` | `bigint` | `cache.debtCap` |
 | `getTotalCollateral(inUSD)` | `USD` | `bigint` | `cache.collateral` |
 | `getDebt(inUSD)` | `USD` | `bigint` | `cache.debt` |
-| `getTvl(inUSD)` | `USD` | `bigint` | `totalAssets` |
+| `getTvl(inUSD)` | `USD` | `bigint` | `cache.totalSupply` (shares, converted via share price for USD) |
 | `getRemainingDebt(formatted)` | `USD` | `bigint` | `debtCap - debt` |
 
 **Conversion details:**
@@ -1178,7 +1238,7 @@ getTotalSupplyRate(): Percentage         // getSupplyRate(true) + incentiveSuppl
 getTotalBorrowRate(): Percentage         // getBorrowRate(true) - incentiveBorrowApy
 ```
 
-Internal `getApy`: `rate / WAD * SECONDS_PER_YEAR`. `getTotalSupplyRate` is the all-in rate the app should display.
+Internal `getApy`: `rate / WAD * SECONDS_PER_YEAR`. `getTotalSupplyRate` uses on-chain incentive fields; app uses `getDepositApy()` from SDK helpers (Merkl API data) instead — see Yield Calculation Helpers section.
 
 ### Token Conversion (synchronous)
 
@@ -1198,7 +1258,7 @@ convertTokenToToken(from: CToken, to: CToken, amount: TokenInput, formatted: fal
 ### Other Getters
 
 ```ts
-liquidationPrice: USD | null             // cache.liquidationPrice, null if 0
+liquidationPrice: USD | null             // cache.liquidationPrice, null if UINT256_MAX (no liquidation price)
 nativeApy: Decimal                       // 0-1 scale, set during setupChain from native yields API
 incentiveSupplyApy: Decimal              // Merkl LEND APR (0-1 scale), set during setupChain
 incentiveBorrowApy: Decimal              // Merkl BORROW APR (0-1 scale), set during setupChain
@@ -1206,6 +1266,9 @@ isBorrowable: boolean                    // from .cache (bulk-loaded)
 isVault: boolean                         // true if asset is in chain_config.vaults
 isNativeVault: boolean                   // true if asset is in chain_config.native_vaults
 isWrappedNative: boolean                 // true if asset == chain_config.wrapped_native
+borrowPaused: boolean                    // from .cache
+collateralizationPaused: boolean         // from .cache
+mintPaused: boolean                      // from .cache
 exchangeRate: bigint                     // cToken → asset exchange rate
 totalAssets: bigint                      // total underlying assets
 totalSupply: bigint                      // total cToken shares
@@ -1213,11 +1276,26 @@ decimals: bigint                         // cToken decimals
 symbol: string
 name: string
 asset: { address, name, symbol, decimals }  // underlying token info
+
+// Rate methods defined on CToken (not just BorrowableCToken):
+getBorrowRate(inPercentage?): Percentage | bigint    // cache.borrowRate / WAD * SECONDS_PER_YEAR
+getSupplyRate(asPercentage?): Percentage | bigint    // cache.supplyRate / WAD * SECONDS_PER_YEAR
+earnChange(amount: USD, rateType: ChangeRate): USD   // projected earnings for period
+```
+
+### CToken Async Fetch Methods (not in cache — make RPC calls)
+
+```ts
+redeemShares(amount: bigint)              // Redeems by raw share count (no Decimal conversion). Bypasses maxRedemption clamping — caller must ensure amount is valid
+getExchangeRate(): Promise<bigint>        // Reads on-chain exchangeRate(), updates cache.exchangeRate, returns raw bigint
+fetchTvl(inUSD?): Promise<USD | bigint>   // Refreshes totalSupply cache, then returns via getTvl(). Overloaded: true → USD, false → bigint
+fetchTotalCollateral(inUSD?): Promise<USD | bigint>  // Reads marketCollateralPosted() on-chain. Overloaded: true → USD, false → bigint
+convertSharesToUsd(tokenAmount: bigint): Promise<USD>  // Converts shares → virtual assets via virtualConvertToShares, then multiplies by lower-bound price
 ```
 
 ---
 
-## BorrowableCToken Extended API
+## [BORROWABLE_EXTENDED_API]
 
 Extends CToken. Inherits all getters above. Adds:
 
@@ -1302,9 +1380,9 @@ fetchUtilizationRateChange(assets: TokenInput, direction: 'add'|'remove'): Promi
 
 ---
 
-## Deposit Mutation (useDepositV2Mutation)
+## [DEPOSIT_MUTATION]
 
-Source: `modules/dashboard-v2/queries/index.ts`. The primary deposit flow.
+Source: `modules/dashboard/v2/queries/index.ts`. The primary deposit flow.
 
 ```ts
 export function useDepositV2Mutation(token: CToken | BorrowableCToken | null | undefined)
@@ -1314,32 +1392,57 @@ export function useDepositV2Mutation(token: CToken | BorrowableCToken | null | u
 
 ```ts
 mutationFn: async ({ amount, isCollateralized, slippage, zap, onTransactionStart }) => {
-  const asset = token.getAsset(true);  // ERC20 of underlying
+  const freshToken = resolveFreshToken(token);
+  const asset = freshToken.getAsset(true);
+  const isNativeZap = zap === 'native-simple' || zap === 'native-vault';
+  const isZapping = zap !== 'none' && zapToken;
 
   // 1. Plugin approval (zap only)
   if (zap !== 'none') {
-    if (!(await token.isPluginApproved(zap, 'zapper'))) {
-      await (await token.approvePlugin(zap, 'zapper')).wait();
+    if (!(await freshToken.isPluginApproved(zap, 'zapper'))) {
+      await safeWaitForTx(freshToken.approvePlugin(zap, 'zapper'), freshToken);
     }
   }
 
-  // 2. Asset approval
-  const allowance = await asset.allowance(account.address, token.address);
-  if (toDecimal(allowance, token.asset.decimals).lt(amount)) {
-    await (await asset.approve(token.address,
-      approvalSetting === 'unlimited' ? null : Decimal(amount)
-    )).wait();
+  // 2. Build zapper instructions — inputToken differs for zap vs direct
+  const zapperInstructions = {
+    type: zap,
+    inputToken: isZapping ? zapToken.interface.address : asset.address,
+    slippage,
+  };
+
+  // 3. Approval — three branches
+  if (isNativeZap) {
+    // Native: MON attached as msg.value, no ERC20 approval
+  } else if (isZapping) {
+    // Zap: approve zap input token to zapper plugin
+    const zapDecimals = zapToken.interface.decimals ?? freshToken.asset.decimals;
+    if (!(await freshToken.isZapAssetApproved(zapperInstructions,
+        FormatConverter.decimalToBigInt(Decimal(amount), zapDecimals)))) {
+      await safeWaitForTx(
+        freshToken.approveZapAsset(zapperInstructions,
+          approvalSetting === 'unlimited' ? null : Decimal(amount)),
+        freshToken,
+      );
+    }
+  } else {
+    // Direct: approve underlying to cToken
+    const allowance = await asset.allowance(account.address, freshToken.address);
+    if (toDecimal(allowance, freshToken.asset.decimals).lt(amount)) {
+      await safeWaitForTx(
+        asset.approve(freshToken.address, approvalSetting === 'unlimited' ? null : Decimal(amount)),
+        asset,
+      );
+    }
   }
 
-  // 3. Build zapper instructions
-  const zapperInstructions = { type: zap, inputToken: asset.address, slippage };
+  onTransactionStart?.();
 
   // 4. Execute
-  if (isCollateralized) {
-    return await token.depositAsCollateral(Decimal(amount), zapperInstructions, account.address);
-  } else {
-    return await token.deposit(Decimal(amount), zapperInstructions, account.address);
-  }
+  const txRes = isCollateralized
+    ? await freshToken.depositAsCollateral(Decimal(amount), zapperInstructions, account.address)
+    : await freshToken.deposit(Decimal(amount), zapperInstructions, account.address);
+  return await safeWaitForTx(Promise.resolve(txRes), freshToken);
 }
 ```
 
@@ -1349,22 +1452,29 @@ mutationFn: async ({ amount, isCollateralized, slippage, zap, onTransactionStart
 
 ---
 
-## Standalone Leverage Mutations
+## [STANDALONE_LEVERAGE_MUTATIONS]
 
-Source: `modules/dashboard-v2/queries/index.ts`. Used when editing leverage on an existing position (no new deposit).
+Source: `modules/dashboard/v2/queries/index.ts`. Used when editing leverage on an existing position (no new deposit).
 
 ### `useLeverageUpMutation({ depositToken, borrowToken })`
 
 ```ts
 mutationFn: async ({ newLeverage, onTransactionStart, slippage }) => {
-  let debtToken = depositToken.market.tokens.find(t => t.getUserDebt(true).gt(0));
-  if (!debtToken) debtToken = borrowToken;
+  const freshDepositToken = resolveFreshToken(depositToken);
+  const freshBorrowToken = resolveFreshToken(borrowToken);
 
-  const leverageTypes = getHighestPriority(depositToken.leverageTypes);
-  await depositToken.approvePlugin(leverageTypes, 'positionManager');
+  let debtToken = freshDepositToken.market.tokens.find(t => t.getUserDebt(true).gt(0));
+  if (!debtToken) debtToken = freshBorrowToken;
 
-  return await depositToken.leverageUp(
-    debtToken as BorrowableCToken, newLeverage, leverageTypes, slippage
+  const leverageTypes = freshDepositToken.leverageTypes?.length
+    ? getHighestPriority(freshDepositToken.leverageTypes) : 'simple';
+  if (!(await freshDepositToken.isPluginApproved(leverageTypes, 'positionManager'))) {
+    await safeWaitForTx(freshDepositToken.approvePlugin(leverageTypes, 'positionManager'), freshDepositToken);
+  }
+
+  onTransactionStart?.();
+  return await safeWaitForTx(
+    freshDepositToken.leverageUp(debtToken, newLeverage, leverageTypes, slippage), freshDepositToken
   );
 }
 ```
@@ -1373,20 +1483,32 @@ mutationFn: async ({ newLeverage, onTransactionStart, slippage }) => {
 
 ```ts
 mutationFn: async ({ newLeverage, currentLeverage, slippage, onTransactionStart }) => {
-  let debtToken = token.market.tokens.find(t => t.getUserDebt(true).gt(0));
-  if (!debtToken) debtToken = borrowToken;
+  const freshToken = resolveFreshToken(token);
 
-  await token.approvePlugin('simple', 'positionManager');
+  let debtToken = freshToken.market.tokens.find(t => t.getUserDebt(true).gt(0));
+  if (!debtToken) debtToken = resolveFreshToken(borrowToken);
 
-  return await token.leverageDown(
-    borrowToken, currentLeverage, newLeverage, 'simple', slippage
+  // Use token's leverage type, but vault/native-vault fall back to 'simple'
+  // (only simple position manager implements deleverage swap routing)
+  const leverageTypes = freshToken.leverageTypes?.length
+    ? getHighestPriority(freshToken.leverageTypes) : 'simple';
+  const deleverageType =
+    leverageTypes === 'vault' || leverageTypes === 'native-vault' ? 'simple' : leverageTypes;
+
+  if (!(await freshToken.isPluginApproved(deleverageType, 'positionManager'))) {
+    await safeWaitForTx(freshToken.approvePlugin(deleverageType, 'positionManager'), freshToken);
+  }
+
+  onTransactionStart?.();
+  return await safeWaitForTx(
+    freshToken.leverageDown(debtToken, currentLeverage, newLeverage, deleverageType, slippage), freshToken
   );
 }
 ```
 
-**Pattern:** Leverage-down always uses `'simple'` type. Leverage-up uses `getHighestPriority()` from `token.leverageTypes`.
+**Pattern:** Leverage-down resolves leverage type via `getHighestPriority` then falls back to `'simple'` if vault/native-vault. Leverage-up uses `getHighestPriority` directly.
 
-**Why leverage-down is 'simple' only:** Only the simple position manager implements deleverage swap routing (collateral asset → borrow asset via dex aggregator for repayment). Vault and native-vault position managers don't expose `deleverage` calldata for the reverse path. The SDK's `leverageDown` switch statement only handles `case 'simple'` and throws on all other types.
+**Why leverage-down falls back to 'simple':** Only the simple position manager implements deleverage swap routing (collateral asset → borrow asset via dex aggregator for repayment). Vault and native-vault position managers don't expose `deleverage` calldata for the reverse path. The SDK's `leverageDown` switch statement only handles `case 'simple'` and throws on all other types. The app resolves leverage type first (to match the position's original type for plugin approval) then substitutes `'simple'` for the actual deleverage call if needed.
 
 ### Full deleverage special path (newLeverage = 1)
 
@@ -1394,23 +1516,29 @@ When fully closing a leveraged position, `leverageDown` uses a different path:
 
 ```ts
 // Inside CToken.leverageDown():
-const repay_balance = newLeverage.equals(1)
+const isFullDeleverage = newLeverage.equals(1);
+const repay_balance = isFullDeleverage
   ? await borrowToken.fetchDebtBalanceAtTimestamp(100n, false)  // projected debt 100s in future (bigint)
   : null;
-const repay_balance_with_slippage = repay_balance
-  ? repay_balance + (repay_balance * 5n / BPS)  // +0.05% buffer for interest accrual
-  : null;
 
-// Collateral to unlock:
-//   Full deleverage: repay_balance_with_slippage (enough to cover full debt + buffer)
-//   Partial: collateralAssetReduction from previewLeverageDown
+// 1. Initial quote to check if swap output covers debt
+const initialQuote = await dexAgg.quote(manager, collateralAsset, borrowAsset, collateralAssetReduction, slippage);
 
-// Min repay amount:
-//   Full deleverage: raw repay_balance (exact debt amount)
-//   Partial: quote.out - 5% tolerance
+// 2. If quote output < debt, scale up collateral proportionally
+let swapCollateral = collateralAssetReduction;
+if (isFullDeleverage && initialQuote.out < repay_balance) {
+  swapCollateral = collateralAssetReduction * repay_balance * 1005n / (initialQuote.out * 1000n);
+}
+
+// 3. Final quote with adjusted collateral
+const { action, quote } = await dexAgg.quoteAction(manager, collateralAsset, borrowAsset, swapCollateral, slippage);
+
+// 4. Min repay and contract slippage
+const minRepay = isFullDeleverage ? 1n : quote.out - BigInt(Decimal(quote.out).mul(.05).toFixed(0));
+const contractSlippage = isFullDeleverage ? slippage + 50n : slippage;  // +50 BPS for oracle variance
 ```
 
-This matters because during full deleverage, the position manager needs enough collateral to swap for the *full* debt amount plus accrued interest during tx confirmation.
+Full deleverage sets `minRepay = 1n` (contract handles exact repayment). The collateral scaling ensures enough is swapped to cover accrued interest. Contract slippage gets +50 BPS buffer for oracle price variance in the multicall.
 
 ### LeverageAction vs DeleverageAction API shapes
 
@@ -1459,13 +1587,7 @@ Gotcha: using `swapAction` (singular) in deleverage calldata or `swapActions` (a
 - Remaining tokens: any leftover debt asset, collateral asset, or swap dust is returned to user — no tokens stay in the position manager
 - `depositAsCollateral` vs `depositAsCollateralFor`: the position manager calls `depositAsCollateral(assets, msg.sender)` — the cToken recognizes position managers at the market manager level
 
-### SDK Bug Fixes (v3.6.3)
-
-The following bugs documented in earlier versions have been fixed:
-- `leverageUp` simple type now uses `virtualConvertToShares(BigInt(quote.min_out))` — matches `depositAndLeverage` pattern
-- `previewLeverageDown` now correctly computes `collateralInUsd.sub(targetCollateralUsd)` as the reduction amount
-
-**NOTE: `leverageDown` partial — hardcoded 5% minRepay is intentional defense-in-depth**
+### leverageDown partial — 5% minRepay is intentional defense-in-depth
 
 ```ts
 const minRepay = ... quote.out - (BigInt(Decimal(quote.out).mul(.05).toFixed(0)));
@@ -1474,66 +1596,16 @@ const minRepay = ... quote.out - (BigInt(Decimal(quote.out).mul(.05).toFixed(0))
 
 This is NOT a bug. The 5% floor on `repayAssets` is a sanity check against oracle/dex price divergence, separate from user slippage. User slippage is already enforced by: (1) dex quote minimum, (2) `_swapSafe` oracle-price comparison in SwapperLib, (3) `checkSlippage` portfolio modifier. The `minRepay` floor sits below all three as defense-in-depth — it catches edge cases where oracle checks pass but absolute token output is insufficient for repay.
 
-### Known V2 app bugs
-
-**BUG (dormant): `useLeverageDownMutation` — passes wrong borrow token**
-
-```ts
-// In dashboard-v2/queries/index.ts:
-const borrowToken = useDepositStore((state) => state.borrowToken as BorrowableCToken);
-
-// Finds the correct debt token:
-let debtToken = token.market?.tokens.find((token) => token.getUserDebt(true).gt(0));
-if (!debtToken) { debtToken = borrowToken; }
-
-// Then ignores it — passes borrowToken from store instead:
-const tx = await token?.leverageDown(
-    borrowToken,      // ← should be debtToken
-    currentLeverage,
-    newLeverage,
-    'simple',
-    slippage,
-);
-```
-
-Dormant in v1: with 2 assets per market, `borrowToken` from store always matches the user's actual debt token. Would break with multi-asset markets.
-
 ### V2 Dashboard Display Bugs
-
-**BUG: Deposit column sort accessor uses shares, cell displays assets**
-
-File: `dashboard-v2/tables/deposit.tsx` L53-56. The sort accessor calls `getUserShareBalance(true)` (shares × sharePrice) but the cell renders `getUserAssetBalance(true)` (assets × assetPrice). Column id is misleadingly `'getUserAssetBalance'`. Values diverge as exchange rate grows. Fix: change sort accessor to `getUserAssetBalance(true)`.
 
 **BUG: Deposit vs Collateral values differ when fully collateralized**
 
-File: `dashboard-v2/tables/deposit.tsx`. Two different conversion paths:
+File: `dashboard/v2/tables/deposit.tsx`. Two different conversion paths:
 ```
 Deposits:  cache.userAssetBalance (on-chain convertToAssets) × assetPrice
 Collateral: cache.userCollateral (collateralPosted shares) × sharePrice
 ```
-When all deposits are collateralized these should produce identical USD values (`shares × sharePrice ≡ convertToAssets(shares) × assetPrice`), but on-chain `convertToAssets()` rounding differs from client-side price ratio, producing small visible discrepancies. Fix: use a single conversion path consistently. The `manage-collateral.ts` store's `calculateCollateralBreakdown()` helper already does shares→assets correctly via `collateralShares.mul(exchangeRate)`.
-
-**BUG: Remove-collateral balance uses raw shares as asset amount**
-
-File: `manage-collateral.content.tsx` L496. For "remove" action:
-```ts
-decimalUserBalance = Decimal(token?.getUserCollateral(false).toString() || 0);
-// getUserCollateral(false) returns SHARES — treated as asset tokens
-// User input amount is in asset terms → shares - assets = dimensional mismatch
-```
-Contrast with `withdraw.content.tsx` L44-51 which correctly applies exchange rate:
-```ts
-const collateralAssets = collateralShares.mul(exchangeRate);  // ← proper conversion
-```
-Fix: apply exchangeRate or use the existing `getTokenBalanceBreakdown()` helper.
-
-**BUG: Repay preview "next debt" uses stale source, display uses real-time**
-
-File: `repay.content.tsx` L474-478. "Your Debt" display comes from `debtBalanceQuery.data` (`fetchDebtBalanceAtTimestamp()` — real-time on-chain accrued debt). But "next debt" preview uses `token.market.userDebt` (Market-level reader snapshot from page load, no interest accrual since). The two debt bases diverge by unaccrued interest since page load, making the repay preview slightly off from displayed values. Fix: use `debtBalanceQuery.data` as base for next-debt calculation.
-
-**BUG: LoansTable DebtCell falls back to $0 before query resolves**
-
-File: `LoansTable.tsx` L91. `debtBalanceQuery.data ?? new Decimal(0)` shows $0 until the on-chain query resolves, causing a visual flash. Compare `borrow-table.tsx` L2020 which correctly falls back to cached snapshot: `debtBalanceQuery.data ?? token.getUserDebt(true)`. Fix: use cached snapshot as fallback.
+When all deposits are collateralized these should produce identical USD values (`shares × sharePrice ≡ convertToAssets(shares) × assetPrice`), but on-chain `convertToAssets()` rounding differs from client-side price ratio, producing small visible discrepancies. Mitigated: dust clamping now hides sub-cent differences, but the dual conversion path remains.
 
 ### ICToken additional function variants
 
@@ -1541,9 +1613,9 @@ The contract has delegate variants (`depositAsCollateralFor`, `redeemFor`, `rede
 
 ---
 
-## Dashboard Queries
+## [DASHBOARD_QUERIES]
 
-Source: `modules/dashboard-v2/queries/index.ts`. All derive from `useSetupChainQuery` via select.
+Source: `modules/dashboard/v2/queries/index.ts`. All derive from `useSetupChainQuery` via select.
 
 ### `useDashboardOverview()`
 
@@ -1603,7 +1675,7 @@ queryKey: ['merkl', 'rewards', account.address, chainId]
 
 ---
 
-## Cooldown System
+## [COOLDOWN_SYSTEM]
 
 The protocol enforces a hold period after collateral posting or borrowing.
 
@@ -1625,7 +1697,7 @@ market.multiHoldExpiresAt(markets: Market[]): Promise<{[address]: Date | null}>
 
 ---
 
-## Position Preview Methods
+## [POSITION_PREVIEW_METHODS]
 
 All on `Market` class. Return `Percentage | null` (formatted position health after hypothetical action).
 
@@ -1651,7 +1723,7 @@ market.previewPositionHealthLeverageUp(
 ): Promise<Percentage | null>
 
 market.previewPositionHealthLeverageDown(
-  depositToken, borrowToken, currentLeverage, newLeverage
+  depositToken, borrowToken, newLeverage, currentLeverage
 ): Promise<Percentage | null>
 
 // Asset impact preview (comprehensive)
@@ -1667,12 +1739,23 @@ All leverage previews use `CToken.previewLeverageUp()` or `previewLeverageDown()
 ```ts
 // Returns: { newDebt: USD, newCollateral: USD, borrowAmount: USD,
 //            newDebtInAssets, newCollateralInAssets }
+// newDebt = total debt at target leverage (notional × newLev - notional)
+// borrowAmount = delta (newDebt - currentDebt)
 // Used by useDepositPositionSize and useDepositDebt for live preview
+```
+
+### `CToken.previewLeverageDown(newLeverage, currentLeverage, borrowToken?)`
+
+```ts
+// Returns: { collateralAssetReduction: bigint, collateralAssetReductionUsd: USD,
+//            leverageDiff: Decimal, newDebt: USD, newDebtInAssets?: TokenInput,
+//            newCollateral: USD, newCollateralInAssets: TokenInput }
+// Used by leverageDown for swap sizing and deleverage calldata
 ```
 
 ---
 
-## Token Task Group Map
+## [TOKEN_TASK_GROUP_MAP]
 
 Maps onboarding task groups to market LST tokens. Used by all mutations to start gamification tasks on tx success.
 
@@ -1689,7 +1772,7 @@ Pattern: `token.market.name.toLowerCase().split(' ')[0]` extracts the LST prefix
 
 ---
 
-## FormatConverter Complete API
+## [FORMAT_CONVERTER_COMPLETE]
 
 **File:** `src/classes/FormatConverter.ts`. All methods are static. Global precision: `Decimal.set({ precision: 50 })`. All rounding uses `Decimal.ROUND_DOWN` (truncation, never rounding up).
 
@@ -1771,7 +1854,7 @@ percentageToText(value: Percentage): string
 
 ---
 
-## Type System & Constants
+## [TYPE_SYSTEM_CONSTANTS]
 
 **File:** `src/types.ts` and `src/helpers.ts`
 
@@ -1826,7 +1909,7 @@ toBigInt(value: number | Decimal, decimals: bigint): bigint  // wraps in Decimal
 
 ---
 
-## Decimal System
+## [DECIMAL_SYSTEM]
 
 CToken exposes TWO decimal accessors that are **always equal by contract design**:
 
@@ -1855,7 +1938,7 @@ token.asset.decimals // underlying asset decimals (from cache.asset.decimals)
 
 ---
 
-## Shares ↔ Assets Conversion Pipeline
+## [SHARES_ASSETS_PIPELINE]
 
 Three conversion layers, each building on the previous:
 
@@ -1912,7 +1995,7 @@ Takes a human-readable Decimal, scales to bigint using **asset.decimals** (NOT t
 
 ---
 
-## Transaction Execution Architecture
+## [TRANSACTION_EXECUTION]
 
 Every state-changing CToken operation follows this pipeline:
 
@@ -1969,6 +2052,17 @@ abstract class Calldata<T> {
     const signer = validateProviderAsSigner(this.provider);
     return signer.sendTransaction({ to: this.address, data: calldata, ...overrides });
   }
+
+  async simulateCallData(calldata: bytes, overrides = {}): Promise<{ success: boolean; error?: string }> {
+    // Dry-run via signer.call() — does not send tx. Used by simulate=true on leverage methods.
+    const signer = validateProviderAsSigner(this.provider);
+    try {
+      await signer.call({ to: this.address, data: calldata, from: signer.address, ...overrides });
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error?.reason || error?.message || String(error) };
+    }
+  }
 }
 ```
 
@@ -2004,7 +2098,7 @@ Every contract instance is wrapped via `contractWithGasBuffer(contract, bufferPe
 
 ---
 
-## Approval Architecture
+## [APPROVAL_ARCHITECTURE]
 
 Three distinct approval types, each checking different on-chain state:
 
@@ -2136,7 +2230,7 @@ The SDK uses different conversion approaches depending on context:
 
 ---
 
-## maxRedemption Deep-Dive
+## [MAX_REDEMPTION]
 
 7 overloads controlling output format, buffer, and breakdown:
 
@@ -2185,7 +2279,7 @@ if (balance_avail - shares <= 10n) {
 
 ---
 
-## Repay Mechanics
+## [REPAY_MECHANICS]
 
 ### Debt Balance Fetching
 
@@ -2235,7 +2329,7 @@ async repay(amount: TokenInput) {
 
 ---
 
-## Slippage Handling
+## [SLIPPAGE_HANDLING]
 
 ### Contract-side: Four layers of slippage protection
 
@@ -2357,7 +2451,7 @@ This fee reduces the effective borrow amount (leverage) or collateral amount (de
 
 ---
 
-## ERC4626 Vault Layer
+## [ERC4626_VAULT_LAYER]
 
 **cTokens themselves are ERC4626 vaults.** Every cToken wraps an underlying asset and mints/burns shares on deposit/redeem — that's the base ERC4626 pattern. `token.asset` is always the underlying, `token.decimals` are the vault share decimals, and `convertToShares`/`convertToAssets` are the standard ERC4626 conversion methods.
 
@@ -2427,7 +2521,7 @@ token.getAsset(false): address
 
 ---
 
-## Redstone Oracle Integration
+## [REDSTONE_ORACLE]
 
 **File:** `src/classes/Redstone.ts`
 
@@ -2472,7 +2566,7 @@ async oracleRoute(calldata, override = {}) {
 
 ---
 
-## Zapper Architecture
+## [ZAPPER_ARCHITECTURE]
 
 **File:** `src/classes/Zapper.ts`. Extends `Calldata<IZapper>`.
 
@@ -2512,7 +2606,7 @@ token.getDepositTokens(search?): Promise<ZapToken[]>
 
 ---
 
-## ERC20 API Patterns
+## [ERC20_API_PATTERNS]
 
 **File:** `src/classes/ERC20.ts`
 
@@ -2547,7 +2641,7 @@ ERC20 has an optional `cache: StaticMarketAsset`. When populated (by ProtocolRea
 
 ---
 
-## ensureUnderlyingAmount Safety Check
+## [ENSURE_UNDERLYING_AMOUNT]
 
 ```ts
 // CToken.ensureUnderlyingAmount(amount, zap) — called at top of deposit/depositAsCollateral/depositAndLeverage
@@ -2576,7 +2670,7 @@ async ensureUnderlyingAmount(amount: TokenInput, zap: ZapperInstructions): Promi
 
 ---
 
-## Format Module (v3.6.3)
+## [FORMAT_MODULE]
 
 Source: `src/format/`. Pure functions for app-side computation — SDK is the source of truth. App should import from SDK, not duplicate logic.
 
@@ -2684,7 +2778,7 @@ normalizeCurrencyAmounts({ amount, currencyView, tokenDecimals, price, ... }): {
 
 ---
 
-## Api Class (v3.6.3)
+## [API_CLASS]
 
 Source: `src/classes/Api.ts`. Static methods for backend API communication.
 
@@ -2708,7 +2802,7 @@ type Incentives = { [key: address]: Array<IncentiveResponse> }
 
 ---
 
-## OptimizerReader (v3.6.3)
+## [OPTIMIZER_READER]
 
 Source: `src/classes/OptimizerReader.ts`. Reads optimizer (vault aggregation) data from on-chain reader contract.
 
@@ -2736,7 +2830,7 @@ class OptimizerReader {
 
 ---
 
-## Snapshot Integration (v3.6.3)
+## [SNAPSHOT_INTEGRATION]
 
 Source: `src/integrations/snapshot.ts`. Produces JSON-serializable portfolio state for indexers and cron jobs.
 
@@ -2752,16 +2846,16 @@ async function takePortfolioSnapshot(account: address, options?: { refresh?: boo
 
 ---
 
-## Yield Calculation Helpers (v3.6.3)
+## [YIELD_CALCULATION_HELPERS]
 
-Source: `src/helpers.ts`. Centralized APY computation — app should use these instead of computing inline.
+Source: `src/helpers.ts`. Exported from SDK package — app imports directly: `import { getInterestYield, getDepositApy, getBorrowCost } from 'curvance'`. App-side `deposit.utils.ts` re-exports some with app-specific overrides but defers to SDK for core logic.
 
 ```ts
 getNativeYield(token, apyOverrides?): Decimal
 // Helper param uses `token.nativeYield`; CToken property is `nativeApy`. Returns value if nonzero, else falls back to apyOverrides by symbol.
 
 getInterestYield(token): Decimal
-// Returns token.getApy() — the lending APY.
+// Returns token.getApy() — the lending APY. SDK canonical export; app no longer defines its own.
 
 getMerklDepositIncentives(tokenAddress, opportunities): Decimal
 // Matches Merkl opportunities by token address in tokens array. Returns best APR / 100.
@@ -2779,7 +2873,7 @@ getBorrowCost(token, opportunities): Decimal
 
 ---
 
-## Market Metadata Types (v3.6.3)
+## [MARKET_METADATA_TYPES]
 
 Source: `src/types.ts`. New type unions for market categorization:
 
@@ -2795,75 +2889,46 @@ Additional type additions: `TypeBPS` (bigint), `curvance_provider` (JsonRpcSigne
 
 ---
 
-## Additional Constants (v3.6.3)
 
-Source: `src/helpers.ts`. New constants beyond the core BPS/WAD/SECONDS_PER_YEAR:
+## [SECURITY_TRUST_BOUNDARIES]
 
-| Constant | Value | Use |
-|---|---|---|
-| `BPS_SQUARED` | `1e8n` | BPS × BPS calculations |
-| `WAD_BPS` | `1e22n` | WAD × BPS combined scale |
-| `RAY` | `1e27n` | 27-decimal precision (Aave-compatible) |
-| `WAD_SQUARED` | `1e36n` | WAD × WAD calculations |
-| `WAD_CUBED_BPS_OFFSET` | `1e50n` | High-precision intermediate calculations |
-| `WAD_DECIMAL` | `Decimal(WAD)` | Decimal version of WAD for mixed math |
-| `SECONDS_PER_MONTH` | `2_592_000n` | 30 days |
-| `SECONDS_PER_WEEK` | `604_800n` | 7 days |
-| `SECONDS_PER_DAY` | `86_400n` | 1 day |
-| `DEFAULT_SLIPPAGE_BPS` | `100n` | 1% default slippage |
-| `UINT256_MAX_DECIMAL` | `Decimal(UINT256_MAX)` | Decimal version for comparisons |
-| `NATIVE_ADDRESS` | `0xEeee...eEEeE` | Sentinel for native token operations |
+### External fetch() inventory
 
-New `ChangeRate` type supports all four periods: `"year" | "month" | "week" | "day"`.
+Every external HTTP call in the SDK, with validation status after security hardening (v3.7.3+):
 
----
+| File | Endpoint | Timeout | Response validation | Downstream usage |
+|---|---|---|---|---|
+| `Api.ts` | `{api_url}/v1/{chain}/native_apy` | `fetchWithTimeout` 15s | Structure check (array guard) | Display APY only |
+| `Api.ts` | `{api_url}/v1/rewards/active/{chain}` | `fetchWithTimeout` 15s | Try/catch, empty fallback | Display incentives only |
+| `Kuru.ts` | `{this.api}/generate-token` | `fetchWithTimeout` 15s | `.ok` check | JWT stored in memory |
+| `Kuru.ts` | `https://api.kuru.io/api/v2/tokens/search` | `fetchWithTimeout` 15s | `validateAddress` per token, `safeBigInt` on numerics | ERC20 construction for zap list |
+| `Kuru.ts` | `{this.api}/quote` | `fetchWithTimeout` 15s | `validateRouterAddress`, `safeBigInt`, calldata `0x` normalization | **Contract calldata** via PositionManager |
+| `KyberSwap.ts` | `{this.api}/api/v1/routes` | `fetchWithTimeout` 15s | `.ok` check | Quote intermediate |
+| `KyberSwap.ts` | `{this.api}/api/v1/route/build` | `fetchWithTimeout` 15s | `safeBigInt` on amountOut, router address check (L219) | **Contract calldata** via PositionManager |
+| `merkl.ts` | `api.merkl.xyz/v4/users/{wallet}/rewards` | `fetchWithTimeout` 15s | `.ok` check | Display rewards |
+| `merkl.ts` | `api.merkl.xyz/v4/campaigns` | `fetchWithTimeout` 15s | `.ok` check | Display campaigns |
+| `merkl.ts` | `api.merkl.xyz/v4/opportunities` | `fetchWithTimeout` 15s | `.ok` check | APY enrichment in `Market.getAll()` |
 
-## New Market Properties (v3.6.3)
+### DEX router validation comparison
 
-Source: `src/classes/Market.ts`. New getters and methods on Market class:
+| Aggregator | SDK validates router? | On-chain calldata checker? | Risk if compromised API |
+|---|---|---|---|
+| KyberSwap | Yes — `routerAddress != this.router` (L219) | Yes — `KyberSwapChecker` in chain config | Low — dual defense |
+| Kuru | Yes — `validateRouterAddress()` (added v3.7.3) | **No** — no `KuruChecker` in chain config | Medium — SDK-only defense |
 
-```ts
-get totalCollateral(): Decimal     // Sum of all token.getTotalCollateral(true)
-get ltv(): string                  // "85%" or "80% - 85%" (range across tokens)
-get plugins(): Plugins             // { simplePositionManager?, vaultPositionManager?, nativeVaultPositionManager? }
-get adapters(): bigint[]           // Oracle identifier list (maps to AdaptorTypes enum)
+### Validation utilities (`src/validation.ts`)
 
-hasBorrowing(): boolean            // True if any token is borrowable
-getBorrowableCTokens(): { eligible: BorrowableCToken[], ineligible: BorrowableCToken[] }
-// Eligible: borrowable + debtCap > 0 + user doesn't have collateral posted in that token
-// Ineligible: user has collateral posted (can't borrow from same token)
+All exported from package root. Used at every external trust boundary:
 
-async reloadMarketData()           // Refreshes dynamic data only (prices, rates, liquidity) — separate from reloadUserData
-async previewAssetImpact(user, collateral_ctoken, debt_ctoken, deposit_amount, borrow_amount, rate_change): { supply, borrow, earn }
-// Each has { percent: Decimal (APY), change: Decimal (USD per period) }
+- `safeBigInt(value, context)` — `BigInt()` with descriptive error on non-numeric
+- `validateAddress(raw, context)` — ethers `getAddress()` runtime check
+- `validateRouterAddress(actual, expected, name)` — format + allowlist
+- `fetchWithTimeout(url, options?, timeoutMs?)` — 15s default, composes with caller `AbortSignal`
+- `validateApiUrl(url)` — HTTPS scheme enforcement (called in `setupChain`)
+- `validateSlippageBps(slippage, context)` — range [0, 10000] BPS
 
-async previewPositionHealthLeverageDeposit(deposit_ctoken, borrow_ctoken, deposit_amount, borrow_amount, leverage): Percentage | null
-```
+### Supply chain notes
 
-New CToken properties set during `Market.getAll`:
-```ts
-incentiveSupplyApy: Decimal  // Merkl lend APR for this token (set from LEND opportunities)
-incentiveBorrowApy: Decimal  // Merkl borrow APR for this token (set from BORROW opportunities)
-nativeApy: Decimal           // Native yield from issuer (set from native_apy API)
-```
-
-**`Market.getAll` data-loading sequence (v3.6.3):**
-1. `reader.getAllMarketData(user)` — 3 parallel RPC calls (static, dynamic, user)
-2. In parallel: `Api.fetchNativeYields()` (filtered: excludes USDC), `fetchMerklOpportunities({ action: 'LEND' })`, `fetchMerklOpportunities({ action: 'BORROW' })`
-3. Construct Market/CToken instances from RPC data
-4. Per-token enrichment: match Merkl LEND by `identifier === token.address` → `incentiveSupplyApy`; match Merkl BORROW same way → `incentiveBorrowApy`
-5. Per-token: match native yields by symbol → `nativeApy`. YZM hardcoded to 0.083 (DeFiLlama misattribution workaround)
+`@redstone-finance/sdk@0.9.0` pulls `axios@1.14.0` into the oracle price path (`Redstone.getPayload()` → `requestDataPackages()` → `axios.get()`). Every `oracleRoute()` call for Redstone-priced tokens loads axios. Pinned to exact version in `package.json`; `.npmrc` enforces `save-exact=true` for future additions.
 
 ---
-
-## New Market Constructor (v3.6.3)
-
-Market constructor now accepts `deploy_data: DeployData`:
-```ts
-interface DeployData {
-    name: string,           // Market deploy key (e.g., "gMON | WMON")
-    plugins: { [key: string]: address }  // Plugin contract addresses
-}
-```
-
-`Market.getAll` looks up deploy data from `setup_config.contracts.markets` by matching market address. Markets without deploy data are skipped with a console warning.
