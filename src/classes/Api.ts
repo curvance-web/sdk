@@ -1,5 +1,6 @@
 import { setup_config } from "../setup";
 import { address } from "../types";
+import { fetchWithTimeout } from "../validation";
 
 export type IncentiveResponse = {
     market: address,
@@ -45,7 +46,7 @@ export class Api {
 
         if(['monad'].includes(chain)) {
             try {
-                const res = await fetch(`${api_url}/v1/${chain}/native_apy`);
+                const res = await fetchWithTimeout(`${api_url}/v1/${chain}/native_apy`);
                 const yields = await res.json() as {
                     "native_apy": {
                         symbol: string,
@@ -77,7 +78,7 @@ export class Api {
 
         let rewards;
         try {
-            rewards = await fetch(`${api_url}/v1/rewards/active/${chain}`).then(res => res.json()) as {
+            rewards = await fetchWithTimeout(`${api_url}/v1/rewards/active/${chain}`).then(res => res.json()) as {
                 milestones: Array<MilestoneResponse>
                 incentives: Array<IncentiveResponse>
             };

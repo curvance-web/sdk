@@ -5,6 +5,7 @@ import { toBigInt, toDecimal, validateProviderAsSigner, WAD } from "../../helper
 import { ZapToken } from "../CToken";
 import { Swap } from "../Zapper";
 import IDexAgg from "./IDexAgg";
+import { safeBigInt, validateAddress, validateRouterAddress, fetchWithTimeout } from "../../validation";
 
 interface KuruJWTResponse {
     token: string;
@@ -70,7 +71,7 @@ export class Kuru implements IDexAgg {
             }
         }
 
-        const resp = await fetch(`${this.api}/generate-token`, {
+        const resp = await fetchWithTimeout(`${this.api}/generate-token`, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -114,7 +115,7 @@ export class Kuru implements IDexAgg {
             endpoint += `&q=${encodeURIComponent(query)}`;
         }
 
-        const resp = await fetch(endpoint, {
+        const resp = await fetchWithTimeout(endpoint, {
             method: "GET",
             headers: {
                 "Content-Type": "application/json",
@@ -155,16 +156,24 @@ export class Kuru implements IDexAgg {
         
         let tokens: ZapToken[] = [];
         for(const token of list.data.data) {
+            let tokenAddress: address;
+            try {
+                tokenAddress = validateAddress(token.address, 'Kuru token list');
+            } catch {
+                console.warn(`Skipping token with invalid address from Kuru: ${token.address}`);
+                continue;
+            }
+
             const erc20 = new ERC20(
                 provider, 
-                token.address as address,
+                tokenAddress,
                 {
-                    address: token.address as address,
+                    address: tokenAddress,
                     name: token.name,
                     symbol: token.ticker,
-                    decimals: BigInt(token.decimals ?? 18),
-                    totalSupply: BigInt(token.total_supply ?? 0),
-                    balance: BigInt(token.balance ?? 0),
+                    decimals: safeBigInt(token.decimals ?? 18, 'Kuru token decimals'),
+                    totalSupply: safeBigInt(token.total_supply ?? 0, 'Kuru token totalSupply'),
+                    balance: safeBigInt(token.balance ?? 0, 'Kuru token balance'),
                     image: token.imageurl,
                     price: Decimal(token.last_price).div(WAD)
                 },
@@ -235,7 +244,7 @@ export class Kuru implements IDexAgg {
         };
 
         cached_requests.set(wallet, (cached_requests.get(wallet) || []).concat(this.getCurrentTime()));
-        const resp = await fetch(`${this.api}/quote`, {
+        const resp = await fetchWithTimeout(`${this.api}/quote`, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -250,11 +259,19 @@ export class Kuru implements IDexAgg {
 
         const data = await resp.json() as KuruQuoteResponse;
 
+        // Validate router address matches expected — prevents a compromised API
+        // from routing swaps through an arbitrary contract
+        validateRouterAddress(data.transaction.to, this.router, 'Kuru');
+
+        // Normalize calldata prefix — Kuru may or may not include 0x
+        const rawCalldata = data.transaction.calldata;
+        const calldata = rawCalldata.startsWith('0x') ? rawCalldata : `0x${rawCalldata}`;
+
         return {
-            to: data.transaction.to as address,
-            calldata: `0x${data.transaction.calldata}` as bytes,
-            min_out: BigInt(data.minOut),
-            out: BigInt(data.output)
+            to: validateAddress(data.transaction.to, 'Kuru quote router') as address,
+            calldata: calldata as bytes,
+            min_out: safeBigInt(data.minOut, 'Kuru quote minOut'),
+            out: safeBigInt(data.output, 'Kuru quote output')
         };
     }
 

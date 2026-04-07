@@ -6,6 +6,7 @@ import { all_markets } from "../../setup";
 import { toBigInt, validateProviderAsSigner } from "../../helpers";
 import { ERC20 } from "../ERC20";
 import FormatConverter from "../FormatConverter";
+import { safeBigInt, fetchWithTimeout } from "../../validation";
 
 export interface KyperSwapErrorResponse {
     code: number;
@@ -180,7 +181,7 @@ export class KyberSwap implements IDexAgg {
             // feeReceiver
         });
 
-        const quote_response = await fetch(`${this.api}/api/v1/routes?${params.toString()}`, {
+        const quote_response = await fetchWithTimeout(`${this.api}/api/v1/routes?${params.toString()}`, {
             method: 'GET',
             headers: {
                 'X-Client-Id': this.client_id,
@@ -193,7 +194,7 @@ export class KyberSwap implements IDexAgg {
         }
         const quote = await quote_response.json() as KyberSwapQuoteResponse;
 
-        const build_response = await fetch(`${this.api}/api/v1/route/build`, {
+        const build_response = await fetchWithTimeout(`${this.api}/api/v1/route/build`, {
             method: 'POST',
             headers: {
                 'X-Client-Id': this.client_id,
@@ -214,7 +215,8 @@ export class KyberSwap implements IDexAgg {
         }
         const build_data = await build_response.json() as KyperSwapBuildResponse;
 
-        const min_out = BigInt(build_data.data.amountOut) * BigInt(10000n - slippage) / BigInt(10000);
+        const amountOut = safeBigInt(build_data.data.amountOut, 'KyberSwap amountOut');
+        const min_out = amountOut * (10000n - slippage) / 10000n;
 
         if(build_data.data.routerAddress != this.router) {
             throw new Error(`KyberSwap returned unexpected router address: ${build_data.data.routerAddress}`);
@@ -224,7 +226,7 @@ export class KyberSwap implements IDexAgg {
             to: build_data.data.routerAddress,
             calldata: build_data.data.data as bytes,
             min_out: min_out,
-            out: BigInt(build_data.data.amountOut),
+            out: amountOut,
             raw: build_data
         }
     }
