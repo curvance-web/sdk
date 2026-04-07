@@ -5,7 +5,7 @@ import { toBigInt, toDecimal, validateProviderAsSigner, WAD } from "../../helper
 import { ZapToken } from "../CToken";
 import { Swap } from "../Zapper";
 import IDexAgg from "./IDexAgg";
-import { safeBigInt, validateAddress, validateRouterAddress, fetchWithTimeout } from "../../validation";
+import { safeBigInt, validateAddress, validateRouterAddress, fetchWithTimeout, validateSlippageBps } from "../../validation";
 
 interface KuruJWTResponse {
     token: string;
@@ -98,7 +98,10 @@ export class Kuru implements IDexAgg {
         const requests = cached_requests.get(wallet) || [];
         const windowStart = now - 2;
 
+        // Trim old entries to prevent unbounded growth
         const recentRequests = requests.filter(timestamp => timestamp > windowStart);
+        cached_requests.set(wallet, recentRequests);
+
         if(recentRequests.length >= this.rps) {
             const earliestRequest = Math.min(...recentRequests);
             const sleepTime = (earliestRequest + 2) - now;
@@ -221,6 +224,8 @@ export class Kuru implements IDexAgg {
     }
 
     async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint) {
+        validateSlippageBps(slippage, 'Kuru quote');
+
         await this.loadJWT(wallet);
         await this.rateLimitSleep(wallet);
 
@@ -254,6 +259,11 @@ export class Kuru implements IDexAgg {
         });
 
         if(!resp.ok) {
+            // Clear cached JWT on auth failure so next call fetches a fresh token
+            if(resp.status === 401 || resp.status === 403) {
+                cached_jwt.delete(wallet);
+                this.jwt = null;
+            }
             throw new Error(`Failed to fetch quote: ${resp.status} ${resp.statusText}`);
         }
 

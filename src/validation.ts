@@ -128,3 +128,18 @@ export function validateApiUrl(url: string): string {
 
     return url;
 }
+
+// ── Slippage validation ─────────────────────────────────────────────
+
+const MAX_SLIPPAGE_BPS = 10000n; // 100%
+
+/**
+ * Validate that slippage is within valid BPS range [0, 10000].
+ * Prevents negative min_out calculations when slippage > 100%.
+ */
+export function validateSlippageBps(slippage: bigint, context: string): bigint {
+    if (slippage < 0n || slippage > MAX_SLIPPAGE_BPS) {
+        throw new Error(`Slippage out of range (0-10000 BPS) in ${context}: ${slippage}`);
+    }
+    return slippage;
+}

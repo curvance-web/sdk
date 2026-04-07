@@ -6,7 +6,7 @@ import { all_markets } from "../../setup";
 import { toBigInt, validateProviderAsSigner } from "../../helpers";
 import { ERC20 } from "../ERC20";
 import FormatConverter from "../FormatConverter";
-import { safeBigInt, fetchWithTimeout } from "../../validation";
+import { safeBigInt, fetchWithTimeout, validateSlippageBps } from "../../validation";
 
 export interface KyperSwapErrorResponse {
     code: number;
@@ -171,6 +171,8 @@ export class KyberSwap implements IDexAgg {
     }
 
     async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint) {
+        validateSlippageBps(slippage, 'KyberSwap quote');
+
         const params = new URLSearchParams({
             tokenIn,
             tokenOut,
