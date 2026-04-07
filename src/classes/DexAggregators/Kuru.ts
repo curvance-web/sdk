@@ -271,14 +271,14 @@ export class Kuru implements IDexAgg {
 
         // Validate router address matches expected — prevents a compromised API
         // from routing swaps through an arbitrary contract
-        validateRouterAddress(data.transaction.to, this.router, 'Kuru');
+        const validatedRouter = validateRouterAddress(data.transaction.to, this.router, 'Kuru');
 
         // Normalize calldata prefix — Kuru may or may not include 0x
         const rawCalldata = data.transaction.calldata;
         const calldata = rawCalldata.startsWith('0x') ? rawCalldata : `0x${rawCalldata}`;
 
         return {
-            to: validateAddress(data.transaction.to, 'Kuru quote router') as address,
+            to: validatedRouter,
             calldata: calldata as bytes,
             min_out: safeBigInt(data.minOut, 'Kuru quote minOut'),
             out: safeBigInt(data.output, 'Kuru quote output')

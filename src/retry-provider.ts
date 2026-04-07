@@ -364,7 +364,7 @@ export function classifyError(error: any): {
     }
     
     // RPC errors
-    const rpcPatterns = ['rpc error', 'node error', 'provider error', 'parse error'];
+    const rpcPatterns = ['rpc error', 'node error', 'provider error'];
     
     if (rpcPatterns.some(pattern => errorMessage.includes(pattern))) {
         return { type: 'rpc', isRetryable: true, message: error.message };
