@@ -17,6 +17,10 @@ import { ERC4626 } from "./ERC4626";
 import FormatConverter from "./FormatConverter";
 import { chain_config } from "../chains";
 
+const EXCLUDED_ZAP_SYMBOLS = new Set([
+    'eBTC', 'earnAUSD', 'vUSD', 'syzUSD', 'ezETH', 'YZM', 'wsrUSD', 'sAUSD',
+]);
+
 export interface AccountSnapshot {
     asset: address;
     decimals: bigint;
@@ -116,16 +120,7 @@ export class CToken extends Calldata<ICToken> {
         this.isVault = chain_config.vaults.some(vault => vault.contract.toLowerCase() == assetAddr);
         this.isWrappedNative = chain_config.wrapped_native.toLowerCase() == assetAddr;
 
-        if([
-            'csAUSD',
-            'cwsrUSD',
-            'cezETH',
-            'csyzUSD',
-            'cearnAUSD',
-            'cYZM',
-            'cvUSD',
-            'ceBTC'
-        ].includes(this.symbol)) {
+        if(EXCLUDED_ZAP_SYMBOLS.has(this.asset.symbol)) {
             return;
         }
 
@@ -907,6 +902,8 @@ export class CToken extends Calldata<ICToken> {
                 tokens_exclude.push(NATIVE_ADDRESS.toLowerCase());
             }
         }
+
+        tokens = tokens.filter(token => token.type === 'none' || !EXCLUDED_ZAP_SYMBOLS.has(token.interface.symbol ?? ''));
 
         if(search) {
             const lowerSearch = search.toLowerCase();
