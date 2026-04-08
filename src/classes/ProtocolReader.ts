@@ -133,6 +133,7 @@ export interface IProtocolReader {
     hypotheticalBorrowOf(account: address, borrowableCToken: address, borrowAssets: bigint, bufferTime: bigint): Promise<[bigint, bigint, boolean, boolean]>;
     maxRedemptionOf(account: address, ctoken: address, bufferTime: bigint): Promise<[bigint, bigint, boolean]>;
     debtBalanceAtTimestamp(account: address, borrowableCtoken: address, timestamp: bigint): Promise<bigint>;
+    getBalancesOf(tokens: address[], account: address): Promise<bigint[]>;
 }
 
 export class ProtocolReader {
@@ -298,6 +299,10 @@ export class ProtocolReader {
 
     async debtBalanceAtTimestamp(account: address, borrowableCtoken: address, timestamp: bigint) {
         return await this.contract.debtBalanceAtTimestamp(account, borrowableCtoken, timestamp);
+    }
+
+    async getBalancesOf(tokens: address[], account: address) {
+        return await this.contract.getBalancesOf(tokens, account);
     }
 
     async getStaticMarketData(use_api = true) {
