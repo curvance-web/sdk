@@ -1193,7 +1193,7 @@ export class CToken extends Calldata<ICToken> {
             const manager = this.getPositionManager(type);
             let calldata: bytes;
 
-            const snapshot = await this._getLeverageSnapshot(borrowToken);
+            await this._getLeverageSnapshot(borrowToken);
             const { collateralAssetReduction } = this.previewLeverageDown(newLeverage, currentLeverage);
             const isFullDeleverage = newLeverage.equals(1);
 
@@ -1202,22 +1202,9 @@ export class CToken extends Calldata<ICToken> {
                     let swapCollateral = collateralAssetReduction;
 
                     if (isFullDeleverage) {
-                        // Compute swap amount from REAL debt (with 2min projected interest)
-                        // + fresh oracle rate. Avoids dust debt from stale estimates.
-                        // snapshot.debtTokenBalance is the specific borrow token's debt
-                        // in token terms, already projected by bufferTime.
-                        const debtPrice = borrowToken.getPrice(true);     // fresh from snapshot
-                        const collateralPrice = this.getPrice(true);      // fresh from snapshot
-                        const debtUsd = FormatConverter.bigIntToDecimal(snapshot.debtTokenBalance, borrowToken.asset.decimals).mul(debtPrice);
-                        const collateralNeeded = FormatConverter.decimalToBigInt(debtUsd.div(collateralPrice), this.asset.decimals);
-
-                        // Overhead for execution (routing, rounding). Aggregator fees slot for
-                        // future use. User slippage stays separate — enforced by DEX + _swapSafe.
-                        // Contract returns excess debt tokens to user (onRedeem L482-486).
                         const overheadBps = LEVERAGE.AGGREGATOR_FEE_BPS + LEVERAGE.DELEVERAGE_OVERHEAD_BPS;
-                        swapCollateral = collateralNeeded * (10000n + overheadBps) / 10000n;
+                        swapCollateral = collateralAssetReduction * (10000n + overheadBps) / 10000n;
 
-                        // Cap at total collateral — buffer can't exceed what the user has.
                         const maxCollateral = this.virtualConvertToAssets(this.cache.userCollateral);
                         if (swapCollateral > maxCollateral) {
                             swapCollateral = maxCollateral;
