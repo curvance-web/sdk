@@ -631,10 +631,12 @@ export class CToken extends Calldata<ICToken> {
         const priceForAddress = asset ? this.asset.address : this.address;
         const price = await this.market.oracle_manager.getPrice(priceForAddress, inUSD, getLower);
 
-        if(getLower) {
-            this.cache.sharePriceLower = price;
+        if (asset) {
+            if (getLower) this.cache.assetPriceLower = price;
+            else this.cache.assetPrice = price;
         } else {
-            this.cache.sharePrice = price;
+            if (getLower) this.cache.sharePriceLower = price;
+            else this.cache.sharePrice = price;
         }
         return price;
     }
@@ -927,6 +929,36 @@ export class CToken extends Calldata<ICToken> {
     }
 
     /**
+     * Fetch fresh oracle prices for both collateral and borrow tokens before
+     * computing leverage previews. Cached prices from setupChain() can be
+     * stale during volatility — the on-chain _swapSafe check (SwapperLib)
+     * uses freshly-updated Redstone prices, so borrowAmount must be sized
+     * with prices that match what the contract will see.
+     *
+     * Uses ProtocolReader.getPricesOf to batch all 3 price reads into a
+     * single RPC call (same pattern as getBalancesOf for zap balances).
+     */
+    private async _refreshLeveragePrices(borrow: BorrowableCToken): Promise<void> {
+        const assets = [
+            this.asset.address,     // [0] collateral asset price
+            this.address,           // [1] collateral share price (cToken address)
+            borrow.asset.address,   // [2] borrow asset price
+        ];
+
+        const [prices, errorCodes] = await this.market.reader.getPricesOf(assets, true, false);
+
+        for (let i = 0; i < assets.length; i++) {
+            if (errorCodes[i] !== 0n) {
+                throw new Error(`Error refreshing price for ${assets[i]}: oracle error code ${errorCodes[i]}`);
+            }
+        }
+
+        this.cache.assetPrice = prices[0]!;
+        this.cache.sharePrice = prices[1]!;
+        borrow.cache.assetPrice = prices[2]!;
+    }
+
+    /**
      * Compute slippage BPS for the contract's checkSlippage modifier when leveraging up.
      * Share rounding (vault + cToken) causes equity loss ≈ 20bps × (leverage - 1).
      * The user's swap slippage is preserved for DEX protection; this adds a buffer
@@ -1029,6 +1061,7 @@ export class CToken extends Calldata<ICToken> {
             const manager = this.getPositionManager(type);
 
             let calldata: bytes;
+            await this._refreshLeveragePrices(borrow);
             const { borrowAmount } = this.previewLeverageUp(newLeverage, borrow);
 
             switch(type) {
@@ -1109,6 +1142,7 @@ export class CToken extends Calldata<ICToken> {
             const manager = this.getPositionManager(type);
             let calldata: bytes;
 
+            await this._refreshLeveragePrices(borrowToken);
             const { collateralAssetReduction } = this.previewLeverageDown(newLeverage, currentLeverage);
             const isFullDeleverage = newLeverage.equals(1);
             const repay_balance = isFullDeleverage ? await borrowToken.fetchDebtBalanceAtTimestamp(100n, false) : null;
@@ -1193,6 +1227,7 @@ export class CToken extends Calldata<ICToken> {
             let calldata: bytes;
 
             const depositAssets = FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals);
+            await this._refreshLeveragePrices(borrow);
             const { borrowAmount } = this.previewLeverageUp(multiplier, borrow, depositAssets);
 
             switch(type) {

@@ -134,6 +134,7 @@ export interface IProtocolReader {
     maxRedemptionOf(account: address, ctoken: address, bufferTime: bigint): Promise<[bigint, bigint, boolean]>;
     debtBalanceAtTimestamp(account: address, borrowableCtoken: address, timestamp: bigint): Promise<bigint>;
     getBalancesOf(tokens: address[], account: address): Promise<bigint[]>;
+    getPricesOf(assets: address[], inUSD: boolean, getLower: boolean): Promise<[bigint[], bigint[]]>;
 }
 
 export class ProtocolReader {
@@ -303,6 +304,10 @@ export class ProtocolReader {
 
     async getBalancesOf(tokens: address[], account: address) {
         return await this.contract.getBalancesOf(tokens, account);
+    }
+
+    async getPricesOf(assets: address[], inUSD: boolean = true, getLower: boolean = false): Promise<[bigint[], bigint[]]> {
+        return await this.contract.getPricesOf(assets, inUSD, getLower);
     }
 
     async getStaticMarketData(use_api = true) {
