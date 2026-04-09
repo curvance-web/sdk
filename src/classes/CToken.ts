@@ -1156,7 +1156,7 @@ export class CToken extends Calldata<ICToken> {
             const manager = this.getPositionManager(type);
             let calldata: bytes;
 
-            await this._getLeverageSnapshot(borrowToken);
+            const snapshot = await this._getLeverageSnapshot(borrowToken);
             const { collateralAssetReduction } = this.previewLeverageDown(newLeverage, currentLeverage);
             const isFullDeleverage = newLeverage.equals(1);
 
@@ -1165,8 +1165,19 @@ export class CToken extends Calldata<ICToken> {
                     let swapCollateral = collateralAssetReduction;
 
                     if (isFullDeleverage) {
+                        // Use exact projected debt from snapshot to size the swap.
+                        // debtTokenBalance is in debt-token native decimals, projected
+                        // forward by bufferTime. Convert to collateral-asset terms via
+                        // snapshot prices (lower-bound collateral, standard debt — both
+                        // conservative, overshooting slightly). Overhead covers routing only.
+                        const debtDecimals = 10n ** borrowToken.asset.decimals;
+                        const collDecimals = 10n ** this.asset.decimals;
+                        const debtInCollateral = (
+                            snapshot.debtTokenBalance * snapshot.debtAssetPrice * collDecimals
+                        ) / (snapshot.collateralAssetPrice * debtDecimals);
+
                         const overheadBps = LEVERAGE.DELEVERAGE_OVERHEAD_BPS;
-                        swapCollateral = collateralAssetReduction * (10000n + overheadBps) / 10000n;
+                        swapCollateral = debtInCollateral * (10000n + overheadBps) / 10000n;
 
                         const maxCollateral = this.virtualConvertToAssets(this.cache.userCollateral);
                         if (swapCollateral > maxCollateral) {
@@ -1286,6 +1297,7 @@ export class CToken extends Calldata<ICToken> {
 
             if (simulate) return this.simulateOracleRoute(calldata, { to: manager.address });
 
+            await this._checkPositionManagerApproval(manager);
             return this.oracleRoute(calldata, { to: manager.address });
         } catch (error: any) {
             if (simulate) return { success: false, error: error?.reason || error?.message || String(error) };
