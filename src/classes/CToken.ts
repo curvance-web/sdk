@@ -24,46 +24,22 @@ const EXCLUDED_ZAP_SYMBOLS = new Set([
 /**
  * Leverage operation buffers — centralized for tuning.
  * Calibrated for fresh-state operation via getLeverageSnapshot.
- *
- * Three categories:
- *   Leverage sizing  — how close to target leverage we actually borrow
- *   Slippage margins — extra tolerance for on-chain checkSlippage modifier
- *   Execution overhead — swap sizing buffer for fees/routing/rounding
  */
 const LEVERAGE = {
-    // ── Leverage sizing ────────────────────────────────────────────
     /** Max leverage cap: fraction of theoretical max the user can select.
      *  Prevents boundary singularity at exact max leverage. */
     MAX_LEVERAGE_FACTOR: Decimal(0.995),
-    /** Effective borrow: fraction of target leverage factor actually borrowed.
-     *  Tiny margin for execution-time price drift between snapshot and tx. */
-    EFFECTIVE_LEVERAGE_FACTOR: Decimal(0.998),
-
-    // ── Slippage margins ───────────────────────────────────────────
     /** BPS added per unit of leverage to checkSlippage tolerance.
-     *  Covers share rounding equity loss (1-2 wei per deposit). */
-    ROUNDING_BPS_PER_UNIT: 10n,
-    /** BPS added to contract slippage for full deleverage.
-     *  Covers oracle variance between snapshot and tx (~1 block). */
-    FULL_DELEVERAGE_SLIPPAGE_BPS: 20n,
-
-    // ── Execution overhead (swap sizing) ───────────────────────────
-    /** BPS overhead on full deleverage collateral→debt swap sizing.
-     *  Covers DEX routing fees and rounding. Contract returns excess. */
-    DELEVERAGE_OVERHEAD_BPS: 20n,
-    /** Aggregator fee in BPS. Set when fee collection is enabled. */
-    AGGREGATOR_FEE_BPS: 0n,
-
-    // ── Share conversion ───────────────────────────────────────────
+     *  Covers share rounding equity loss. Sized to also absorb minor
+     *  execution-time price drift between snapshot and tx. */
+    ROUNDING_BPS_PER_UNIT: 15n,
+    /** BPS overhead on full deleverage swap sizing.
+     *  Covers DEX routing fees and rounding to prevent dust debt.
+     *  Contract returns excess. Bump when aggregator fees are enabled. */
+    DELEVERAGE_OVERHEAD_BPS: 30n,
     /** BPS buffer on virtualConvertToShares for leverage + collateral cap.
      *  Covers exchange rate drift from interest accrual since cache load. */
     SHARES_BUFFER_BPS: 2n,
-
-    // ── Partial deleverage ─────────────────────────────────────────
-    /** Fraction subtracted from quote.out for partial deleverage minRepay.
-     *  Defense-in-depth — layers 1-3 (DEX min, _swapSafe, checkSlippage)
-     *  do real enforcement. */
-    PARTIAL_DELEVERAGE_MINREPAY_FLOOR: Decimal(0.05),
 } as const;
 
 export interface AccountSnapshot {
@@ -1037,29 +1013,16 @@ export class CToken extends Calldata<ICToken> {
         const collateralInUsd = this.convertTokensToUsd(collateralAvail, false);
         const currentDebt     = this.market.userDebt;
         const notional        = collateralInUsd.sub(currentDebt);
-        // Cap effective leverage slightly below target to account for protocol
-        // leverage fee and rounding losses. The fee reduces collateral gained
-        // relative to debt incurred, causing equity loss ≈ fee% × (leverage-1).
-        // Capping at 98% of the leverage factor ensures the on-chain slippage
-        // check passes even at max leverage.
         const leverageFactor  = newLeverage.sub(1);
         const borrowPrice     = borrow.getPrice(true);
 
-        // Raw borrow amount — what the user actually owes as debt
         const rawDebtInUsd    = notional.mul(newLeverage).sub(notional);
-        const rawBorrowAmount = rawDebtInUsd.sub(currentDebt).div(borrowPrice);
-
-        // Reduced borrow amount — what we send to the contract to avoid
-        // tripping the on-chain slippage check at max leverage
-        const effectiveLeverage = Decimal(1).add(leverageFactor.mul(LEVERAGE.EFFECTIVE_LEVERAGE_FACTOR));
-        const effectiveDebtInUsd = notional.mul(effectiveLeverage).sub(notional);
-        const borrowAmount    = effectiveDebtInUsd.sub(currentDebt).div(borrowPrice);
+        const borrowAmount    = rawDebtInUsd.sub(currentDebt).div(borrowPrice);
 
         const newCollateralInUsd = notional.add(rawDebtInUsd);
 
         return {
             borrowAmount,
-            rawBorrowAmount,
             newDebt: rawDebtInUsd,
             newDebtInAssets: borrow.convertUsdToTokens(rawDebtInUsd, true),
             newCollateral: newCollateralInUsd,
@@ -1202,7 +1165,7 @@ export class CToken extends Calldata<ICToken> {
                     let swapCollateral = collateralAssetReduction;
 
                     if (isFullDeleverage) {
-                        const overheadBps = LEVERAGE.AGGREGATOR_FEE_BPS + LEVERAGE.DELEVERAGE_OVERHEAD_BPS;
+                        const overheadBps = LEVERAGE.DELEVERAGE_OVERHEAD_BPS;
                         swapCollateral = collateralAssetReduction * (10000n + overheadBps) / 10000n;
 
                         const maxCollateral = this.virtualConvertToAssets(this.cache.userCollateral);
@@ -1219,12 +1182,7 @@ export class CToken extends Calldata<ICToken> {
                         slippage
                     );
 
-                    const minRepay = isFullDeleverage
-                        ? 1n
-                        : quote.out - (BigInt(Decimal(quote.out).mul(LEVERAGE.PARTIAL_DELEVERAGE_MINREPAY_FLOOR).toFixed(0)));
-                    const contractSlippage = isFullDeleverage
-                        ? slippage + LEVERAGE.FULL_DELEVERAGE_SLIPPAGE_BPS
-                        : slippage;
+                    const minRepay = isFullDeleverage ? 1n : quote.min_out;
 
                     calldata = manager.getDeleverageCalldata({
                         cToken: this.address,
@@ -1233,7 +1191,7 @@ export class CToken extends Calldata<ICToken> {
                         repayAssets: BigInt(minRepay),
                         swapActions: [ action ],
                         auxData: "0x",
-                    }, FormatConverter.bpsToBpsWad(contractSlippage));
+                    }, FormatConverter.bpsToBpsWad(slippage));
 
                     break;
                 }
