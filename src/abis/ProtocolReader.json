@@ -338,34 +338,64 @@
   },
   {
     "type": "function",
-    "name": "getPricesOf",
+    "name": "getLeverageSnapshot",
     "inputs": [
       {
-        "name": "assets",
-        "type": "address[]",
-        "internalType": "address[]"
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
       },
       {
-        "name": "inUSD",
-        "type": "bool",
-        "internalType": "bool"
+        "name": "cToken",
+        "type": "address",
+        "internalType": "address"
       },
       {
-        "name": "getLower",
-        "type": "bool",
-        "internalType": "bool"
+        "name": "borrowableCToken",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "bufferTime",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "outputs": [
       {
-        "name": "prices",
-        "type": "uint256[]",
-        "internalType": "uint256[]"
+        "name": "collateralUsd",
+        "type": "uint256",
+        "internalType": "uint256"
       },
       {
-        "name": "errorCodes",
-        "type": "uint256[]",
-        "internalType": "uint256[]"
+        "name": "debtUsd",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "collateralAssetPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "sharePrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "debtAssetPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "debtTokenBalance",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "oracleError",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "stateMutability": "view"

@@ -134,7 +134,7 @@ export interface IProtocolReader {
     maxRedemptionOf(account: address, ctoken: address, bufferTime: bigint): Promise<[bigint, bigint, boolean]>;
     debtBalanceAtTimestamp(account: address, borrowableCtoken: address, timestamp: bigint): Promise<bigint>;
     getBalancesOf(tokens: address[], account: address): Promise<bigint[]>;
-    getPricesOf(assets: address[], inUSD: boolean, getLower: boolean): Promise<[bigint[], bigint[]]>;
+    getLeverageSnapshot(account: address, cToken: address, borrowableCToken: address, bufferTime: bigint): Promise<[bigint, bigint, bigint, bigint, bigint, bigint, boolean]>;
 }
 
 export class ProtocolReader {
@@ -306,8 +306,10 @@ export class ProtocolReader {
         return await this.contract.getBalancesOf(tokens, account);
     }
 
-    async getPricesOf(assets: address[], inUSD: boolean = true, getLower: boolean = false): Promise<[bigint[], bigint[]]> {
-        return await this.contract.getPricesOf(assets, inUSD, getLower);
+    async getLeverageSnapshot(account: address, cToken: address, borrowableCToken: address, bufferTime: bigint = 120n) {
+        const [collateralUsd, debtUsd, collateralAssetPrice, sharePrice, debtAssetPrice, debtTokenBalance, oracleError] =
+            await this.contract.getLeverageSnapshot(account, cToken, borrowableCToken, bufferTime);
+        return { collateralUsd, debtUsd, collateralAssetPrice, sharePrice, debtAssetPrice, debtTokenBalance, oracleError };
     }
 
     async getStaticMarketData(use_api = true) {

@@ -936,33 +936,32 @@ export class CToken extends Calldata<ICToken> {
     }
 
     /**
-     * Fetch fresh oracle prices for both collateral and borrow tokens before
-     * computing leverage previews. Cached prices from setupChain() can be
-     * stale during volatility — the on-chain _swapSafe check (SwapperLib)
-     * uses freshly-updated Redstone prices, so borrowAmount must be sized
-     * with prices that match what the contract will see.
+     * Single-RPC snapshot of fresh position state for leverage operations.
+     * Calls ProtocolReader.getLeverageSnapshot which internally uses
+     * hypotheticalLiquidityOf for aggregate position + fresh oracle prices
+     * + projected debt balance. Updates the local cache so downstream
+     * preview computations (previewLeverageUp/Down) read fresh values.
      *
-     * Uses ProtocolReader.getPricesOf to batch all 3 price reads into a
-     * single RPC call (same pattern as getBalancesOf for zap balances).
+     * Returns the snapshot for direct use where needed (e.g. debtTokenBalance
+     * for full deleverage swap sizing).
      */
-    private async _refreshLeveragePrices(borrow: BorrowableCToken): Promise<void> {
-        const assets = [
-            this.asset.address,     // [0] collateral asset price
-            this.address,           // [1] collateral share price (cToken address)
-            borrow.asset.address,   // [2] borrow asset price
-        ];
+    private async _getLeverageSnapshot(borrow: BorrowableCToken) {
+        const signer = validateProviderAsSigner(this.provider);
+        const snapshot = await this.market.reader.getLeverageSnapshot(
+            signer.address as address, this.address, borrow.address, 120n
+        );
 
-        const [prices, errorCodes] = await this.market.reader.getPricesOf(assets, true, false);
-
-        for (let i = 0; i < assets.length; i++) {
-            if (errorCodes[i] !== 0n) {
-                throw new Error(`Error refreshing price for ${assets[i]}: oracle error code ${errorCodes[i]}`);
-            }
+        if (snapshot.oracleError) {
+            throw new Error(`Oracle error fetching leverage snapshot for ${this.symbol}/${borrow.symbol}`);
         }
 
-        this.cache.assetPrice = prices[0]!;
-        this.cache.sharePrice = prices[1]!;
-        borrow.cache.assetPrice = prices[2]!;
+        // Update cache so preview functions read fresh values
+        this.cache.assetPrice = snapshot.collateralAssetPrice;
+        this.cache.sharePrice = snapshot.sharePrice;
+        borrow.cache.assetPrice = snapshot.debtAssetPrice;
+        this.market.cache.user.debt = snapshot.debtUsd;
+
+        return snapshot;
     }
 
     /**
@@ -1068,7 +1067,7 @@ export class CToken extends Calldata<ICToken> {
             const manager = this.getPositionManager(type);
 
             let calldata: bytes;
-            await this._refreshLeveragePrices(borrow);
+            await this._getLeverageSnapshot(borrow);
             const { borrowAmount } = this.previewLeverageUp(newLeverage, borrow);
 
             switch(type) {
@@ -1149,25 +1148,36 @@ export class CToken extends Calldata<ICToken> {
             const manager = this.getPositionManager(type);
             let calldata: bytes;
 
-            await this._refreshLeveragePrices(borrowToken);
+            const snapshot = await this._getLeverageSnapshot(borrowToken);
             const { collateralAssetReduction } = this.previewLeverageDown(newLeverage, currentLeverage);
             const isFullDeleverage = newLeverage.equals(1);
-            const repay_balance = isFullDeleverage ? await borrowToken.fetchDebtBalanceAtTimestamp(100n, false) : null;
 
             switch(type) {
                 case 'simple': {
                     let swapCollateral = collateralAssetReduction;
 
                     if (isFullDeleverage) {
-                        const initialQuote = await config.dexAgg.quote(
-                            manager.address,
-                            this.asset.address,
-                            borrowToken.asset.address,
-                            collateralAssetReduction,
-                            slippage
-                        );
-                        if (initialQuote.out < (repay_balance as bigint)) {
-                            swapCollateral = collateralAssetReduction * (repay_balance as bigint) * 1005n / (initialQuote.out * 1000n);
+                        // Compute swap amount from REAL debt (with 2min projected interest)
+                        // + fresh oracle rate. Avoids dust debt from stale estimates.
+                        // snapshot.debtTokenBalance is the specific borrow token's debt
+                        // in token terms, already projected by bufferTime.
+                        const debtPrice = borrowToken.getPrice(true);     // fresh from snapshot
+                        const collateralPrice = this.getPrice(true);      // fresh from snapshot
+                        const debtUsd = FormatConverter.bigIntToDecimal(snapshot.debtTokenBalance, borrowToken.asset.decimals).mul(debtPrice);
+                        const collateralNeeded = FormatConverter.decimalToBigInt(debtUsd.div(collateralPrice), this.asset.decimals);
+
+                        // Overhead for execution (routing, rounding). Aggregator fees slot for
+                        // future use. User slippage stays separate — enforced by DEX + _swapSafe.
+                        // Contract returns excess debt tokens to user (onRedeem L482-486).
+                        const overheadBps =
+                            0n +   // aggregatorFeeBps: future — set when aggregator fees are enabled
+                            15n;   // driftBps: execution overhead (routing, rounding)
+                        swapCollateral = collateralNeeded * (10000n + overheadBps) / 10000n;
+
+                        // Cap at total collateral — buffer can't exceed what the user has.
+                        const maxCollateral = this.virtualConvertToAssets(this.cache.userCollateral);
+                        if (swapCollateral > maxCollateral) {
+                            swapCollateral = maxCollateral;
                         }
                     }
 
@@ -1234,7 +1244,7 @@ export class CToken extends Calldata<ICToken> {
             let calldata: bytes;
 
             const depositAssets = FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals);
-            await this._refreshLeveragePrices(borrow);
+            await this._getLeverageSnapshot(borrow);
             const { borrowAmount } = this.previewLeverageUp(multiplier, borrow, depositAssets);
 
             switch(type) {
