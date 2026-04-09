@@ -2,6 +2,7 @@ import { Contract, N, TransactionResponse } from "ethers";
 import { address, bytes, curvance_signer } from "../types";
 import { contractSetup, EMPTY_ADDRESS, EMPTY_BYTES, getChainConfig, NATIVE_ADDRESS } from "../helpers";
 import { CToken } from "./CToken";
+import { ERC20 } from "./ERC20";
 import { Calldata } from "./Calldata";
 import abi from '../abis/SimpleZapper.json';
 import { Zappers } from "./Market";
@@ -81,7 +82,15 @@ export class Zapper extends Calldata<IZapper> {
             call: quote.calldata
         };
 
-        const expected_shares = await ctoken.convertToShares(BigInt(quote.min_out));
+        // Use on-chain oracle prices for the slippage check instead of
+        // KyberSwap's quoted output, which can be stale.
+        const inputPrice = await ctoken.market.oracle_manager.getPrice(swapInputToken, true, false);
+        const outputPrice = await ctoken.market.oracle_manager.getPrice(outputToken, true, false);
+        const inputDecimals = await new ERC20(ctoken.provider, swapInputToken).fetchDecimals();
+        const outputDecimals = ctoken.asset.decimals;
+        const oracleExpectedOut = amount * inputPrice * (10n ** BigInt(outputDecimals)) / (outputPrice * (10n ** BigInt(inputDecimals)));
+        const oracleMinOut = oracleExpectedOut * (10000n - slippage) / 10000n;
+        const expected_shares = await ctoken.convertToShares(oracleMinOut);
 
         return this.getCallData("swapAndDeposit", [
             ctoken.address,

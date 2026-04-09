@@ -1033,7 +1033,7 @@ export class CToken extends Calldata<ICToken> {
 
             switch(type) {
                 case 'simple': {
-                    const { action, quote } = await chain_config[setup_config.chain].dexAgg.quoteAction(
+                    const { action } = await chain_config[setup_config.chain].dexAgg.quoteAction(
                         manager.address,
                         borrow.asset.address,
                         this.asset.address,
@@ -1041,12 +1041,20 @@ export class CToken extends Calldata<ICToken> {
                         slippage
                     );
 
+                    // Use on-chain oracle prices for the slippage check instead of
+                    // KyberSwap's quoted output, which can be stale.
+                    const oracleExpectedOut = FormatConverter.decimalToBigInt(
+                        borrowAmount.mul(borrow.getPrice(true)).div(this.getPrice(true)),
+                        this.asset.decimals
+                    );
+                    const oracleMinOut = oracleExpectedOut * (10000n - slippage) / 10000n;
+
                     calldata = manager.getLeverageCalldata(
                         {
                             borrowableCToken: borrow.address,
                             borrowAssets    : FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
                             cToken          : this.address,
-                            expectedShares  : this.virtualConvertToShares(BigInt(quote.min_out)),
+                            expectedShares  : this.virtualConvertToShares(oracleMinOut),
                             swapAction      : action,
                             auxData         : "0x",
                         },
@@ -1118,19 +1126,20 @@ export class CToken extends Calldata<ICToken> {
                     let swapCollateral = collateralAssetReduction;
 
                     if (isFullDeleverage) {
-                        const initialQuote = await config.dexAgg.quote(
-                            manager.address,
-                            this.asset.address,
-                            borrowToken.asset.address,
-                            collateralAssetReduction,
-                            slippage
+                        // Use on-chain oracle prices to estimate swap output instead of
+                        // KyberSwap's quote, which can be stale.
+                        const oracleOut = FormatConverter.decimalToBigInt(
+                            FormatConverter.bigIntToDecimal(collateralAssetReduction, this.asset.decimals)
+                                .mul(this.getPrice(true))
+                                .div(borrowToken.getPrice(true)),
+                            borrowToken.asset.decimals
                         );
-                        if (initialQuote.out < (repay_balance as bigint)) {
-                            swapCollateral = collateralAssetReduction * (repay_balance as bigint) * 1005n / (initialQuote.out * 1000n);
+                        if (oracleOut < (repay_balance as bigint)) {
+                            swapCollateral = collateralAssetReduction * (repay_balance as bigint) * 1005n / (oracleOut * 1000n);
                         }
                     }
 
-                    const { action, quote } = await config.dexAgg.quoteAction(
+                    const { action } = await config.dexAgg.quoteAction(
                         manager.address,
                         this.asset.address,
                         borrowToken.asset.address,
@@ -1138,7 +1147,15 @@ export class CToken extends Calldata<ICToken> {
                         slippage
                     );
 
-                    const minRepay = isFullDeleverage ? 1n : quote.out - (BigInt(Decimal(quote.out).mul(.05).toFixed(0)));
+                    // Use on-chain oracle prices for the slippage check instead of
+                    // KyberSwap's quoted output, which can be stale.
+                    const oracleExpectedRepay = FormatConverter.decimalToBigInt(
+                        FormatConverter.bigIntToDecimal(swapCollateral, this.asset.decimals)
+                            .mul(this.getPrice(true))
+                            .div(borrowToken.getPrice(true)),
+                        borrowToken.asset.decimals
+                    );
+                    const minRepay = isFullDeleverage ? 1n : oracleExpectedRepay * (10000n - slippage) / 10000n;
                     // For full deleverage, add 50bps buffer to the contract-level slippage
                     // check to account for oracle price variance in the oracleRoute multicall.
                     const contractSlippage = isFullDeleverage
@@ -1197,7 +1214,7 @@ export class CToken extends Calldata<ICToken> {
 
             switch(type) {
                 case 'simple': {
-                    const { action, quote } = await chain_config[setup_config.chain].dexAgg.quoteAction(
+                    const { action } = await chain_config[setup_config.chain].dexAgg.quoteAction(
                         manager.address,
                         borrow.asset.address,
                         this.asset.address,
@@ -1205,13 +1222,21 @@ export class CToken extends Calldata<ICToken> {
                         slippage
                     );
 
+                    // Use on-chain oracle prices for the slippage check instead of
+                    // KyberSwap's quoted output, which can be stale.
+                    const oracleExpectedOut = FormatConverter.decimalToBigInt(
+                        borrowAmount.mul(borrow.getPrice(true)).div(this.getPrice(true)),
+                        this.asset.decimals
+                    );
+                    const oracleMinOut = oracleExpectedOut * (10000n - slippage) / 10000n;
+
                     calldata = manager.getDepositAndLeverageCalldata(
                         FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals),
                         {
                             borrowableCToken: borrow.address,
                             borrowAssets: FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
                             cToken: this.address,
-                            expectedShares: this.virtualConvertToShares(BigInt(quote.min_out)),
+                            expectedShares: this.virtualConvertToShares(oracleMinOut),
                             swapAction: action,
                             auxData: "0x",
                         },
