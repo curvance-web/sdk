@@ -170,8 +170,15 @@ export class CToken extends Calldata<ICToken> {
         return (shares * this.totalAssets) / this.totalSupply;
     }
 
-    virtualConvertToShares(assets: bigint): bigint {
-        return (assets * this.totalSupply) / this.totalAssets;
+    /**
+     * Convert assets to shares using cached totalSupply/totalAssets.
+     * @param bufferBps Optional downward buffer in BPS to account for
+     *                  exchange rate drift from interest accrual since cache load.
+     *                  Matches the buffer pattern in async convertToShares().
+     */
+    virtualConvertToShares(assets: bigint, bufferBps: bigint = 0n): bigint {
+        const shares = (assets * this.totalSupply) / this.totalAssets;
+        return bufferBps > 0n ? shares * (10000n - bufferBps) / 10000n : shares;
     }
 
     getLeverage() {
@@ -1079,7 +1086,7 @@ export class CToken extends Calldata<ICToken> {
                             borrowableCToken: borrow.address,
                             borrowAssets    : FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
                             cToken          : this.address,
-                            expectedShares  : this.virtualConvertToShares(BigInt(quote.min_out)),
+                            expectedShares  : this.virtualConvertToShares(BigInt(quote.min_out), 2n),
                             swapAction      : action,
                             auxData         : "0x",
                         },
@@ -1246,7 +1253,7 @@ export class CToken extends Calldata<ICToken> {
                             borrowableCToken: borrow.address,
                             borrowAssets: FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
                             cToken: this.address,
-                            expectedShares: this.virtualConvertToShares(BigInt(quote.min_out)),
+                            expectedShares: this.virtualConvertToShares(BigInt(quote.min_out), 2n),
                             swapAction: action,
                             auxData: "0x",
                         },
@@ -1464,7 +1471,7 @@ export class CToken extends Calldata<ICToken> {
             const remainingCollateral = this.getRemainingCollateral(false);
             if(remainingCollateral == 0n) throw new Error(collateralCapError);
             if(remainingCollateral > 0n) {
-                const shares = this.virtualConvertToShares(depositAssets);
+                const shares = this.virtualConvertToShares(depositAssets, 2n);
                 if(shares > remainingCollateral) {
                     throw new Error(collateralCapError);
                 }

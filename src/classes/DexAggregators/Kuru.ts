@@ -6,6 +6,7 @@ import { ZapToken } from "../CToken";
 import { Swap } from "../Zapper";
 import IDexAgg from "./IDexAgg";
 import { safeBigInt, validateAddress, validateRouterAddress, fetchWithTimeout, validateSlippageBps } from "../../validation";
+import FormatConverter from "../FormatConverter";
 
 interface KuruJWTResponse {
     token: string;
@@ -211,7 +212,7 @@ export class Kuru implements IDexAgg {
             inputAmount: BigInt(amount),
             outputToken: tokenOut,
             target: quote.to,
-            slippage: slippage ?? 0n,
+            slippage: slippage ? FormatConverter.bpsToBpsWad(slippage) : 0n,
             call: quote.calldata
         } as Swap;
 
