@@ -21,6 +21,51 @@ const EXCLUDED_ZAP_SYMBOLS = new Set([
     'eBTC', 'earnAUSD', 'vUSD', 'syzUSD', 'ezETH', 'YZM', 'wsrUSD', 'sAUSD',
 ]);
 
+/**
+ * Leverage operation buffers — centralized for tuning.
+ * Calibrated for fresh-state operation via getLeverageSnapshot.
+ *
+ * Three categories:
+ *   Leverage sizing  — how close to target leverage we actually borrow
+ *   Slippage margins — extra tolerance for on-chain checkSlippage modifier
+ *   Execution overhead — swap sizing buffer for fees/routing/rounding
+ */
+const LEVERAGE = {
+    // ── Leverage sizing ────────────────────────────────────────────
+    /** Max leverage cap: fraction of theoretical max the user can select.
+     *  Prevents boundary singularity at exact max leverage. */
+    MAX_LEVERAGE_FACTOR: Decimal(0.995),
+    /** Effective borrow: fraction of target leverage factor actually borrowed.
+     *  Tiny margin for execution-time price drift between snapshot and tx. */
+    EFFECTIVE_LEVERAGE_FACTOR: Decimal(0.998),
+
+    // ── Slippage margins ───────────────────────────────────────────
+    /** BPS added per unit of leverage to checkSlippage tolerance.
+     *  Covers share rounding equity loss (1-2 wei per deposit). */
+    ROUNDING_BPS_PER_UNIT: 10n,
+    /** BPS added to contract slippage for full deleverage.
+     *  Covers oracle variance between snapshot and tx (~1 block). */
+    FULL_DELEVERAGE_SLIPPAGE_BPS: 20n,
+
+    // ── Execution overhead (swap sizing) ───────────────────────────
+    /** BPS overhead on full deleverage collateral→debt swap sizing.
+     *  Covers DEX routing fees and rounding. Contract returns excess. */
+    DELEVERAGE_OVERHEAD_BPS: 20n,
+    /** Aggregator fee in BPS. Set when fee collection is enabled. */
+    AGGREGATOR_FEE_BPS: 0n,
+
+    // ── Share conversion ───────────────────────────────────────────
+    /** BPS buffer on virtualConvertToShares for leverage + collateral cap.
+     *  Covers exchange rate drift from interest accrual since cache load. */
+    SHARES_BUFFER_BPS: 2n,
+
+    // ── Partial deleverage ─────────────────────────────────────────
+    /** Fraction subtracted from quote.out for partial deleverage minRepay.
+     *  Defense-in-depth — layers 1-3 (DEX min, _swapSafe, checkSlippage)
+     *  do real enforcement. */
+    PARTIAL_DELEVERAGE_MINREPAY_FLOOR: Decimal(0.05),
+} as const;
+
 export interface AccountSnapshot {
     asset: address;
     decimals: bigint;
@@ -152,7 +197,7 @@ export class CToken extends Calldata<ICToken> {
         // to account for share rounding and fee losses that prevent reaching the exact max.
         const theoretical = Decimal(this.cache.maxLeverage).div(BPS);
         const factor = theoretical.sub(1);
-        return Decimal(1).add(factor.mul(Decimal(0.99)));
+        return Decimal(1).add(factor.mul(LEVERAGE.MAX_LEVERAGE_FACTOR));
     }
     get canLeverage() { return this.leverageTypes.length > 0; }
     get totalAssets() { return this.cache.totalAssets; }
@@ -974,7 +1019,7 @@ export class CToken extends Calldata<ICToken> {
         const leverageFactor = leverage.sub(1);
         if (leverageFactor.lte(0)) return slippage;
         // ~20bps per unit of leverage factor for rounding losses
-        const buffer = BigInt(leverageFactor.mul(20).ceil().toFixed(0));
+        const buffer = BigInt(leverageFactor.mul(Number(LEVERAGE.ROUNDING_BPS_PER_UNIT)).ceil().toFixed(0));
         return slippage + buffer;
     }
 
@@ -1006,7 +1051,7 @@ export class CToken extends Calldata<ICToken> {
 
         // Reduced borrow amount — what we send to the contract to avoid
         // tripping the on-chain slippage check at max leverage
-        const effectiveLeverage = Decimal(1).add(leverageFactor.mul(Decimal(0.99)));
+        const effectiveLeverage = Decimal(1).add(leverageFactor.mul(LEVERAGE.EFFECTIVE_LEVERAGE_FACTOR));
         const effectiveDebtInUsd = notional.mul(effectiveLeverage).sub(notional);
         const borrowAmount    = effectiveDebtInUsd.sub(currentDebt).div(borrowPrice);
 
@@ -1085,7 +1130,7 @@ export class CToken extends Calldata<ICToken> {
                             borrowableCToken: borrow.address,
                             borrowAssets    : FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
                             cToken          : this.address,
-                            expectedShares  : this.virtualConvertToShares(BigInt(quote.min_out), 2n),
+                            expectedShares  : this.virtualConvertToShares(BigInt(quote.min_out), LEVERAGE.SHARES_BUFFER_BPS),
                             swapAction      : action,
                             auxData         : "0x",
                         },
@@ -1169,9 +1214,7 @@ export class CToken extends Calldata<ICToken> {
                         // Overhead for execution (routing, rounding). Aggregator fees slot for
                         // future use. User slippage stays separate — enforced by DEX + _swapSafe.
                         // Contract returns excess debt tokens to user (onRedeem L482-486).
-                        const overheadBps =
-                            0n +   // aggregatorFeeBps: future — set when aggregator fees are enabled
-                            15n;   // driftBps: execution overhead (routing, rounding)
+                        const overheadBps = LEVERAGE.AGGREGATOR_FEE_BPS + LEVERAGE.DELEVERAGE_OVERHEAD_BPS;
                         swapCollateral = collateralNeeded * (10000n + overheadBps) / 10000n;
 
                         // Cap at total collateral — buffer can't exceed what the user has.
@@ -1189,11 +1232,11 @@ export class CToken extends Calldata<ICToken> {
                         slippage
                     );
 
-                    const minRepay = isFullDeleverage ? 1n : quote.out - (BigInt(Decimal(quote.out).mul(.05).toFixed(0)));
-                    // For full deleverage, add 50bps buffer to the contract-level slippage
-                    // check to account for oracle price variance in the oracleRoute multicall.
+                    const minRepay = isFullDeleverage
+                        ? 1n
+                        : quote.out - (BigInt(Decimal(quote.out).mul(LEVERAGE.PARTIAL_DELEVERAGE_MINREPAY_FLOOR).toFixed(0)));
                     const contractSlippage = isFullDeleverage
-                        ? slippage + 50n
+                        ? slippage + LEVERAGE.FULL_DELEVERAGE_SLIPPAGE_BPS
                         : slippage;
 
                     calldata = manager.getDeleverageCalldata({
@@ -1263,7 +1306,7 @@ export class CToken extends Calldata<ICToken> {
                             borrowableCToken: borrow.address,
                             borrowAssets: FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
                             cToken: this.address,
-                            expectedShares: this.virtualConvertToShares(BigInt(quote.min_out), 2n),
+                            expectedShares: this.virtualConvertToShares(BigInt(quote.min_out), LEVERAGE.SHARES_BUFFER_BPS),
                             swapAction: action,
                             auxData: "0x",
                         },
@@ -1481,7 +1524,7 @@ export class CToken extends Calldata<ICToken> {
             const remainingCollateral = this.getRemainingCollateral(false);
             if(remainingCollateral == 0n) throw new Error(collateralCapError);
             if(remainingCollateral > 0n) {
-                const shares = this.virtualConvertToShares(depositAssets, 2n);
+                const shares = this.virtualConvertToShares(depositAssets, LEVERAGE.SHARES_BUFFER_BPS);
                 if(shares > remainingCollateral) {
                     throw new Error(collateralCapError);
                 }
