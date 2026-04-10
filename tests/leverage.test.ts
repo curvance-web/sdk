@@ -213,4 +213,94 @@ describe('Leverage', () => {
         assert(leverageAfterDown !== null, 'Leverage should not be null after leverageDown');
         assert(leverageAfterDown!.lt(leverageAfterUp!), `Leverage should decrease: was ${leverageAfterUp}, now ${leverageAfterDown}`);
     });
+
+    // SDK-003: Full deleverage at user-facing minimum slippage.
+    // Bug: BasePositionManager__InvalidSlippage (0xeac6760a) was thrown
+    // when going from L > ~4 to L=1 at 1% user slippage. Cause: the PR
+    // removed the contract-slippage expansion that compensates for the
+    // (L-1) × DELEVERAGE_OVERHEAD_BPS equity-amplified forced loss from
+    // the intentional swap overshoot. Without expansion, the contract's
+    // checkSlippage modifier sees the overshoot as equity loss exceeding
+    // the user's tolerance and reverts.
+    //
+    // This test reproduces the exact failure mode and validates the fix.
+    test('SDK-003: full deleverage from 3x at 1% slippage', async function() {
+        const [ market, cWMON, cUSDC ] = await framework.getMarket('WMON | USDC');
+
+        await cUSDC.approveUnderlying();
+        await cUSDC.deposit(Decimal(5000));
+
+        const depositAmount = Decimal(1_000);
+        await cWMON.approveUnderlying(depositAmount);
+        await cWMON.depositAsCollateral(depositAmount);
+
+        await cWMON.approvePlugin('simple', 'positionManager');
+        await cWMON.leverageUp(cUSDC, Decimal(3), 'simple', Decimal(0.01));
+
+        const leverageBeforeDown = cWMON.getLeverage();
+        console.log(`Leverage before full deleverage: ${leverageBeforeDown}`);
+        assert(leverageBeforeDown !== null, 'Leverage should not be null after leverageUp');
+        assert(leverageBeforeDown!.gte(Decimal(2.5)),
+            `Expected leverage ≥ 2.5 after up, got ${leverageBeforeDown}`);
+
+        // Full deleverage at the user-facing minimum slippage (1%).
+        // Pre-fix this reverted with BasePositionManager__InvalidSlippage.
+        await framework.skipMarketCooldown(market.address);
+        await cWMON.leverageDown(cUSDC, leverageBeforeDown!, Decimal(1), 'simple', Decimal(0.01));
+
+        // After full deleverage, debt should be effectively zero.
+        const debtAfter = cWMON.market.userDebt;
+        console.log(`Debt after full deleverage: ${debtAfter}`);
+        assert(debtAfter.lt(Decimal(0.01)),
+            `Debt should be ~0 after full deleverage, got ${debtAfter}`);
+
+        // Leverage should be ~1 (or null, if computed from zero debt).
+        const leverageAfter = cWMON.getLeverage();
+        console.log(`Leverage after full deleverage: ${leverageAfter}`);
+        assert(leverageAfter === null || leverageAfter.lte(Decimal(1.001)),
+            `Expected leverage ~1 or null after full deleverage, got ${leverageAfter}`);
+    });
+
+    // SDK-004: Full deleverage from higher source leverage.
+    // The contract-slippage expansion is (currentLeverage - 1) × DELEVERAGE_OVERHEAD_BPS.
+    // At higher source leverage, the (L-1) amplification factor grows, so
+    // this stresses the math at a different operating point than SDK-003.
+    // Also validates that leverageUp at L=5 with 1% user slippage works
+    // (the flat LEVERAGE_UP_BUFFER_BPS is sized to handle this).
+    test('SDK-004: full deleverage from 5x at 1% slippage', async function() {
+        const [ market, cWMON, cUSDC ] = await framework.getMarket('WMON | USDC');
+
+        // Seed extra liquidity for higher leverage (~$4k borrow needed at 5x)
+        await cUSDC.approveUnderlying();
+        await cUSDC.deposit(Decimal(20_000));
+
+        const depositAmount = Decimal(1_000);
+        await cWMON.approveUnderlying(depositAmount);
+        await cWMON.depositAsCollateral(depositAmount);
+
+        await cWMON.approvePlugin('simple', 'positionManager');
+        await cWMON.leverageUp(cUSDC, Decimal(5), 'simple', Decimal(0.01));
+
+        const leverageBeforeDown = cWMON.getLeverage();
+        console.log(`Leverage before full deleverage: ${leverageBeforeDown}`);
+        assert(leverageBeforeDown !== null, 'Leverage should not be null after leverageUp');
+        assert(leverageBeforeDown!.gte(Decimal(4.5)),
+            `Expected leverage ≥ 4.5 after up to 5x, got ${leverageBeforeDown}`);
+
+        // Full deleverage from ~5x at 1% slippage.
+        // Pre-fix this would fail more dramatically than the 3x case because
+        // the (L-1) amplification scales linearly with starting leverage.
+        await framework.skipMarketCooldown(market.address);
+        await cWMON.leverageDown(cUSDC, leverageBeforeDown!, Decimal(1), 'simple', Decimal(0.01));
+
+        const debtAfter = cWMON.market.userDebt;
+        console.log(`Debt after full deleverage from 5x: ${debtAfter}`);
+        assert(debtAfter.lt(Decimal(0.01)),
+            `Debt should be ~0 after full deleverage from ${leverageBeforeDown}, got ${debtAfter}`);
+
+        const leverageAfter = cWMON.getLeverage();
+        console.log(`Leverage after full deleverage from 5x: ${leverageAfter}`);
+        assert(leverageAfter === null || leverageAfter.lte(Decimal(1.001)),
+            `Expected leverage ~1 or null after full deleverage, got ${leverageAfter}`);
+    });
 });

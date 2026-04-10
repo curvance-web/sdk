@@ -1628,7 +1628,13 @@ export class CToken extends Calldata<ICToken> {
 
     convertTokensToUsd(tokenAmount: bigint, asset = true) : USD {
         const price = this.getPrice(asset, false, false);
-        return FormatConverter.bigIntTokensToUsd(tokenAmount, price, this.decimals);
+        // Pair the price with the matching decimals: asset price ↔ asset
+        // decimals, share price ↔ share decimals. Falls back to share
+        // decimals if asset.decimals is somehow unset (cToken share decimals
+        // always equal asset decimals on current Curvance markets, so the
+        // fallback is value-equivalent).
+        const decimals = asset ? (this.asset.decimals ?? this.decimals) : this.decimals;
+        return FormatConverter.bigIntTokensToUsd(tokenAmount, price, decimals);
     }
 
     async fetchConvertTokensToUsd(tokenAmount: bigint, asset = true) {
@@ -1646,7 +1652,9 @@ export class CToken extends Calldata<ICToken> {
 
     convertAssetsToUsd(tokenAmount: bigint): USD {
         const price = this.getPrice(true, false, false);
-        const decimals = this.decimals;
+        // Asset price ↔ asset decimals (with fallback to share decimals,
+        // which equal asset decimals on current Curvance markets).
+        const decimals = this.asset.decimals ?? this.decimals;
 
         return FormatConverter.bigIntTokensToUsd(tokenAmount, price, decimals);
     }

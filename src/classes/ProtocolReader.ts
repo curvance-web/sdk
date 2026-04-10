@@ -308,7 +308,7 @@ export class ProtocolReader {
 
     async getLeverageSnapshot(account: address, cToken: address, borrowableCToken: address, bufferTime: bigint = 120n) {
         const [collateralUsd, debtUsd, collateralAssetPrice, sharePrice, debtAssetPrice, debtTokenBalance, oracleError] =
-            await this.contract.getLeverageSnapshot(account, cToken, borrowableCToken, bufferTime);
+            await this.contract.getLeverageSnapshot(account, cToken, borrowableCToken, bufferTime) as [bigint, bigint, bigint, bigint, bigint, bigint, boolean];
         return { collateralUsd, debtUsd, collateralAssetPrice, sharePrice, debtAssetPrice, debtTokenBalance, oracleError };
     }
 
