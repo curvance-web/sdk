@@ -110,10 +110,9 @@ async function main() {
     // SDK preview health
     let previewHealth: number | null;
     if (DIRECTION === 'up') {
-      const { borrowAmount, rawBorrowAmount } = coll.previewLeverageUp(Decimal(TARGET_LEVERAGE), borr);
+      const { borrowAmount } = coll.previewLeverageUp(Decimal(TARGET_LEVERAGE), borr);
       console.log(`\nPreview inputs:`);
-      console.log(`  borrowAmount (reduced): ${borrowAmount.toFixed(4)}`);
-      console.log(`  rawBorrowAmount:        ${rawBorrowAmount.toFixed(4)}`);
+      console.log(`  borrowAmount: ${borrowAmount.toFixed(4)}`);
       const h = await market.previewPositionHealthLeverageUp(coll, borr, Decimal(TARGET_LEVERAGE));
       previewHealth = h ? h.mul(100).toNumber() : null;
     } else if (TARGET_LEVERAGE === 1) {

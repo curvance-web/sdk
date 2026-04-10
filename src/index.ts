@@ -8,3 +8,4 @@ export * from './retry-provider';
 export * from './contracts';
 export * from './chains';
 export * from './validation';
+export * from './feePolicy';

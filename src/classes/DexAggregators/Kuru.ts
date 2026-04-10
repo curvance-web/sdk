@@ -6,6 +6,7 @@ import { ZapToken } from "../CToken";
 import { Swap } from "../Zapper";
 import IDexAgg from "./IDexAgg";
 import { safeBigInt, validateAddress, validateRouterAddress, fetchWithTimeout, validateSlippageBps } from "../../validation";
+import FormatConverter from "../FormatConverter";
 
 interface KuruJWTResponse {
     token: string;
@@ -204,26 +205,26 @@ export class Kuru implements IDexAgg {
         return Math.floor(Date.now() / 1000);
     }
 
-    async quoteAction(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint) {
-        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage);
+    async quoteAction(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
+        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         const action = {
             inputToken: tokenIn,
             inputAmount: BigInt(amount),
             outputToken: tokenOut,
             target: quote.to,
-            slippage: slippage ?? 0n,
+            slippage: slippage ? FormatConverter.bpsToBpsWad(slippage) : 0n,
             call: quote.calldata
         } as Swap;
 
         return { action, quote };
     }
 
-    async quoteMin(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint) {
-        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage);
+    async quoteMin(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
+        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         return quote.out;
     }
 
-    async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint) {
+    async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
         validateSlippageBps(slippage, 'Kuru quote');
 
         await this.loadJWT(wallet);
@@ -243,10 +244,20 @@ export class Kuru implements IDexAgg {
             tokenIn: tokenIn,
             tokenOut: tokenOut,
             amount: amount.toString(),
-            referrerAddress: this.dao,
-            referrerFeeBps: 10,
-            slippage_tolerance: Number(slippage)
+            slippage_tolerance: Number(slippage),
         };
+
+        // Fee plumbing: Kuru charges via referrerAddress + referrerFeeBps,
+        // mirroring KyberSwap's currency_in fee model. We only include these
+        // fields when a fee is actually being charged — Kuru's API treats
+        // missing fields as "no referrer fee" which matches the NO_FEE_POLICY
+        // semantics. The previous hardcoded `referrerFeeBps: 10` to `this.dao`
+        // is removed so Kuru and KyberSwap behave consistently under the
+        // same fee policy.
+        if (feeBps !== undefined && feeBps > 0n && feeReceiver) {
+            payload.referrerAddress = feeReceiver;
+            payload.referrerFeeBps = Number(feeBps);
+        }
 
         cached_requests.set(wallet, (cached_requests.get(wallet) || []).concat(this.getCurrentTime()));
         const resp = await fetchWithTimeout(`${this.api}/quote`, {

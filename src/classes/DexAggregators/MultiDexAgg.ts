@@ -91,36 +91,36 @@ export class MultiDexAgg implements IDexAgg {
      * Fans out quoteAction to all aggregators, filters outliers, returns best.
      * Each aggregator is called exactly once.
      */
-    async quoteAction(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint): Promise<{ action: Swap; quote: Quote }> {
+    async quoteAction(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address): Promise<{ action: Swap; quote: Quote }> {
         if (this.aggregators.length === 1) {
-            return this.primary.quoteAction(wallet, tokenIn, tokenOut, amount, slippage);
+            return this.primary.quoteAction(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         }
 
-        const best = await this._bestQuoteAction(wallet, tokenIn, tokenOut, amount, slippage);
+        const best = await this._bestQuoteAction(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         return { action: best.action, quote: best.quote };
     }
 
     /**
      * Returns the minimum output from the best quote.
      */
-    async quoteMin(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint): Promise<BigInt> {
+    async quoteMin(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address): Promise<BigInt> {
         if (this.aggregators.length === 1) {
-            return this.primary.quoteMin(wallet, tokenIn, tokenOut, amount, slippage);
+            return this.primary.quoteMin(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         }
 
-        const best = await this._bestQuote(wallet, tokenIn, tokenOut, amount, slippage);
+        const best = await this._bestQuote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         return best.quote.out;
     }
 
     /**
      * Returns the best quote across all aggregators.
      */
-    async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint): Promise<Quote> {
+    async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address): Promise<Quote> {
         if (this.aggregators.length === 1) {
-            return this.primary.quote(wallet, tokenIn, tokenOut, amount, slippage);
+            return this.primary.quote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         }
 
-        const best = await this._bestQuote(wallet, tokenIn, tokenOut, amount, slippage);
+        const best = await this._bestQuote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         return best.quote;
     }
 
@@ -129,12 +129,12 @@ export class MultiDexAgg implements IDexAgg {
     // -----------------------------------------------------------------------
 
     private async _bestQuote(
-        wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint
+        wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address
     ): Promise<QuoteResult> {
         const results = await Promise.allSettled(
             this.aggregators.map(agg =>
                 this._withTimeout(
-                    agg.quote(wallet, tokenIn, tokenOut, amount, slippage)
+                    agg.quote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver)
                         .then(quote => {
                             this._validateQuote(quote, agg);
                             return { aggregator: agg, quote } as QuoteResult;
@@ -152,12 +152,12 @@ export class MultiDexAgg implements IDexAgg {
     // -----------------------------------------------------------------------
 
     private async _bestQuoteAction(
-        wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint
+        wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address
     ): Promise<QuoteActionResult> {
         const results = await Promise.allSettled(
             this.aggregators.map(agg =>
                 this._withTimeout(
-                    agg.quoteAction(wallet, tokenIn, tokenOut, amount, slippage)
+                    agg.quoteAction(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver)
                         .then(({ action, quote }) => {
                             this._validateQuote(quote, agg);
                             return { aggregator: agg, action, quote } as QuoteActionResult;
