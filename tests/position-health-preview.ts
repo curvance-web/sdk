@@ -88,12 +88,11 @@ async function main() {
         );
         const healthPct = health ? health.mul(100).toFixed(2) : '∞';
 
-        const { borrowAmount, rawBorrowAmount } = collateralToken.previewLeverageUp(Decimal(target), borrowToken);
+        const { borrowAmount } = collateralToken.previewLeverageUp(Decimal(target), borrowToken);
 
         console.log(`\n  UP to ${target}x:`);
         console.log(`    Preview Health:     ${healthPct}%`);
-        console.log(`    Borrow (reduced):   ${borrowAmount.toFixed(4)}`);
-        console.log(`    Borrow (raw/debt):  ${rawBorrowAmount.toFixed(4)}`);
+        console.log(`    Borrow:             ${borrowAmount.toFixed(4)}`);
       } catch (err: any) {
         console.log(`\n  UP to ${target}x — ERROR: ${err.message}`);
       }

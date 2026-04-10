@@ -23,20 +23,78 @@ const EXCLUDED_ZAP_SYMBOLS = new Set([
 
 /**
  * Leverage operation buffers — centralized for tuning.
- * Calibrated for fresh-state operation via getLeverageSnapshot.
+ * Calibrated for fresh-state operation via getLeverageSnapshot under
+ * Curvance's permanent single-oracle architecture.
+ *
+ * Single-oracle architecture (permanent design)
+ * ---------------------------------------------
+ * Curvance uses single-adaptor oracle configs only (Redstone Core/Classic
+ * via BaseOracleAdaptor, which ignores the getLower flag — see line 78 of
+ * BaseOracleAdaptor.sol). Dual-feed mode was deprecated in favor of the
+ * price-guard system and orderflow MEV tech, and is not coming back.
+ * This means MarketManager._statusOf returns symmetric prices for
+ * collateral (queries with getLower=true) and debt (getLower=false), so
+ * there is no oracle bound asymmetry contributing to checkSlippage forced
+ * loss. Buffers below are sized accordingly — do not re-introduce
+ * (L-1)-scaled buffers to "future-proof" against dual-feed.
+ *
+ * MEV / slippage protection model
+ * -------------------------------
+ * The on-chain BasePositionManager.checkSlippage modifier is per its own
+ * docstring "primarily a sanity check rather than a security guarantee."
+ * Real MEV protection comes from SwapperLib._swapSafe, which oracle-prices
+ * the swap input and output and reverts if realized slippage exceeds the
+ * Swap.slippage parameter we pass (= the user's raw slippage in WAD).
+ *
+ * That swap-level check bounds any sandwich extraction to the user's
+ * tolerance regardless of how the buffers below are tuned. The buffers
+ * here only adjust the contract-level sanity check so it doesn't fire
+ * false-positives from intentional or unavoidable forced losses.
+ *
+ * Asymmetry between leverage up and deleverage
+ * --------------------------------------------
+ * Leverage UP: under single-oracle, the contract sees zero forced loss
+ * for a perfect swap. The only real sources of difference between
+ * snapshot-time prices and execution-time prices are: (a) wei-level share
+ * rounding, (b) Redstone update drift between the snapshot RPC and the
+ * tx broadcast block. Both are small constants in absolute terms, NOT
+ * leverage-scaled. A small flat buffer suffices.
+ *
+ * DELEVERAGE (full): forced loss comes from intentional swap overshoot
+ * (DELEVERAGE_OVERHEAD_BPS) which prevents dust debt by oversizing the
+ * collateral→debt swap. This is a real bps-level loss in absolute terms
+ * which becomes (L-1) × bps in equity-fraction terms — so the deleverage
+ * contract-slippage expansion DOES scale with leverage. Note: the contract
+ * returns excess debt token to the user's wallet (BasePositionManager
+ * onRedeem lines 482-493), so the economic loss from the overshoot is
+ * zero — only the contract's naive equity-loss check sees it as loss.
  */
 const LEVERAGE = {
     /** Max leverage cap: fraction of theoretical max the user can select.
-     *  Prevents boundary singularity at exact max leverage. */
+     *  Prevents boundary singularity at exact max leverage. Independent of
+     *  the slippage buffers below — protects post-op position health, not
+     *  in-op slippage. */
     MAX_LEVERAGE_FACTOR: Decimal(0.995),
-    /** BPS added per unit of leverage to checkSlippage tolerance.
-     *  Covers share rounding equity loss. Sized to also absorb minor
-     *  execution-time price drift between snapshot and tx. */
-    ROUNDING_BPS_PER_UNIT: 15n,
-    /** BPS overhead on full deleverage swap sizing.
-     *  Covers DEX routing fees and rounding to prevent dust debt.
-     *  Contract returns excess. Bump when aggregator fees are enabled. */
-    DELEVERAGE_OVERHEAD_BPS: 30n,
+    /** Flat BPS buffer added to leverage-up contract slippage tolerance.
+     *  Under single-oracle, the only forced loss comes from wei-level share
+     *  rounding plus possible Redstone price drift between the snapshot RPC
+     *  and the tx broadcast block (typically same-block or 1-3 blocks
+     *  later). Both are small constants in absolute terms; the equity-
+     *  fraction amplification at high leverage happens automatically inside
+     *  checkSlippage's denominator and does not require leverage-scaling
+     *  the buffer itself. Conservative starting value — reduce after
+     *  empirically observing successful leverage-up across the leverage
+     *  range, especially at L > 5 with low (1%) user slippage. */
+    LEVERAGE_UP_BUFFER_BPS: 10n,
+    /** BPS overhead on full deleverage swap sizing — absolute terms.
+     *  Oversizes the collateral→debt swap so DEX impact + drift doesn't
+     *  underdeliver and leave dust debt. The contract returns any excess
+     *  debt token to the user, so economic loss is zero — but the contract's
+     *  checkSlippage modifier sees the overshoot as equity loss and amplifies
+     *  it by (L-1)x. The deleverage contract slippage expansion compensates
+     *  for that amplification (see leverageDown). Bump when aggregator fees
+     *  are enabled to keep dust prevention reliable. */
+    DELEVERAGE_OVERHEAD_BPS: 20n,
     /** BPS buffer on virtualConvertToShares for leverage + collateral cap.
      *  Covers exchange rate drift from interest accrual since cache load. */
     SHARES_BUFFER_BPS: 2n,
@@ -986,17 +1044,19 @@ export class CToken extends Calldata<ICToken> {
     }
 
     /**
-     * Compute slippage BPS for the contract's checkSlippage modifier when leveraging up.
-     * Share rounding (vault + cToken) causes equity loss ≈ 20bps × (leverage - 1).
-     * The user's swap slippage is preserved for DEX protection; this adds a buffer
-     * so the on-chain sanity check doesn't reject legitimate leverage operations.
+     * Compute slippage BPS for the contract's checkSlippage modifier when
+     * leveraging up. Under Curvance's permanent single-oracle architecture
+     * with fresh state from _getLeverageSnapshot, the only forced equity
+     * loss comes from wei-level share rounding plus possible Redstone price
+     * drift between snapshot RPC and tx broadcast — both small constants
+     * in absolute terms. We add a small flat buffer; the contract's
+     * equity-fraction denominator amplifies it by (L-1)x automatically.
+     * The user's swap-level slippage (passed separately to _swapSafe) is
+     * unaffected — that's the layer that bounds MEV extraction.
      */
     private _leverageUpSlippage(slippage: bigint, leverage: Decimal): bigint {
-        const leverageFactor = leverage.sub(1);
-        if (leverageFactor.lte(0)) return slippage;
-        // ~20bps per unit of leverage factor for rounding losses
-        const buffer = BigInt(leverageFactor.mul(Number(LEVERAGE.ROUNDING_BPS_PER_UNIT)).ceil().toFixed(0));
-        return slippage + buffer;
+        if (leverage.lte(1)) return slippage;
+        return slippage + LEVERAGE.LEVERAGE_UP_BUFFER_BPS;
     }
 
     previewLeverageUp(newLeverage: Decimal, borrow: BorrowableCToken, depositAmount?: bigint) {
@@ -1195,6 +1255,29 @@ export class CToken extends Calldata<ICToken> {
 
                     const minRepay = isFullDeleverage ? 1n : quote.min_out;
 
+                    // Full deleverage oversizes the swap by DELEVERAGE_OVERHEAD_BPS
+                    // (in absolute terms) to prevent dust debt. The contract's
+                    // checkSlippage modifier compares equity-before vs equity-after
+                    // as a fraction of starting equity, so the absolute overshoot
+                    // becomes (L-1) × DELEVERAGE_OVERHEAD_BPS in equity-fraction
+                    // terms. We expand the contract slippage tolerance by exactly
+                    // that forced amount, leaving the user's `slippage` budget
+                    // available for variable DEX impact + oracle drift.
+                    //
+                    // This does NOT loosen MEV protection — that lives at the
+                    // _swapSafe layer (which still receives raw user slippage).
+                    // The contract checkSlippage is sanity-only per its docstring.
+                    // Note: the contract returns excess debt token to the user's
+                    // wallet, so the economic loss from the overshoot is zero.
+                    const contractSlippage = isFullDeleverage
+                        ? slippage + BigInt(
+                            currentLeverage.sub(1)
+                                .mul(Number(LEVERAGE.DELEVERAGE_OVERHEAD_BPS))
+                                .ceil()
+                                .toFixed(0)
+                        )
+                        : slippage;
+
                     calldata = manager.getDeleverageCalldata({
                         cToken: this.address,
                         collateralAssets: swapCollateral,
@@ -1202,7 +1285,7 @@ export class CToken extends Calldata<ICToken> {
                         repayAssets: BigInt(minRepay),
                         swapActions: [ action ],
                         auxData: "0x",
-                    }, FormatConverter.bpsToBpsWad(slippage));
+                    }, FormatConverter.bpsToBpsWad(contractSlippage));
 
                     break;
                 }
