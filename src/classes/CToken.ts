@@ -1080,12 +1080,7 @@ export class CToken extends Calldata<ICToken> {
         const rawDebtInUsd    = notional.mul(newLeverage).sub(notional);
         const borrowAmount    = rawDebtInUsd.sub(currentDebt).div(borrowPrice);
 
-        const newCollateralInUsd = notional.add(rawDebtInUsd);
-
-        // Fee preview: queried from the configured fee policy. Returned as
-        // ancillary fields so callers can display "you'll be charged $X in
-        // fees" without requiring the SDK's primary preview math (which
-        // preserves the equity-conservation invariant) to change.
+        // Fee preview: queried from the configured fee policy.
         const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
         const feeBps = setup_config.feePolicy.getFeeBps({
             operation: 'leverage-up',
@@ -1097,6 +1092,10 @@ export class CToken extends Calldata<ICToken> {
         });
         const feeAssets = borrowAmount.mul(Decimal(Number(feeBps))).div(Decimal(10000));
         const feeUsd = feeAssets.mul(borrowPrice);
+
+        // Subtract fee from displayed collateral — the fee reduces swap
+        // output, so the user receives less collateral than rawDebtInUsd.
+        const newCollateralInUsd = notional.add(rawDebtInUsd).sub(feeUsd);
 
         return {
             borrowAmount,
@@ -1342,6 +1341,13 @@ export class CToken extends Calldata<ICToken> {
                         if (swapCollateral > maxCollateral) {
                             swapCollateral = maxCollateral;
                         }
+                    } else if (feeBps > 0n) {
+                        // Partial deleverage: inflate swap size to compensate
+                        // for fee deduction on input. KyberSwap deducts feeBps
+                        // from input before swapping, so without compensation
+                        // the swap underdelivers and actual leverage is slightly
+                        // higher than target.
+                        swapCollateral = swapCollateral * 10000n / (10000n - feeBps);
                     }
 
                     const { action, quote } = await config.dexAgg.quoteAction(
