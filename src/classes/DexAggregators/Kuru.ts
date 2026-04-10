@@ -205,8 +205,8 @@ export class Kuru implements IDexAgg {
         return Math.floor(Date.now() / 1000);
     }
 
-    async quoteAction(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint) {
-        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage);
+    async quoteAction(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
+        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         const action = {
             inputToken: tokenIn,
             inputAmount: BigInt(amount),
@@ -219,16 +219,21 @@ export class Kuru implements IDexAgg {
         return { action, quote };
     }
 
-    async quoteMin(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint) {
-        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage);
+    async quoteMin(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
+        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         return quote.out;
     }
 
-    async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint) {
+    async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
         validateSlippageBps(slippage, 'Kuru quote');
 
         await this.loadJWT(wallet);
         await this.rateLimitSleep(wallet);
+
+        // Resolve referrer fee + receiver. Defaults preserve historical Kuru
+        // behavior (10 bps to this.dao) when no fee policy is plumbed through.
+        const referrerFeeBps = feeBps !== undefined ? Number(feeBps) : 10;
+        const referrerAddress = feeReceiver ?? this.dao;
 
         const payload: {
             userAddress: string;
@@ -244,8 +249,8 @@ export class Kuru implements IDexAgg {
             tokenIn: tokenIn,
             tokenOut: tokenOut,
             amount: amount.toString(),
-            referrerAddress: this.dao,
-            referrerFeeBps: 10,
+            referrerAddress: referrerAddress,
+            referrerFeeBps: referrerFeeBps,
             slippage_tolerance: Number(slippage)
         };
 

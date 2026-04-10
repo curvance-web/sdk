@@ -151,8 +151,8 @@ export class KyberSwap implements IDexAgg {
         return zap_tokens;
     }
 
-    async quoteAction(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint) {
-        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage);
+    async quoteAction(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
+        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         const action = {
             inputToken: tokenIn,
             inputAmount: BigInt(amount),
@@ -165,23 +165,30 @@ export class KyberSwap implements IDexAgg {
         return { action, quote };
     }
 
-    async quoteMin(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint) {
-        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage);
+    async quoteMin(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
+        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         return quote.out;
     }
 
-    async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint) {
+    async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
         validateSlippageBps(slippage, 'KyberSwap quote');
 
         const params = new URLSearchParams({
             tokenIn,
             tokenOut,
-            amountIn: amount.toString()
-            // feeAmount
-            // chargeFeeBy
-            // isInBps
-            // feeReceiver
+            amountIn: amount.toString(),
         });
+
+        // Optional fee parameters: charge in input currency, BPS-denominated.
+        // KyberSwap deducts the fee from the input amount before swapping and
+        // routes it to feeReceiver. See:
+        // https://docs.kyberswap.com/reference/swap-aggregator-api#extra-fee-handling
+        if (feeBps && feeBps > 0n && feeReceiver) {
+            params.set('feeAmount', feeBps.toString());
+            params.set('chargeFeeBy', 'currency_in');
+            params.set('isInBps', 'true');
+            params.set('feeReceiver', feeReceiver);
+        }
 
         const quote_response = await fetchWithTimeout(`${this.api}/api/v1/routes?${params.toString()}`, {
             method: 'GET',

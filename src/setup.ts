@@ -7,6 +7,7 @@ import { wrapProviderWithRetries } from "./retry-provider";
 import { chain_config } from "./chains";
 import { Api } from "./classes/Api";
 import { validateApiUrl } from "./validation";
+import { FeePolicy, NO_FEE_POLICY } from "./feePolicy";
 
 export let setup_config: {
     chain: ChainRpcPrefix;
@@ -14,11 +15,24 @@ export let setup_config: {
     provider: curvance_provider;
     approval_protection: boolean;
     api_url: string;
+    feePolicy: FeePolicy;
 };
 
 export let all_markets: Market[] = [];
 
-export async function setupChain(chain: ChainRpcPrefix, provider: curvance_provider | null = null, approval_protection: boolean = false, api_url: string = "https://api.curvance.com") {
+export interface SetupChainOptions {
+    /** Optional fee policy for SDK-initiated DEX swaps (zaps + leverage).
+     *  Defaults to NO_FEE_POLICY (zero fees) for backward compatibility. */
+    feePolicy?: FeePolicy;
+}
+
+export async function setupChain(
+    chain: ChainRpcPrefix,
+    provider: curvance_provider | null = null,
+    approval_protection: boolean = false,
+    api_url: string = "https://api.curvance.com",
+    options: SetupChainOptions = {},
+) {
     if(!(chain in chain_config)) {
         throw new Error("Chain does not have a corresponding config");
     }
@@ -38,6 +52,7 @@ export async function setupChain(chain: ChainRpcPrefix, provider: curvance_provi
         approval_protection,
         contracts: getContractAddresses(chain),
         api_url,
+        feePolicy: options.feePolicy ?? NO_FEE_POLICY,
     }
 
     if(!("ProtocolReader" in setup_config.contracts)) {

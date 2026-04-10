@@ -1081,12 +1081,31 @@ export class CToken extends Calldata<ICToken> {
 
         const newCollateralInUsd = notional.add(rawDebtInUsd);
 
+        // Fee preview: queried from the configured fee policy. Returned as
+        // ancillary fields so callers can display "you'll be charged $X in
+        // fees" without requiring the SDK's primary preview math (which
+        // preserves the equity-conservation invariant) to change.
+        const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
+        const feeBps = setup_config.feePolicy.getFeeBps({
+            operation: 'leverage-up',
+            inputToken: borrow.asset.address,
+            outputToken: this.asset.address,
+            inputAmount: borrowAssets,
+            currentLeverage,
+            targetLeverage: newLeverage,
+        });
+        const feeAssets = borrowAmount.mul(Decimal(Number(feeBps))).div(Decimal(10000));
+        const feeUsd = feeAssets.mul(borrowPrice);
+
         return {
             borrowAmount,
             newDebt: rawDebtInUsd,
             newDebtInAssets: borrow.convertUsdToTokens(rawDebtInUsd, true),
             newCollateral: newCollateralInUsd,
-            newCollateralInAssets: this.convertUsdToTokens(newCollateralInUsd, true)
+            newCollateralInAssets: this.convertUsdToTokens(newCollateralInUsd, true),
+            feeBps,
+            feeAssets,
+            feeUsd,
         };
     }
 
@@ -1111,6 +1130,26 @@ export class CToken extends Calldata<ICToken> {
         const collateralAssetReduction = FormatConverter.decimalToBigInt(collateralAssetReductionUsd.div(this.getPrice(true)), this.asset.decimals);
         const leverageDiff = Decimal(1).sub(newLeverage.div(currentLeverage));
 
+        // Fee preview: queried from the configured fee policy. The fee is
+        // taken on the collateral→debt swap; size of the swap depends on
+        // whether this is a partial or full deleverage. We use
+        // collateralAssetReductionUsd as the swap notional approximation
+        // (exact for partial; for full deleverage the actual swap is sized
+        // by leverageDown using the snapshot, but the preview is close enough
+        // for display purposes).
+        const feeBps = borrow ? setup_config.feePolicy.getFeeBps({
+            operation: 'leverage-down',
+            inputToken: this.asset.address,
+            outputToken: borrow.asset.address,
+            inputAmount: collateralAssetReduction,
+            currentLeverage,
+            targetLeverage: newLeverage,
+        }) : 0n;
+        const feeUsd = collateralAssetReductionUsd.mul(Decimal(Number(feeBps))).div(Decimal(10000));
+        const feeAssets = this.getPrice(true).gt(0)
+            ? feeUsd.div(this.getPrice(true))
+            : Decimal(0);
+
         return {
             collateralAssetReduction,
             collateralAssetReductionUsd,
@@ -1118,7 +1157,10 @@ export class CToken extends Calldata<ICToken> {
             newDebt: newDebtUsd,
             newDebtInAssets: borrow ? borrow.convertUsdToTokens(newDebtUsd, true) : undefined,
             newCollateral: targetCollateralUsd,
-            newCollateralInAssets: this.convertUsdToTokens(targetCollateralUsd, true)
+            newCollateralInAssets: this.convertUsdToTokens(targetCollateralUsd, true),
+            feeBps,
+            feeAssets,
+            feeUsd,
         };
     }
 
@@ -1140,12 +1182,25 @@ export class CToken extends Calldata<ICToken> {
 
             switch(type) {
                 case 'simple': {
+                    const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
+                    const feeBps = setup_config.feePolicy.getFeeBps({
+                        operation: 'leverage-up',
+                        inputToken: borrow.asset.address,
+                        outputToken: this.asset.address,
+                        inputAmount: borrowAssets,
+                        currentLeverage: this.getLeverage() ?? Decimal(1),
+                        targetLeverage: newLeverage,
+                    });
+                    const feeReceiver = feeBps > 0n ? setup_config.feePolicy.feeReceiver : undefined;
+
                     const { action, quote } = await chain_config[setup_config.chain].dexAgg.quoteAction(
                         manager.address,
                         borrow.asset.address,
                         this.asset.address,
-                        FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
-                        slippage
+                        borrowAssets,
+                        slippage,
+                        feeBps,
+                        feeReceiver,
                     );
 
                     calldata = manager.getLeverageCalldata(
@@ -1224,19 +1279,39 @@ export class CToken extends Calldata<ICToken> {
                 case 'simple': {
                     let swapCollateral = collateralAssetReduction;
 
+                    // Resolve fee policy once for this operation. The fee bps
+                    // contributes to the deleverage overhead because KyberSwap
+                    // deducts the fee from the swap input before swapping —
+                    // effective swap input = swapCollateral × (1 - feeBps).
+                    // We must oversize swapCollateral to compensate, otherwise
+                    // the post-fee swap underdelivers and dust debt remains.
+                    const feeBps = setup_config.feePolicy.getFeeBps({
+                        operation: 'leverage-down',
+                        inputToken: this.asset.address,
+                        outputToken: borrowToken.asset.address,
+                        inputAmount: 0n, // Set after sizing; not consulted by flatFeePolicy
+                        currentLeverage: currentLeverage,
+                        targetLeverage: newLeverage,
+                    });
+                    const feeReceiver = feeBps > 0n ? setup_config.feePolicy.feeReceiver : undefined;
+
                     if (isFullDeleverage) {
                         // Use exact projected debt from snapshot to size the swap.
                         // debtTokenBalance is in debt-token native decimals, projected
                         // forward by bufferTime. Convert to collateral-asset terms via
                         // snapshot prices (lower-bound collateral, standard debt — both
-                        // conservative, overshooting slightly). Overhead covers routing only.
+                        // conservative, overshooting slightly). Overhead covers DEX
+                        // routing impact + oracle drift + fee deduction.
                         const debtDecimals = 10n ** borrowToken.asset.decimals;
                         const collDecimals = 10n ** this.asset.decimals;
                         const debtInCollateral = (
                             snapshot.debtTokenBalance * snapshot.debtAssetPrice * collDecimals
                         ) / (snapshot.collateralAssetPrice * debtDecimals);
 
-                        const overheadBps = LEVERAGE.DELEVERAGE_OVERHEAD_BPS;
+                        // Total overhead = base overhead (DEX impact + drift) + fee bps.
+                        // Additive approximation is accurate to sub-bp at typical
+                        // fee+overhead magnitudes (< 100 bps combined).
+                        const overheadBps = LEVERAGE.DELEVERAGE_OVERHEAD_BPS + feeBps;
                         swapCollateral = debtInCollateral * (10000n + overheadBps) / 10000n;
 
                         const maxCollateral = this.virtualConvertToAssets(this.cache.userCollateral);
@@ -1250,19 +1325,21 @@ export class CToken extends Calldata<ICToken> {
                         this.asset.address,
                         borrowToken.asset.address,
                         swapCollateral,
-                        slippage
+                        slippage,
+                        feeBps,
+                        feeReceiver,
                     );
 
                     const minRepay = isFullDeleverage ? 1n : quote.min_out;
 
-                    // Full deleverage oversizes the swap by DELEVERAGE_OVERHEAD_BPS
-                    // (in absolute terms) to prevent dust debt. The contract's
+                    // Full deleverage oversizes the swap by (DELEVERAGE_OVERHEAD_BPS +
+                    // feeBps) in absolute terms to prevent dust debt. The contract's
                     // checkSlippage modifier compares equity-before vs equity-after
                     // as a fraction of starting equity, so the absolute overshoot
-                    // becomes (L-1) × DELEVERAGE_OVERHEAD_BPS in equity-fraction
-                    // terms. We expand the contract slippage tolerance by exactly
-                    // that forced amount, leaving the user's `slippage` budget
-                    // available for variable DEX impact + oracle drift.
+                    // becomes (L-1) × overhead in equity-fraction terms. We expand
+                    // the contract slippage tolerance by exactly that forced amount,
+                    // leaving the user's `slippage` budget available for variable
+                    // DEX impact + oracle drift.
                     //
                     // This does NOT loosen MEV protection — that lives at the
                     // _swapSafe layer (which still receives raw user slippage).
@@ -1272,7 +1349,7 @@ export class CToken extends Calldata<ICToken> {
                     const contractSlippage = isFullDeleverage
                         ? slippage + BigInt(
                             currentLeverage.sub(1)
-                                .mul(Number(LEVERAGE.DELEVERAGE_OVERHEAD_BPS))
+                                .mul(Number(LEVERAGE.DELEVERAGE_OVERHEAD_BPS + feeBps))
                                 .ceil()
                                 .toFixed(0)
                         )
@@ -1331,19 +1408,32 @@ export class CToken extends Calldata<ICToken> {
 
             switch(type) {
                 case 'simple': {
+                    const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
+                    const feeBps = setup_config.feePolicy.getFeeBps({
+                        operation: 'deposit-and-leverage',
+                        inputToken: borrow.asset.address,
+                        outputToken: this.asset.address,
+                        inputAmount: borrowAssets,
+                        currentLeverage: this.getLeverage() ?? Decimal(1),
+                        targetLeverage: multiplier,
+                    });
+                    const feeReceiver = feeBps > 0n ? setup_config.feePolicy.feeReceiver : undefined;
+
                     const { action, quote } = await chain_config[setup_config.chain].dexAgg.quoteAction(
                         manager.address,
                         borrow.asset.address,
                         this.asset.address,
-                        FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
-                        slippage
+                        borrowAssets,
+                        slippage,
+                        feeBps,
+                        feeReceiver,
                     );
 
                     calldata = manager.getDepositAndLeverageCalldata(
                         FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals),
                         {
                             borrowableCToken: borrow.address,
-                            borrowAssets: FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
+                            borrowAssets: borrowAssets,
                             cToken: this.address,
                             expectedShares: this.virtualConvertToShares(BigInt(quote.min_out), LEVERAGE.SHARES_BUFFER_BPS),
                             swapAction: action,
