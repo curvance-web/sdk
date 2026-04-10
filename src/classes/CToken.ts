@@ -1285,11 +1285,20 @@ export class CToken extends Calldata<ICToken> {
                     // effective swap input = swapCollateral × (1 - feeBps).
                     // We must oversize swapCollateral to compensate, otherwise
                     // the post-fee swap underdelivers and dust debt remains.
+                    //
+                    // Order-of-operations note: we pass collateralAssetReduction
+                    // as the inputAmount estimate. For partial deleverage this
+                    // is the actual swap size; for full deleverage the actual
+                    // size is computed below from the snapshot and is slightly
+                    // larger. flatFeePolicy ignores inputAmount, so this is
+                    // exact for current callers. Future notional-tiered policies
+                    // should be aware that for full deleverage the inputAmount
+                    // passed here is an underestimate.
                     const feeBps = setup_config.feePolicy.getFeeBps({
                         operation: 'leverage-down',
                         inputToken: this.asset.address,
                         outputToken: borrowToken.asset.address,
-                        inputAmount: 0n, // Set after sizing; not consulted by flatFeePolicy
+                        inputAmount: collateralAssetReduction,
                         currentLeverage: currentLeverage,
                         targetLeverage: newLeverage,
                     });

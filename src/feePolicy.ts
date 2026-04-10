@@ -223,8 +223,12 @@ export function flatFeePolicy(config: FlatFeePolicyConfig): FeePolicy {
  *
  * The receiver is set to the Curvance DAO address for consistency, but it's
  * never used since getFeeBps always returns 0n.
+ *
+ * Frozen to prevent accidental mutation. Anyone needing a customized no-op
+ * variant should construct a fresh `flatFeePolicy({ bps: 0n, ... })` instead
+ * of mutating this singleton.
  */
-export const NO_FEE_POLICY: FeePolicy = {
+export const NO_FEE_POLICY: FeePolicy = Object.freeze({
     feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
     getFeeBps: () => 0n,
-};
+});

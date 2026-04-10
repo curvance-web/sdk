@@ -230,11 +230,6 @@ export class Kuru implements IDexAgg {
         await this.loadJWT(wallet);
         await this.rateLimitSleep(wallet);
 
-        // Resolve referrer fee + receiver. Defaults preserve historical Kuru
-        // behavior (10 bps to this.dao) when no fee policy is plumbed through.
-        const referrerFeeBps = feeBps !== undefined ? Number(feeBps) : 10;
-        const referrerAddress = feeReceiver ?? this.dao;
-
         const payload: {
             userAddress: string;
             tokenIn: string;
@@ -249,10 +244,20 @@ export class Kuru implements IDexAgg {
             tokenIn: tokenIn,
             tokenOut: tokenOut,
             amount: amount.toString(),
-            referrerAddress: referrerAddress,
-            referrerFeeBps: referrerFeeBps,
-            slippage_tolerance: Number(slippage)
+            slippage_tolerance: Number(slippage),
         };
+
+        // Fee plumbing: Kuru charges via referrerAddress + referrerFeeBps,
+        // mirroring KyberSwap's currency_in fee model. We only include these
+        // fields when a fee is actually being charged — Kuru's API treats
+        // missing fields as "no referrer fee" which matches the NO_FEE_POLICY
+        // semantics. The previous hardcoded `referrerFeeBps: 10` to `this.dao`
+        // is removed so Kuru and KyberSwap behave consistently under the
+        // same fee policy.
+        if (feeBps !== undefined && feeBps > 0n && feeReceiver) {
+            payload.referrerAddress = feeReceiver;
+            payload.referrerFeeBps = Number(feeBps);
+        }
 
         cached_requests.set(wallet, (cached_requests.get(wallet) || []).concat(this.getCurrentTime()));
         const resp = await fetchWithTimeout(`${this.api}/quote`, {
