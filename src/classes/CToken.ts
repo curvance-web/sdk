@@ -75,16 +75,17 @@ const LEVERAGE = {
      *  the slippage buffers below — protects post-op position health, not
      *  in-op slippage. */
     MAX_LEVERAGE_FACTOR: Decimal(0.995),
-    /** Flat BPS buffer added to leverage-up contract slippage tolerance.
-     *  Under single-oracle, the only forced loss comes from wei-level share
-     *  rounding plus possible Redstone price drift between the snapshot RPC
-     *  and the tx broadcast block (typically same-block or 1-3 blocks
-     *  later). Both are small constants in absolute terms; the equity-
-     *  fraction amplification at high leverage happens automatically inside
-     *  checkSlippage's denominator and does not require leverage-scaling
-     *  the buffer itself. Conservative starting value — reduce after
-     *  empirically observing successful leverage-up across the leverage
-     *  range, especially at L > 5 with low (1%) user slippage. */
+    /** Flat BPS buffer added to leverage-up DEX/swapSafe slippage tolerance.
+     *  Under single-oracle, the only forced loss at the swap level comes from
+     *  wei-level share rounding plus possible Redstone price drift between
+     *  snapshot RPC and tx broadcast block. Both are small constants.
+     *
+     *  Fee amplification is handled SEPARATELY: the fee causes (L-1) × feeBps
+     *  equity-fraction loss in checkSlippage (same pattern as deleverage
+     *  overhead). Each leverageUp/depositAndLeverage call site computes a
+     *  `contractSlippage = slippage + (L-1) × feeBps` that is passed only to
+     *  the contract's checkSlippage modifier, NOT to the _swapSafe layer.
+     *  This buffer covers rounding/drift only. */
     LEVERAGE_UP_BUFFER_BPS: 10n,
     /** BPS overhead on full deleverage swap sizing — absolute terms.
      *  Oversizes the collateral→debt swap so DEX impact + drift doesn't
@@ -1203,6 +1204,20 @@ export class CToken extends Calldata<ICToken> {
                         feeReceiver,
                     );
 
+                    // The fee reduces swap output, which checkSlippage sees
+                    // as equity loss amplified by (L-1) — same pattern as
+                    // deleverage. Expand the contract-level tolerance to
+                    // absorb it; the _swapSafe layer (action.slippage) keeps
+                    // the user's raw tolerance for MEV protection.
+                    const contractSlippage = feeBps > 0n
+                        ? slippage + BigInt(
+                            newLeverage.sub(1)
+                                .mul(Number(feeBps))
+                                .ceil()
+                                .toFixed(0)
+                        )
+                        : slippage;
+
                     calldata = manager.getLeverageCalldata(
                         {
                             borrowableCToken: borrow.address,
@@ -1212,7 +1227,7 @@ export class CToken extends Calldata<ICToken> {
                             swapAction      : action,
                             auxData         : "0x",
                         },
-                        FormatConverter.bpsToBpsWad(slippage));
+                        FormatConverter.bpsToBpsWad(contractSlippage));
                     break;
                 }
 
@@ -1438,6 +1453,16 @@ export class CToken extends Calldata<ICToken> {
                         feeReceiver,
                     );
 
+                    // Fee amplification: same pattern as leverageUp.
+                    const contractSlippage = feeBps > 0n
+                        ? slippage + BigInt(
+                            multiplier.sub(1)
+                                .mul(Number(feeBps))
+                                .ceil()
+                                .toFixed(0)
+                        )
+                        : slippage;
+
                     calldata = manager.getDepositAndLeverageCalldata(
                         FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals),
                         {
@@ -1448,7 +1473,7 @@ export class CToken extends Calldata<ICToken> {
                             swapAction: action,
                             auxData: "0x",
                         },
-                        FormatConverter.bpsToBpsWad(slippage));
+                        FormatConverter.bpsToBpsWad(contractSlippage));
                     break;
                 }
 
