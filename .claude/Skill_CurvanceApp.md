@@ -22,6 +22,8 @@ Rules and conventions for working in `curvance-web/app` (branch: `dev`). Read be
 | Dashboard page work | #DASHBOARD_ARCHITECTURE, #DASHBOARD_PAGE_IMPORTS |
 | Explore page work | #EXPLORE_PAGE, #EXPLORE_PAGE_BEHAVIOR |
 | Chain/network handling | #CHAIN_CONFIGURATION |
+| RPC transport / fallback config | #RPC_TRANSPORT |
+| Query architecture (dual hook pattern) | Inline: `src/modules/market/v2/queries/index.ts` — useMarketDataQuery (public) vs useUserDataQuery (wallet-gated) |
 | Merkl rewards integration | #MERKL_INTEGRATION |
 | Merkl rate computation / APY display | Skill_CurvanceSDK.md → Merkl WWK + WGW entries |
 | Liquidation logic | #LIQUIDATION_CALCULATIONS |
@@ -36,7 +38,7 @@ Rules and conventions for working in `curvance-web/app` (branch: `dev`). Read be
 
 ## Hard Constraints
 
-- **Static export** (production only). `output: 'export'` conditional on `NODE_ENV`. No SSR. Dynamic routes fail silently — use query params + `useSearchParams`. Tailwind v4 with `@config` compat. Image optimization disabled — pre-optimize manually. Tailwind v4 dropped `cursor: pointer` — global restore in `globals.scss`.
+- **Static export** (production only). `output: 'export'` conditional on `NODE_ENV`. No SSR. Dynamic routes fail silently — use query params + `useSearchParams`. `headers()`, `rewrites()`, `redirects()` in next.config.ts are documentation-only — they appear in build output but don't execute. Security headers served by Amplify `customHttp.yml` (repo root). Both files must stay in sync. Tailwind v4 with `@config` compat. Image optimization disabled — pre-optimize manually. Tailwind v4 dropped `cursor: pointer` — global restore in `globals.scss`.
 - **yarn only.** npm → wrong rainbowkit, bun → corrupts package.json. `yarn install && yarn build`.
 - **Node 18+.** Next.js 14.2.x requirement.
 - **Vercel: gas-limit account only.** Other accounts show ❌ but code may be correct.
@@ -58,11 +60,11 @@ New pages → `market/v2` or new module. Shared utils → `shared/`. Full module
 
 ## SDK Integration (brief)
 
-Root query `useSetupChainQuery` → `setupChain()`. All other queries derive via `select`. SDK returns `Decimal` (not BigNumber). Full SDK rules: Skill_CurvanceSDK.md
+Root query `useSetupChainQuery` → `setupChain()`. Two semantic wrappers: `useMarketDataQuery` (public, always fires, `keepPreviousData`) for explore/TVL/stats, and `useUserDataQuery` (gates on `isConnected && hasSigner`, no `keepPreviousData`) for dashboard/positions. All other queries derive via `select`. SDK returns `Decimal` (not BigNumber). Full SDK rules: Skill_CurvanceSDK.md
 
 **Merkl rates:** All Merkl APR values flow through `getOpportunityRate()` / `computeMerklRates()` in `shared/api/merkl.ts`. Never import `getMerklDepositIncentives` / `getMerklBorrowIncentives` from `curvance` SDK — they bypass shared rate logic.
 
-**Query provider:** Global `retry: 0`, `staleTime: 40s`, `refetchOnWindowFocus: false`. AbortError + CALL_EXCEPTION + SIGNATURE_UNAVAILABLE filtered. HTTP queries can opt into `retry: 1`. RPC queries never retry.
+**Query provider:** Global `retry: 0`, `staleTime: 40s`, `refetchOnWindowFocus: false`. AbortError + CALL_EXCEPTION + SIGNATURE_UNAVAILABLE filtered. HTTP queries can opt into `retry: 1`. Exception: `setupChain` gets `retry: 2` with exponential backoff. Transport layer adds `retryCount: 3` on all RPC calls — see #RPC_TRANSPORT.
 
 ## Transaction Flow (4-step)
 
@@ -125,7 +127,8 @@ One system only. System A (`text-text-primary`) and System B (`new-*`) fully del
 | React Query mutation in useMemo deps | "It's from a hook" | New ref on every status transition. Ref `.mutate` for handlers, extract primitives | [M] |
 | `select` closure reading `account.address` | Gate on address — truthy when connected | Updates before `useSigner().address`. Gate on `signer?.address` to match query key | [M] |
 | `keepPreviousData` on user-address query | Keeps data during refetch | Bridges key transitions — null-signer data serves for connected wallet. `keepPrevious: false` on user queries | [M] |
-| Showing ConnectWallet based on `!account.address` | Seems like correct wallet check | During wagmi reconnect, `address` is `undefined` but wallet IS persisted. Use `account.isDisconnected` — only true when genuinely not connected, not during reconnecting/connecting | [H] |
+| Showing ConnectWallet based on `!account.address` | Seems like correct wallet check | During wagmi reconnect, `address` is `undefined` but wallet IS persisted. Three tiers: `isDisconnected` for UI rendering (lenient — false during connecting), `isConnected` for query gating (strict — only true when handshake complete), `isConnected && hasSigner` for user data (strictest — signer resolved). Wrong tier = flash or address(0) leak | [H] |
+| Disabling a query via `enabled: false` to hide data | Assume disabled query won't surface data | `enabled` controls fetching, not cache access. If the current key has a cache entry (e.g., signerless data from explore page), React Query returns it to all consumers regardless of `enabled`. UI must independently gate on readiness (`walletReady = isConnected && hasSigner`) | [H] |
 | Changing a `useMediaQuery` breakpoint value | Change JS query only | Must also change corresponding Tailwind CSS classes (`xl:grid-cols`, `hidden xl:block`, `block xl:hidden`) in same file, same commit. JS controls component logic; CSS controls layout visibility. Desync shows desktop table with no sidebar | [H] |
 | Component with Framer Motion height animation mounts via CSS breakpoint | Expect instant render | `animate={{ height: bounds.height }}` plays entry animation from 0 on mount — looks like drawer sliding open. Add `initial={false}` to skip mount animation. Inner `AnimatePresence` for tab-switching is unaffected | [M] |
 | Passing inline arrow to `useComposedRefs` | `useComposedRefs(ref, (node) => {})` | `useCallback` first, pass stable reference | [M] |
@@ -155,7 +158,7 @@ One system only. System A (`text-text-primary`) and System B (`new-*`) fully del
 | `@container` + `@xl:flex-row` on same element | Expect container query to self-reference | CSS container queries only query ancestors, never the element itself. No error, no warning — query silently never matches. Use standard breakpoint (`md:`, `newmd:`) on the same element, or put `@container` on a parent wrapper | [M] |
 | Expanded table row columns | Match parent column widths | Self-contained `grid grid-cols-N` — expanded is independent | [L] |
 | Chain icon via fuzzy matcher | Pass chain key | "monad" matches "staked-monad". Use `chain.icon` exact path | [L] |
-| Adding origins to CSP connect-src | Trace only app-side code (chain-configs.ts, wagmi.tsx) | Also trace SDK: fallback providers (chains/*.ts), DEX aggregators (KyberSwap.ts, Kuru.ts), API calls (Api.ts, merkl.ts). Wallet services making page-context API calls (Safe Client Gateway) also need entries. Extension wallets bypass page CSP via background service worker | [H] |
+| Adding origins to CSP connect-src | Trace only app-side code (chain-configs.ts, wagmi.tsx) | Also trace: app `chainRPCBackup` in chain-configs.ts (backup RPCs used by `fallback()` transport), SDK fallback providers (chains/*.ts), DEX aggregators (KyberSwap.ts, Kuru.ts), API calls (Api.ts, merkl.ts). Wallet services making page-context API calls (Safe Client Gateway) also need entries. Extension wallets bypass page CSP via background service worker | [H] |
 | Adding `target="_blank"` to Link or anchor | Assume Next.js adds rel automatically | Next.js `<Link>` does NOT add `rel="noopener noreferrer"`. Must be explicit. Audit regex: `<(?:a\|Link)\b[^>]*target="_blank"[^>]*>` without `noopener` | [H] |
 | Mutation using token from Zustand store | Use store token directly for SDK write calls | Store token may carry read-only provider from signerless setupChain. `resolveFreshToken(token)` resolves from `all_markets` at execution time — same address, fresh provider | [H] |
 | Chain-switch behavior | Auto-switch wallet | Never auto-switch. Show banner + disabled actions. User clicks "Switch to Monad" | [L] |
@@ -164,6 +167,8 @@ One system only. System A (`text-text-primary`) and System B (`new-*`) fully del
 | New barrel export | Refresh → "Element type invalid" | Kill and restart `yarn dev` | [L] |
 | Detecting if connected wallet is a Safe/SCW | `eth_getCode` — bytecode means contract wallet | EIP-7702 EOAs have delegated bytecode → false positive. Query Safe Client Gateway (`/v1/chains/{chainId}/safes/{address}`) — authoritative, returns threshold/owners, 404 for non-Safes | [H] |
 | Naming a specific wallet in `MutationCache.onError` | "Safe service unavailable" toast | WalletConnect users are indistinguishable at handler level. Keep messages generic unless wallet type detected before the call via hook/store | [M] |
+| Checking or modifying security headers in next.config.ts | Assume `headers()` executes in production | `output: 'export'` makes `headers()` dead code. Actual enforcement: Amplify `customHttp.yml`. Build warns but doesn't error. Both must stay in sync | [H] |
+| Build fails with type error | Fix the error, rebuild, repeat | Run `npx tsc --noEmit` first — see full count, group by pattern, batch-fix. Iterative build-fix-build hides scope and wastes cycles on errors sharing a root cause | [M] |
 
 ## WWW (What Worked Well)
 
@@ -177,6 +182,9 @@ One system only. System A (`text-text-primary`) and System B (`new-*`) fully del
 | Safe wallet detection | Safe Client Gateway API (`/v1/chains/{chainId}/safes/{address}`) — 200 = Safe with threshold/owners, 404 = not Safe. Degrades silently on 503 | Correct for EIP-7702, provides multi-sig info, no false positives on delegated EOAs |
 | setupChain resilience | `retry: 2` with exponential backoff (2s, 4s) + error state with retry button instead of "No Results Found" | Transient RPC blips invisible to user; persistent failures get honest message + one-click recovery |
 | Merkl APY consolidation | Single `computeMerklRates` + `getOpportunityRate` in `shared/api/merkl.ts` — all 7 consumer files call through | Eliminated 14 inline `opp.apr / 100` references; header and breakdown guaranteed consistent by construction |
+| Query architecture split | `useMarketDataQuery` (public, keepPreviousData) + `useUserDataQuery` (gates on `isConnected && hasSigner`, no keepPreviousData) — two wrappers over same setupChain cache | New features auto-inherit correct gating. Dashboard can't leak address(0) data. Explore page unaffected by wallet state |
+| setupChain race elimination | `!isReconnecting` in `baseEnabled` prevents premature signerless query during wagmi reconnect window | Single setupChain call per chain after reconnect settles. No race on module-level `all_markets` |
+| RPC fallback transport | `fallback([http(primary, RPC_OPTS), http(backup, RPC_OPTS)], { rank: false })` in wagmi.tsx with `retryCount: 3`, `timeout: 10_000` per endpoint. `chainRPCBackup` in chain-configs.ts | Universal retry + failover for every RPC read. Silent failover — user never sees the switch |
 
 ## WWK (What We Know)
 
@@ -185,6 +193,8 @@ One system only. System A (`text-text-primary`) and System B (`new-*`) fully del
 | Reference equality drives React renders — any new-object-per-render (`|| []`, `new Decimal()`, SDK in selectors, bare object returns, mutation objects) cascades into loops or re-render storms. The fix is always stable references: module-level constants, primitive extraction, useMemo, useStableTable Proxy | WGW: 8+ entries. WWW: stable-defaults.ts. S6 found 10 instances across 8 files |
 | Token/class migrations have a long tail — class-level sed catches ~80%, but inline styles, arbitrary Tailwind values, SVG attributes, and prefixed variants hide the remaining ~20%. The final sweep (inline style, `bg-[#hex]`, SVG fill/stroke, `var(--old)`) is not optional | WGW: sed rename, declaring migration complete. WWW: S4 final sweep found 85 values |
 | Turbopack caches stale module graphs across file deletions and branch switches — HMR won't pick up the change. `rm -rf .next && rm -rf node_modules/.cache && yarn dev` is the only reliable reset | WGW: delete/move file, git reset |
+| `output: 'export'` makes all Next.js runtime configuration documentation-only — `headers()`, `rewrites()`, `redirects()` compile and appear in build output but never execute. The hosting layer (Amplify `customHttp.yml`, Cloudflare rules) is the actual enforcement point. Keeping both in sync is a maintenance requirement, not redundancy | WGW: headers() dead code. Hard Constraints: static export. Previous audit misattributed working headers to next.config.ts when they were served by customHttp.yml |
+| React Query cache is a shared namespace — `enabled` controls fetching, not visibility. When a query key can match both public and private cache entries (e.g., `['setupchain', undefined, slug]` from explore and from signer-resolving dashboard), the UI must independently verify data appropriateness. The query layer and UI layer are independent gates — neither substitutes for the other | WGW: disabled query leaking cached data, three-tier connection model. WWW: query architecture split. Three iterations of `enabled`-only fixes failed before adding UI-layer `walletReady` gate |
 
 ## Cross-References
 
