@@ -1377,18 +1377,25 @@ export class CToken extends Calldata<ICToken> {
 
                     const minRepay = isFullDeleverage ? 1n : quote.min_out;
 
-                    // Full deleverage oversizes the swap by (DELEVERAGE_OVERHEAD_BPS +
-                    // feeBps) in absolute terms to prevent dust debt. The contract's
-                    // checkSlippage modifier compares equity-before vs equity-after
-                    // as a fraction of starting equity, so the absolute overshoot
-                    // becomes (L-1) × overhead in equity-fraction terms. We expand
-                    // the contract slippage tolerance by exactly that forced amount,
-                    // leaving the user's `slippage` budget available for variable
+                    // checkSlippage measures equity-fraction loss. Both the
+                    // intentional swap overshoot (full deleverage only) and the
+                    // DEX fee (always) are real equity losses amplified by
+                    // leverage. Expand contractSlippage to absorb them so the
+                    // user's `slippage` budget is preserved for variable
                     // DEX impact + oracle drift.
-                    const contractSlippage = isFullDeleverage
+                    //
+                    // Full:    (L-1) × (overhead + fee)  — overshoot + fee
+                    // Partial: (ΔL)  × fee               — fee only, no overshoot
+                    const leverageDelta = isFullDeleverage
+                        ? currentLeverage.sub(1)
+                        : currentLeverage.sub(newLeverage);
+                    const forcedBps = isFullDeleverage
+                        ? LEVERAGE.DELEVERAGE_OVERHEAD_BPS + feeBps
+                        : feeBps;
+                    const contractSlippage = forcedBps > 0n
                         ? slippage + BigInt(
-                            currentLeverage.sub(1)
-                                .mul(Number(LEVERAGE.DELEVERAGE_OVERHEAD_BPS + feeBps))
+                            leverageDelta
+                                .mul(Number(forcedBps))
                                 .ceil()
                                 .toFixed(0)
                         )
