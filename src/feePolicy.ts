@@ -118,8 +118,17 @@ export interface FeePolicy {
     feeReceiver: address;
 }
 
+/** Fee BPS charged on all DEX swaps via KyberSwap's `feeAmount` parameter.
+ *  Must match the on-chain KyberSwapChecker.FEE_BPS constant — if they
+ *  diverge, every swap reverts (checker enforces exact match).
+ *  To change the fee: update this constant AND redeploy the checker. */
+export const CURVANCE_FEE_BPS = 4n;
+
 /** Curvance DAO fee receiver — same wallet used for protocol interest fees
- *  and existing Kuru aggregator referrer fees. */
+ *  and existing Kuru aggregator referrer fees.  Must match
+ *  centralRegistry.daoAddress() — the on-chain checker validates
+ *  dynamically per-swap.  If DAO permissions transfer on-chain without
+ *  updating this constant, every swap reverts. */
 export const CURVANCE_DAO_FEE_RECEIVER: address =
     '0x0Acb7eF4D8733C719d60e0992B489b629bc55C02';
 
