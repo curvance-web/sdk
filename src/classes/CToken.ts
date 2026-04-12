@@ -44,12 +44,13 @@ const EXCLUDED_ZAP_SYMBOLS = new Set([
  * docstring "primarily a sanity check rather than a security guarantee."
  * Real MEV protection comes from SwapperLib._swapSafe, which oracle-prices
  * the swap input and output and reverts if realized slippage exceeds the
- * Swap.slippage parameter we pass (= the user's raw slippage in WAD).
+ * Swap.slippage parameter we pass.
  *
- * That swap-level check bounds any sandwich extraction to the user's
- * tolerance regardless of how the buffers below are tuned. The buffers
- * here only adjust the contract-level sanity check so it doesn't fire
- * false-positives from intentional or unavoidable forced losses.
+ * Because _swapSafe measures value loss against the FULL input (pre-fee),
+ * the deterministic KyberSwap fee would consume feeBps of the user's MEV
+ * tolerance if not compensated. Each call site expands action.slippage by
+ * feeBps after quoting so the fee is absorbed and the user's chosen
+ * tolerance is preserved for actual MEV/routing variance.
  *
  * Asymmetry between leverage up and deleverage
  * --------------------------------------------
@@ -80,12 +81,10 @@ const LEVERAGE = {
      *  wei-level share rounding plus possible Redstone price drift between
      *  snapshot RPC and tx broadcast block. Both are small constants.
      *
-     *  Fee amplification is handled SEPARATELY: the fee causes (L-1) × feeBps
-     *  equity-fraction loss in checkSlippage (same pattern as deleverage
-     *  overhead). Each leverageUp/depositAndLeverage call site computes a
-     *  `contractSlippage = slippage + (L-1) × feeBps` that is passed only to
-     *  the contract's checkSlippage modifier, NOT to the _swapSafe layer.
-     *  This buffer covers rounding/drift only. */
+     *  Fee handling: each call site expands both action.slippage (by feeBps,
+     *  so _swapSafe doesn't treat the fee as MEV) and contractSlippage (by
+     *  (L-1) × feeBps, so checkSlippage doesn't fire from equity-fraction
+     *  amplification). This buffer covers rounding/drift only. */
     LEVERAGE_UP_BUFFER_BPS: 10n,
     /** BPS overhead on full deleverage swap sizing — absolute terms.
      *  Oversizes the collateral→debt swap so DEX impact + drift doesn't
@@ -1203,11 +1202,20 @@ export class CToken extends Calldata<ICToken> {
                         feeReceiver,
                     );
 
-                    // The fee reduces swap output, which checkSlippage sees
+                    // _swapSafe measures value loss as (valueIn - valueOut) / valueIn
+                    // where valueIn is the FULL input (pre-fee). KyberSwap deducts
+                    // the fee before swapping, so _swapSafe sees feeBps as "slippage"
+                    // even though it's a known, deterministic cost. Expand
+                    // action.slippage by feeBps so the fee doesn't consume the user's
+                    // MEV protection budget. The KyberSwap quote already used the
+                    // user's raw slippage for minReturnAmount (DEX-level protection).
+                    if (feeBps > 0n) {
+                        action.slippage = FormatConverter.bpsToBpsWad(slippage + feeBps);
+                    }
+
+                    // The fee also reduces swap output, which checkSlippage sees
                     // as equity loss amplified by (L-1) — same pattern as
-                    // deleverage. Expand the contract-level tolerance to
-                    // absorb it; the _swapSafe layer (action.slippage) keeps
-                    // the user's raw tolerance for MEV protection.
+                    // deleverage. Expand the contract-level tolerance to absorb it.
                     const contractSlippage = feeBps > 0n
                         ? slippage + BigInt(
                             newLeverage.sub(1)
@@ -1360,6 +1368,13 @@ export class CToken extends Calldata<ICToken> {
                         feeReceiver,
                     );
 
+                    // _swapSafe: expand action.slippage by feeBps so the
+                    // deterministic fee cost doesn't eat the user's MEV budget.
+                    // Same rationale as leverageUp — see comment there.
+                    if (feeBps > 0n) {
+                        action.slippage = FormatConverter.bpsToBpsWad(slippage + feeBps);
+                    }
+
                     const minRepay = isFullDeleverage ? 1n : quote.min_out;
 
                     // Full deleverage oversizes the swap by (DELEVERAGE_OVERHEAD_BPS +
@@ -1370,12 +1385,6 @@ export class CToken extends Calldata<ICToken> {
                     // the contract slippage tolerance by exactly that forced amount,
                     // leaving the user's `slippage` budget available for variable
                     // DEX impact + oracle drift.
-                    //
-                    // This does NOT loosen MEV protection — that lives at the
-                    // _swapSafe layer (which still receives raw user slippage).
-                    // The contract checkSlippage is sanity-only per its docstring.
-                    // Note: the contract returns excess debt token to the user's
-                    // wallet, so the economic loss from the overshoot is zero.
                     const contractSlippage = isFullDeleverage
                         ? slippage + BigInt(
                             currentLeverage.sub(1)
@@ -1458,6 +1467,13 @@ export class CToken extends Calldata<ICToken> {
                         feeBps,
                         feeReceiver,
                     );
+
+                    // _swapSafe: expand action.slippage by feeBps so the
+                    // deterministic fee cost doesn't eat the user's MEV budget.
+                    // Same rationale as leverageUp — see comment there.
+                    if (feeBps > 0n) {
+                        action.slippage = FormatConverter.bpsToBpsWad(slippage + feeBps);
+                    }
 
                     // Fee amplification: same pattern as leverageUp.
                     const contractSlippage = feeBps > 0n

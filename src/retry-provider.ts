@@ -163,7 +163,7 @@ class RetryableProvider {
                     this.config.onRetry(attempt + 1, error, delay);
                 }
                 
-                console.warn(`${context} failed (attempt ${attempt + 1}/${this.config.maxRetries + 1}): ${error.message}. Retrying in ${delay}ms...`);
+                console.debug(`${context} failed (attempt ${attempt + 1}/${this.config.maxRetries + 1}): ${error.message}. Retrying in ${delay}ms...`);
                 
                 await this.sleep(delay);
             }
@@ -201,7 +201,7 @@ class RetryableProvider {
                 if (prop === '_send' && typeof original === 'function') {
                     return async (payload: any, callback?: any) => {
                         return this.executeWithRetry(
-                            () => original.apply(target, arguments),
+                            () => original.apply(target, [payload, callback]),
                             `RPC ${payload.method || 'unknown'}`
                         );
                     };
