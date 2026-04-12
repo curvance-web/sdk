@@ -151,7 +151,7 @@ class RetryableProvider {
                 if (attempt === this.config.maxRetries || !isRetryable) {
                     if (!isRetryable && attempt === 0) {
                         // Log that this error is not retryable for debugging
-                        console.debug(`${context} failed with non-retryable error: ${error.message}`);
+                        console.debug(`[rpc] ${context}: non-retryable`, error.message);
                     }
                     throw error;
                 }
@@ -163,7 +163,7 @@ class RetryableProvider {
                     this.config.onRetry(attempt + 1, error, delay);
                 }
                 
-                console.debug(`${context} failed (attempt ${attempt + 1}/${this.config.maxRetries + 1}): ${error.message}. Retrying in ${delay}ms...`);
+                console.debug(`[rpc] ${context}: attempt ${attempt + 1}/${this.config.maxRetries + 1} failed, retry in ${delay}ms`, error.message);
                 
                 await this.sleep(delay);
             }

@@ -198,8 +198,12 @@ export class KyberSwap implements IDexAgg {
             }
         });
         if (!quote_response.ok) {
-            const error_return = await quote_response.json() as KyperSwapErrorResponse;
-            throw new Error(`KyberSwap API request failed [${error_return.requestId}]: ${error_return.message} (code: ${error_return.code})`);
+            let detail = `${quote_response.status} ${quote_response.statusText}`;
+            try {
+                const body = await quote_response.json() as KyperSwapErrorResponse;
+                detail = `[${body.requestId}]: ${body.message} (code: ${body.code})`;
+            } catch { /* non-JSON error body (e.g. HTML 502 page) */ }
+            throw new Error(`KyberSwap quote failed: ${detail}`);
         }
         const quote = await quote_response.json() as KyberSwapQuoteResponse;
 
@@ -219,8 +223,12 @@ export class KyberSwap implements IDexAgg {
             })
         });
         if (!build_response.ok) {
-            const error_return = await build_response.json() as KyperSwapErrorResponse;
-            throw new Error(`KyberSwap API build request failed [${error_return.requestId}]: ${error_return.message} (code: ${error_return.code})`);
+            let detail = `${build_response.status} ${build_response.statusText}`;
+            try {
+                const body = await build_response.json() as KyperSwapErrorResponse;
+                detail = `[${body.requestId}]: ${body.message} (code: ${body.code})`;
+            } catch { /* non-JSON error body */ }
+            throw new Error(`KyberSwap build failed: ${detail}`);
         }
         const build_data = await build_response.json() as KyperSwapBuildResponse;
 
