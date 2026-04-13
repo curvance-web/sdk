@@ -45,6 +45,7 @@ If Context content contradicts a Skill rule, flag the conflict — don't silentl
 - **Verifying against source:** trace actual code paths (file, function, line) — don't self-assess from memory. Flag unverified claims.
 - **Present output files** at the end of every task. No exceptions.
 - Show the work. Skip preamble and recap.
+- **README sync:** any change to public API surface (new methods, removed methods, renamed parameters, new classes, new exports, new chains, new types) must be reflected in `README.md` before the task is considered complete.
 
 ## Quick lookup
 
