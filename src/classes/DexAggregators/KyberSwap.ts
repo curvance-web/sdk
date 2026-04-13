@@ -16,9 +16,11 @@ import { CURVANCE_FEE_BPS, CURVANCE_DAO_FEE_RECEIVER } from "../../feePolicy";
 // Without this, a misconfigured API response silently reverts on-chain
 // at the KyberSwapChecker with no user-facing explanation.
 
-/** _FEE_IN_BPS flag — must be set so the router interprets feeAmounts
- *  as basis points, not absolute token amounts. */
-const REQUIRED_FLAGS = 0x80n;
+/** Required flags: _FEE_IN_BPS (0x80) so the router interprets feeAmounts
+ *  as basis points, plus executor v3 indicator (0x200) which KyberSwap's
+ *  API always sets on Monad. Router-inert (consumed by executor only).
+ *  Must match KyberSwapChecker.REQUIRED_FLAGS on-chain. */
+const REQUIRED_FLAGS = 0x280n;
 
 /** ABI type string for KyberSwap's SwapExecutionParams struct. */
 const SWAP_PARAMS_TYPE =
