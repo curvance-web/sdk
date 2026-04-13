@@ -1,5 +1,5 @@
 <p style="text-align: center;width:100%">
-    <img src="https://pbs.twimg.com/profile_banners/1445781144125857796/1752160592" alt="Curvance"/>
+    <img src="https://pbs.twimg.com/profile_banners/1445781144125857796/1773687595/1500x500" alt="Curvance"/>
 </p>
 
 A TypeScript SDK for interacting with the Curvance protocol. Built on ethers v6 with a bulk-loaded cache model — `setupChain()` preloads all market data in 1–3 RPC calls, and all subsequent reads are synchronous from cache.
