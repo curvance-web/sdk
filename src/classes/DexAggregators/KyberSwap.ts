@@ -7,6 +7,89 @@ import { toBigInt, validateProviderAsSigner } from "../../helpers";
 import { ERC20 } from "../ERC20";
 import FormatConverter from "../FormatConverter";
 import { safeBigInt, fetchWithTimeout, validateSlippageBps } from "../../validation";
+import { AbiCoder } from "ethers";
+import { CURVANCE_FEE_BPS, CURVANCE_DAO_FEE_RECEIVER } from "../../feePolicy";
+
+// ── Calldata validation ─────────────────────────────────────────────
+// The KyberSwap API returns an opaque calldata blob. We trust the API to
+// embed the fee params we requested, but verify before submitting the tx.
+// Without this, a misconfigured API response silently reverts on-chain
+// at the KyberSwapChecker with no user-facing explanation.
+
+/** _FEE_IN_BPS flag — must be set so the router interprets feeAmounts
+ *  as basis points, not absolute token amounts. */
+const REQUIRED_FLAGS = 0x80n;
+
+/** ABI type string for KyberSwap's SwapExecutionParams struct. */
+const SWAP_PARAMS_TYPE =
+    'tuple(address callTarget, address approveTarget, ' +
+    'tuple(address srcToken, address dstToken, address[] srcReceivers, ' +
+    'uint256[] srcAmounts, address[] feeReceivers, uint256[] feeAmounts, ' +
+    'address dstReceiver, uint256 amount, uint256 minReturnAmount, ' +
+    'uint256 flags, bytes permit) desc, ' +
+    'bytes targetData, bytes clientData)';
+
+/**
+ * Decode and validate fee-related fields in KyberSwap swap calldata.
+ * Catches API misconfigurations before the tx hits the on-chain checker.
+ *
+ * @param calldata - Raw calldata from KyberSwap build API
+ * @param feeBps - Expected fee BPS (0n to skip fee validation)
+ * @param feeReceiver - Expected fee receiver address (undefined to skip)
+ */
+function validateSwapCalldata(
+    calldata: string,
+    feeBps: bigint,
+    feeReceiver: string | undefined
+): void {
+    // No fee configured — nothing to validate in the calldata
+    if (!feeBps || feeBps === 0n || !feeReceiver) return;
+
+    try {
+        // Strip 4-byte selector (0x + 8 hex chars = 10 chars)
+        const encoded = '0x' + calldata.slice(10);
+        const coder = AbiCoder.defaultAbiCoder();
+        const [execution] = coder.decode([SWAP_PARAMS_TYPE], encoded);
+        const desc = execution.desc;
+
+        // Validate _FEE_IN_BPS flag — without it, feeAmounts[0]=4 means
+        // 4 wei instead of 4 BPS
+        const flags = BigInt(desc.flags);
+        if (flags !== REQUIRED_FLAGS) {
+            throw new Error(
+                `KyberSwap calldata flags=${flags} (0x${flags.toString(16)}), ` +
+                `expected ${REQUIRED_FLAGS} (0x${REQUIRED_FLAGS.toString(16)}). ` +
+                `Without _FEE_IN_BPS, fee is interpreted as absolute tokens.`
+            );
+        }
+
+        // Validate fee receiver
+        if (desc.feeReceivers.length !== 1) {
+            throw new Error(
+                `KyberSwap calldata has ${desc.feeReceivers.length} fee receivers, expected 1`
+            );
+        }
+        if (desc.feeReceivers[0].toLowerCase() !== feeReceiver.toLowerCase()) {
+            throw new Error(
+                `KyberSwap calldata feeReceiver=${desc.feeReceivers[0]}, ` +
+                `expected ${feeReceiver}`
+            );
+        }
+
+        // Validate fee amount
+        if (desc.feeAmounts.length !== 1 || BigInt(desc.feeAmounts[0]) !== feeBps) {
+            throw new Error(
+                `KyberSwap calldata feeAmount=${desc.feeAmounts[0]}, expected ${feeBps}`
+            );
+        }
+    } catch (e: any) {
+        // If this is our own validation error, rethrow
+        if (e.message?.startsWith('KyberSwap calldata')) throw e;
+        // ABI decode failure — calldata structure doesn't match expected format.
+        // Log but don't block — the on-chain checker will catch structural issues.
+        console.warn('Failed to validate KyberSwap calldata structure:', e.message);
+    }
+}
 
 export interface KyperSwapErrorResponse {
     code: number;
@@ -198,8 +281,12 @@ export class KyberSwap implements IDexAgg {
             }
         });
         if (!quote_response.ok) {
-            const error_return = await quote_response.json() as KyperSwapErrorResponse;
-            throw new Error(`KyberSwap API request failed [${error_return.requestId}]: ${error_return.message} (code: ${error_return.code})`);
+            let detail = `${quote_response.status} ${quote_response.statusText}`;
+            try {
+                const body = await quote_response.json() as KyperSwapErrorResponse;
+                detail = `[${body.requestId}]: ${body.message} (code: ${body.code})`;
+            } catch { /* non-JSON error body (e.g. HTML 502 page) */ }
+            throw new Error(`KyberSwap quote failed: ${detail}`);
         }
         const quote = await quote_response.json() as KyberSwapQuoteResponse;
 
@@ -219,8 +306,12 @@ export class KyberSwap implements IDexAgg {
             })
         });
         if (!build_response.ok) {
-            const error_return = await build_response.json() as KyperSwapErrorResponse;
-            throw new Error(`KyberSwap API build request failed [${error_return.requestId}]: ${error_return.message} (code: ${error_return.code})`);
+            let detail = `${build_response.status} ${build_response.statusText}`;
+            try {
+                const body = await build_response.json() as KyperSwapErrorResponse;
+                detail = `[${body.requestId}]: ${body.message} (code: ${body.code})`;
+            } catch { /* non-JSON error body */ }
+            throw new Error(`KyberSwap build failed: ${detail}`);
         }
         const build_data = await build_response.json() as KyperSwapBuildResponse;
 
@@ -230,6 +321,10 @@ export class KyberSwap implements IDexAgg {
         if(build_data.data.routerAddress != this.router) {
             throw new Error(`KyberSwap returned unexpected router address: ${build_data.data.routerAddress}`);
         }
+
+        // Validate that the API actually embedded the fee params we requested.
+        // Without this, a misconfigured API response silently reverts on-chain.
+        validateSwapCalldata(build_data.data.data, feeBps ?? 0n, feeReceiver);
 
         return {
             to: build_data.data.routerAddress,

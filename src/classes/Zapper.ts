@@ -6,6 +6,7 @@ import { Calldata } from "./Calldata";
 import abi from '../abis/SimpleZapper.json';
 import { Zappers } from "./Market";
 import { setup_config } from "../setup";
+import FormatConverter from "./FormatConverter";
 
 export interface Swap {
     inputToken: address,
@@ -116,7 +117,7 @@ export class Zapper extends Calldata<IZapper> {
             inputAmount: amount,
             outputToken: outputToken,
             target: quote.to,
-            slippage: slippage,
+            slippage: FormatConverter.bpsToBpsWad(slippage),
             call: quote.calldata
         };
 

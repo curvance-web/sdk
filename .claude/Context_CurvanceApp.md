@@ -358,6 +358,32 @@ getNetworkSlug(chainId)     // → string | undefined (for SDK setupChain)
 
 ---
 
+## [RPC_TRANSPORT]
+
+wagmi transport config: `src/modules/app/providers/wagmi.tsx`
+
+```ts
+const RPC_OPTS = { retryCount: 3, retryDelay: 150, timeout: 10_000 } as const;
+
+// Uses fallback() when chainRPCBackup exists, plain http() otherwise
+const transports = Object.fromEntries(
+  SUPPORTED_CHAINS.map((c) => [
+    c.chainId,
+    c.chainRPCBackup
+      ? fallback([http(c.chainRPC, RPC_OPTS), http(c.chainRPCBackup, RPC_OPTS)], { rank: false })
+      : http(c.chainRPC, RPC_OPTS),
+  ]),
+);
+```
+
+**How it works:** `rank: false` means try primary first, only fall through to backup on failure. `timeout: 10_000` converts silent RPC stalls into real errors (previously requests could hang indefinitely). `retryCount: 3` at transport level applies to every RPC read in the app — universal coverage vs per-query retry.
+
+**Backup RPCs:** Defined via `chainRPCBackup?: string` on `ChainConfig` in `chain-configs.ts`. Currently only Monad mainnet has a backup (`monad-mainnet.drpc.org`). Adding a backup to any chain = one field addition, transport auto-uses it.
+
+**Retry layers (don't double-count):** Transport retries (3×, 150ms) handle transient network blips. TanStack Query retry on `setupChain` (2×, exponential 2s/4s) handles higher-level failures after transport exhausts retries. All other queries: `retry: 0` at query level — transport retries are the safety net.
+
+---
+
 ## [CSP_ARCHITECTURE]
 
 CSP is enforcing on both app (`next.config.ts`) and lander (`next.config.mjs`).
@@ -383,7 +409,7 @@ App and SDK use different RPC endpoints for the same chain. If either goes down 
 - Adding a chain to `chain-configs.ts` → add its `chainRPC` URL to `rpcSources` in `next.config.ts`
 - SDK adds/changes a chain → also add the SDK's fallback RPC from `sdk/src/chains/*.ts`
 - SDK adds a DEX aggregator → add its API domain to `sdkExternalApis`
-- SDK Merkl domain: currently `api-merkl.angle.money` — remove from CSP when SDK migrates to `api.merkl.xyz`
+- SDK Merkl domain: `api.merkl.xyz` — already in CSP under `sdkExternalApis`
 - WalletConnect endpoints → verify against https://docs.reown.com/advanced/security/content-security-policy
 
 **Headers beyond CSP:**

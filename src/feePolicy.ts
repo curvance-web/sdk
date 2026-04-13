@@ -34,6 +34,15 @@ import { chain_config } from "./chains";
  *   to prevent dust debt. The fee compensation is applied at the call site,
  *   not in the policy itself.
  *
+ * - **protocolLeverageFee must remain 0 while SDK fees are active.**
+ *   On-chain _validateInputsAndApplyFee mutates action.borrowAssets before
+ *   the swap callback, causing swapAction.inputAmount != action.borrowAssets
+ *   in SimplePositionManager (revert). Additionally, users would be double-
+ *   charged (protocol fee on collateral/borrow + SDK fee on swap input).
+ *   If protocolLeverageFee needs activation, the SDK must first query the
+ *   fee from centralRegistry, subtract it from swapAction.inputAmount, and
+ *   quote KyberSwap for the reduced amount.
+ *
  * Future functionality (not yet implemented)
  * ------------------------------------------
  * - **SDK-native token classification.** Currently, stable/volatile classification
@@ -47,6 +56,15 @@ import { chain_config } from "./chains";
  *   single receiver. Extending to a `feeReceivers: { address, share }[]` array
  *   would let the protocol, integrators, and a referral program co-receive
  *   fees in one swap call.
+ *
+ * - **Dynamic DAO address from chain.** `CURVANCE_DAO_FEE_RECEIVER` is
+ *   hardcoded. The on-chain KyberSwapChecker validates against
+ *   `centralRegistry.daoAddress()` dynamically. If DAO permissions transfer
+ *   via `transferDaoPermissions()`, the checker validates against the new
+ *   address but the SDK still sends the old one — every swap reverts.
+ *   Fix: read `daoAddress` at setupChain time via
+ *   `protocolReader.centralRegistry()` → `centralRegistry.daoAddress()`,
+ *   store in setup_config, and use at runtime instead of the constant.
  *
  * - **Per-user fee tiers / discounts.** The current policy is global (one
  *   policy per setupChain). To support staker discounts, volume tiers, or
@@ -100,8 +118,17 @@ export interface FeePolicy {
     feeReceiver: address;
 }
 
+/** Fee BPS charged on all DEX swaps via KyberSwap's `feeAmount` parameter.
+ *  Must match the on-chain KyberSwapChecker.FEE_BPS constant — if they
+ *  diverge, every swap reverts (checker enforces exact match).
+ *  To change the fee: update this constant AND redeploy the checker. */
+export const CURVANCE_FEE_BPS = 4n;
+
 /** Curvance DAO fee receiver — same wallet used for protocol interest fees
- *  and existing Kuru aggregator referrer fees. */
+ *  and existing Kuru aggregator referrer fees.  Must match
+ *  centralRegistry.daoAddress() — the on-chain checker validates
+ *  dynamically per-swap.  If DAO permissions transfer on-chain without
+ *  updating this constant, every swap reverts. */
 export const CURVANCE_DAO_FEE_RECEIVER: address =
     '0x0Acb7eF4D8733C719d60e0992B489b629bc55C02';
 
