@@ -1,5 +1,96 @@
 [
   {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "_centralRegistry",
+        "type": "address",
+        "internalType": "contract ICentralRegistry"
+      },
+      {
+        "name": "configs",
+        "type": "tuple[]",
+        "internalType": "struct OptimizerReader.CollateralGuardConfig[]",
+        "components": [
+          {
+            "name": "cToken",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "guardType",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "ORACLE_MANAGER",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IOracleManager"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "addGuardConfig",
+    "inputs": [
+      {
+        "name": "cToken",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "guardType",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "centralRegistry",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract ICentralRegistry"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getOptimizerAPY",
+    "inputs": [
+      {
+        "name": "optimizer",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "apy",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
     "type": "function",
     "name": "getOptimizerMarketData",
     "inputs": [
@@ -70,7 +161,7 @@
         ]
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -115,24 +206,62 @@
   },
   {
     "type": "function",
-    "name": "optimalDeposit",
+    "name": "guardConfigs",
     "inputs": [
       {
-        "name": "optimizer",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "assets",
+        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       }
     ],
     "outputs": [
       {
-        "name": "market",
+        "name": "cToken",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "guardType",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "isBad",
+    "inputs": [
+      {
+        "name": "optimizer",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "bad",
+        "type": "address[]",
+        "internalType": "address[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "multiIsBadCheck",
+    "inputs": [
+      {
+        "name": "optimizers",
+        "type": "address[]",
+        "internalType": "address[]"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "badOptimizers",
+        "type": "address[][]",
+        "internalType": "address[][]"
       }
     ],
     "stateMutability": "view"
@@ -145,6 +274,11 @@
         "name": "optimizer",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "slippageBps",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "outputs": [
@@ -159,9 +293,31 @@
             "internalType": "contract IBorrowableCToken"
           },
           {
-            "name": "assets",
+            "name": "assetsOrBps",
             "type": "int256",
             "internalType": "int256"
+          }
+        ]
+      },
+      {
+        "name": "bounds",
+        "type": "tuple[]",
+        "internalType": "struct LendingOptimizer.AllocationBound[]",
+        "components": [
+          {
+            "name": "cToken",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "minBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxBps",
+            "type": "uint256",
+            "internalType": "uint256"
           }
         ]
       }
@@ -170,26 +326,62 @@
   },
   {
     "type": "function",
-    "name": "optimalWithdrawal",
+    "name": "removeGuardConfig",
     "inputs": [
       {
-        "name": "optimizer",
+        "name": "cToken",
         "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "event",
+    "name": "GuardConfigAdded",
+    "inputs": [
+      {
+        "name": "cToken",
+        "type": "address",
+        "indexed": true,
         "internalType": "address"
       },
       {
-        "name": "assets",
+        "name": "guardType",
         "type": "uint256",
+        "indexed": false,
         "internalType": "uint256"
       }
     ],
-    "outputs": [
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "GuardConfigRemoved",
+    "inputs": [
       {
-        "name": "market",
+        "name": "cToken",
         "type": "address",
+        "indexed": true,
         "internalType": "address"
       }
     ],
-    "stateMutability": "view"
+    "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "OptimizerReader__GuardConfigAlreadyExists",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OptimizerReader__GuardConfigDoesNotExist",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OptimizerReader__Unauthorized",
+    "inputs": []
   }
 ]

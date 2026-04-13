@@ -338,70 +338,6 @@
   },
   {
     "type": "function",
-    "name": "getLeverageSnapshot",
-    "inputs": [
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "cToken",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "borrowableCToken",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "bufferTime",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "collateralUsd",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "debtUsd",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "collateralAssetPrice",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "sharePrice",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "debtAssetPrice",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "debtTokenBalance",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "oracleError",
-        "type": "bool",
-        "internalType": "bool"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "getDynamicMarketData",
     "inputs": [],
     "outputs": [
@@ -498,6 +434,70 @@
             ]
           }
         ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getLeverageSnapshot",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "cToken",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "borrowableCToken",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "bufferTime",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "collateralUsd",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "debtUsd",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "collateralAssetPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "sharePrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "debtAssetPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "debtTokenBalance",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "oracleError",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "stateMutability": "view"

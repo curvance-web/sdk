@@ -22,6 +22,7 @@ const contracts_used = [
     "RedstoneCoreAdaptor",
     "SimpleZapper",
     "SimplePositionManager",
+    "OptimizerReader",
 ];
 
 if(process.env.CONTRACT_REPO_PATH == undefined) {
