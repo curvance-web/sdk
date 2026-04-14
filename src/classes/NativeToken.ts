@@ -9,14 +9,16 @@ export class NativeToken {
     name   : string;
     symbol  : string;
     provider: curvance_provider;
+    private oracleManagerAddress: address | undefined;
     address  = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" as address;
     decimals = 18n;
 
-    constructor(chain: ChainRpcPrefix, provider: curvance_provider) {
+    constructor(chain: ChainRpcPrefix, provider: curvance_provider, oracleManagerAddress: address | undefined = undefined) {
         const config = chain_config[chain];
         this.symbol = config.native_symbol;
         this.name = config.native_name || config.native_symbol;
         this.provider = provider;
+        this.oracleManagerAddress = oracleManagerAddress;
     }
 
     
@@ -43,7 +45,9 @@ export class NativeToken {
     async getPrice(inTokenInput: true, inUSD: true, getLower: false): Promise<USD>
     async getPrice(inTokenInput: false, inUSD: true, getLower: false): Promise<bigint>
     async getPrice(inTokenInput: boolean, inUSD = true, getLower = false): Promise<USD | bigint> {
-        const oracle_manager = new OracleManager(setup_config.contracts.OracleManager as address, this.provider);
+        const oracleManagerAddress =
+            this.oracleManagerAddress ?? (setup_config.contracts.OracleManager as address);
+        const oracle_manager = new OracleManager(oracleManagerAddress, this.provider);
         const price = await oracle_manager.getPrice(this.address, inUSD, getLower);
         return inTokenInput ? Decimal(price).div(WAD) : price;
     }

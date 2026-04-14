@@ -5,7 +5,7 @@ import { CToken } from "./CToken";
 import { Calldata } from "./Calldata";
 import abi from '../abis/SimpleZapper.json';
 import { Zappers } from "./Market";
-import { setup_config } from "../setup";
+import { type SetupConfigSnapshot } from "../setup";
 import FormatConverter from "./FormatConverter";
 
 export interface Swap {
@@ -41,12 +41,14 @@ export class Zapper extends Calldata<IZapper> {
     contract: Contract & IZapper;
     address: address;
     type: ZapperTypes;
+    setup: SetupConfigSnapshot;
 
-    constructor(address: address, provider: curvance_signer, type: ZapperTypes) {
+    constructor(address: address, provider: curvance_signer, type: ZapperTypes, setup: SetupConfigSnapshot) {
         super();
         this.address = address;
         this.provider = provider;
         this.type = type;
+        this.setup = setup;
         this.contract = contractSetup<IZapper>(provider, address, abi);
     }
 
@@ -62,7 +64,7 @@ export class Zapper extends Calldata<IZapper> {
 
     async getSimpleZapCalldata(ctoken: CToken, inputToken: address, outputToken: address, amount: bigint, collateralize: boolean, slippage: bigint) {
         const isNative = inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
-        const config = getChainConfig();
+        const config = getChainConfig(this.setup.chain);
 
         // For native MON: if the deposit token IS wrapped native, just wrap (no swap needed)
         if (isNative && outputToken.toLowerCase() === config.wrapped_native.toLowerCase()) {
@@ -100,7 +102,7 @@ export class Zapper extends Calldata<IZapper> {
         // Resolve fee from policy. The policy already exempts no-ops via
         // same-token + native↔wrapped checks, so the only way feeBps > 0 here
         // is for a real swap.
-        const feeBps = setup_config.feePolicy.getFeeBps({
+        const feeBps = this.setup.feePolicy.getFeeBps({
             operation: 'zap',
             inputToken: isNative ? NATIVE_ADDRESS as address : inputToken,
             outputToken: outputToken,
@@ -108,7 +110,7 @@ export class Zapper extends Calldata<IZapper> {
             currentLeverage: null,
             targetLeverage: null,
         });
-        const feeReceiver = feeBps > 0n ? setup_config.feePolicy.feeReceiver : undefined;
+        const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
 
         const quote = await config.dexAgg.quote(this.address, swapInputToken, outputToken, amount, slippage, feeBps, feeReceiver);
 
@@ -171,7 +173,7 @@ export class Zapper extends Calldata<IZapper> {
             ? await ctoken.getUnderlyingVault().previewDeposit(amount)
             : amount;
         const expected_shares = await ctoken.convertToShares(vaultAssets);
-        const config = getChainConfig();
+        const config = getChainConfig(this.setup.chain);
 
         const swap: Swap = {
             inputToken: NATIVE_ADDRESS,

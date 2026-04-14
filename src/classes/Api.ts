@@ -1,4 +1,4 @@
-import { setup_config } from "../setup";
+import { setup_config, type SetupConfigSnapshot } from "../setup";
 import { address } from "../types";
 import { fetchWithTimeout } from "../validation";
 
@@ -27,13 +27,13 @@ export type Incentives = { [key: address]: Array<IncentiveResponse> };
 export class Api {
     private url: string;
     
-    public constructor() {
-        this.url = setup_config.api_url!;
+    public constructor(config: SetupConfigSnapshot = setup_config) {
+        this.url = config.api_url!;
     }
 
-    static async fetchNativeYields(): Promise<{ symbol: string, apy: number }[]> {
-        const { api_url } = setup_config;
-        let chain: string = setup_config.chain;
+    static async fetchNativeYields(config: SetupConfigSnapshot = setup_config): Promise<{ symbol: string, apy: number }[]> {
+        const { api_url } = config;
+        let chain: string = config.chain;
 
         if(api_url == null) {
             console.error("You must have an API URL setup to fetch native yields.");
@@ -70,8 +70,8 @@ export class Api {
         }
     }
 
-    static async getRewards() {
-        const { chain, api_url } = setup_config
+    static async getRewards(config: SetupConfigSnapshot = setup_config) {
+        const { chain, api_url } = config
 
         let milestones: Milestones = {};
         let incentives: Incentives = {};

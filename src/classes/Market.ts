@@ -6,7 +6,7 @@ import abi from '../abis/MarketManagerIsolated.json';
 import { Decimal } from "decimal.js";
 import { address, curvance_provider, Percentage, TokenInput, USD } from "../types";
 import { OracleManager } from "./OracleManager";
-import { setup_config } from "../setup";
+import { setup_config, type SetupConfigSnapshot } from "../setup";
 import { fetchMerklOpportunities, MerklOpportunity } from "../integrations/merkl";
 import { BorrowableCToken } from "./BorrowableCToken";
 import FormatConverter from "./FormatConverter";
@@ -62,6 +62,7 @@ export class Market {
     tokens: (CToken | BorrowableCToken)[] = [];
     oracle_manager: OracleManager;
     reader: ProtocolReader;
+    setup: SetupConfigSnapshot;
     cache: { static: StaticMarketData, dynamic: DynamicMarketData, user: UserMarket, deploy: DeployData };
     milestone: MilestoneResponse | null = null;
     incentives: Array<IncentiveResponse> = [];
@@ -73,12 +74,14 @@ export class Market {
         user_data: UserMarket,
         deploy_data: DeployData,
         oracle_manager: OracleManager,
-        reader: ProtocolReader
+        reader: ProtocolReader,
+        setup: SetupConfigSnapshot
     ) {
         this.provider = provider;
         this.address = static_data.address;
         this.oracle_manager = oracle_manager;
         this.reader = reader;
+        this.setup = setup;
         this.contract = contractSetup<IMarket>(provider, this.address, abi);
         this.cache = { static: static_data, dynamic: dynamic_data, user: user_data, deploy: deploy_data };
 
@@ -680,13 +683,20 @@ export class Market {
      * @param provider - The RPC provider
      * @returns An array of Market instances setup with protocol reader data
      */
-    static async getAll(reader: ProtocolReader, oracle_manager: OracleManager, provider: curvance_provider = setup_config.provider, milestones: Milestones = {}, incentives: Incentives = {}) {
+    static async getAll(
+        reader: ProtocolReader,
+        oracle_manager: OracleManager,
+        provider: curvance_provider = setup_config.provider,
+        milestones: Milestones = {},
+        incentives: Incentives = {},
+        setup: SetupConfigSnapshot = setup_config,
+    ) {
         const user = "address" in provider ? provider.address : EMPTY_ADDRESS;
         const all_data = await reader.getAllMarketData(user as address);
-        const deploy_keys: string[] = Object.keys(setup_config.contracts.markets) as (keyof typeof setup_config.contracts.markets)[];
+        const deploy_keys: string[] = Object.keys(setup.contracts.markets) as (keyof typeof setup.contracts.markets)[];
         // Filter out USDC — DeFiLlama incorrectly returns YZM vault yield labeled as USDC
         const [yields, merklLendOpps, merklBorrowOpps] = await Promise.all([
-            Api.fetchNativeYields().then(y => y.filter(y => y.symbol.toUpperCase() !== 'USDC')),
+            Api.fetchNativeYields(setup).then(y => y.filter(y => y.symbol.toUpperCase() !== 'USDC')),
             fetchMerklOpportunities({ action: 'LEND' }).catch(() => [] as MerklOpportunity[]),
             fetchMerklOpportunities({ action: 'BORROW' }).catch(() => [] as MerklOpportunity[]),
         ]);
@@ -702,7 +712,7 @@ export class Market {
             let deploy_data: DeployData | undefined;
 
             for(const obj_key of deploy_keys) {
-                const data = (setup_config.contracts.markets as any)[obj_key];
+                const data = (setup.contracts.markets as any)[obj_key];
 
                 if(typeof data != 'object') {
                     continue;
@@ -737,7 +747,7 @@ export class Market {
                 continue;
             }
 
-            const market = new Market(provider, staticData, dynamicData, userData, deploy_data, oracle_manager, reader);
+            const market = new Market(provider, staticData, dynamicData, userData, deploy_data, oracle_manager, reader, setup);
             if(milestones[market.address] != undefined) {
                 market.milestone = milestones[market.address]!;
             }

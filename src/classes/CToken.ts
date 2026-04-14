@@ -9,13 +9,11 @@ import base_ctoken_abi from '../abis/BaseCToken.json';
 import { address, bytes, curvance_provider, Percentage, TokenInput, USD, USD_WAD } from "../types";
 import { Redstone } from "./Redstone";
 import { Zapper, ZapperTypes, zapperTypeToName } from "./Zapper";
-import { setup_config } from "../setup";
 import { PositionManager, PositionManagerTypes } from "./PositionManager";
 import { BorrowableCToken } from "./BorrowableCToken";
 import { NativeToken } from "./NativeToken";
 import { ERC4626 } from "./ERC4626";
 import FormatConverter from "./FormatConverter";
-import { chain_config } from "../chains";
 
 const EXCLUDED_ZAP_SYMBOLS = new Set([
     'eBTC', 'earnAUSD', 'vUSD', 'syzUSD', 'ezETH', 'YZM', 'wsrUSD', 'sAUSD',
@@ -193,11 +191,11 @@ export class CToken extends Calldata<ICToken> {
         this.cache = cache;
         this.market = market;
 
-        const chain_config = getChainConfig();
+        const chainSettings = this.currentChainConfig;
         const assetAddr = this.asset.address.toLowerCase();
-        this.isNativeVault = chain_config.native_vaults.some(vault => vault.contract.toLowerCase() == assetAddr);
-        this.isVault = chain_config.vaults.some(vault => vault.contract.toLowerCase() == assetAddr);
-        this.isWrappedNative = chain_config.wrapped_native.toLowerCase() == assetAddr;
+        this.isNativeVault = chainSettings.native_vaults.some(vault => vault.contract.toLowerCase() == assetAddr);
+        this.isVault = chainSettings.vaults.some(vault => vault.contract.toLowerCase() == assetAddr);
+        this.isWrappedNative = chainSettings.wrapped_native.toLowerCase() == assetAddr;
 
         if(EXCLUDED_ZAP_SYMBOLS.has(this.asset.symbol)) {
             return;
@@ -213,6 +211,10 @@ export class CToken extends Calldata<ICToken> {
         if("simplePositionManager" in this.market.plugins) this.leverageTypes.push('simple');
         this.zapTypes.push('simple');
     }
+
+    private get setup() { return this.market.setup; }
+    private get currentChain() { return this.setup.chain; }
+    private get currentChainConfig() { return getChainConfig(this.currentChain); }
 
     get adapters() { return this.cache.adapters; }
     get borrowPaused() { return this.cache.borrowPaused }
@@ -456,7 +458,12 @@ export class CToken extends Calldata<ICToken> {
             throw new Error("CToken does not use a vault asset as its underlying asset");
         }
 
-        return new ERC4626(this.provider, this.getAsset(false));
+        return new ERC4626(
+            this.provider,
+            this.getAsset(false),
+            undefined,
+            this.setup.contracts.OracleManager as address,
+        );
     }
 
     async getVaultAsset(asErc20: true): Promise<ERC20>;
@@ -468,7 +475,14 @@ export class CToken extends Calldata<ICToken> {
     getAsset(asErc20: true): ERC20;
     getAsset(asErc20: false): address;
     getAsset(asErc20: boolean) {
-        return asErc20 ? new ERC20(this.provider, this.cache.asset.address, this.cache.asset) : this.cache.asset.address
+        return asErc20
+            ? new ERC20(
+                this.provider,
+                this.cache.asset.address,
+                this.cache.asset,
+                this.setup.contracts.OracleManager as address,
+            )
+            : this.cache.asset.address
     }
 
     getPrice(): USD;
@@ -565,7 +579,7 @@ export class CToken extends Calldata<ICToken> {
             return null;
         }
 
-        return new Zapper(zap_contract, signer, type);
+        return new Zapper(zap_contract, signer, type, this.setup);
     }
 
     async isZapAssetApproved(instructions: ZapperInstructions, amount: bigint) {
@@ -635,11 +649,11 @@ export class CToken extends Calldata<ICToken> {
                 }
 
                 const plugin_name = zapperTypeToName.get(plugin);
-                if(!plugin_name || !setup_config.contracts.zappers || !(plugin_name in setup_config.contracts.zappers)) {
+                if(!plugin_name || !this.setup.contracts.zappers || !(plugin_name in this.setup.contracts.zappers)) {
                     throw new Error(`Plugin ${plugin_name} not found in zappers`);
                 }
 
-                return setup_config.contracts.zappers[plugin_name] as address;
+                return this.setup.contracts.zappers[plugin_name] as address;
             }
 
             case 'positionManager': {
@@ -791,7 +805,11 @@ export class CToken extends Calldata<ICToken> {
 
         if(typeof zap === 'object') {
             if(zap.type === 'native-vault' || zap.type === 'native-simple' || zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
-                asset = new NativeToken(setup_config.chain, this.provider);
+                asset = new NativeToken(
+                    this.currentChain,
+                    this.provider,
+                    this.setup.contracts.OracleManager as address,
+                );
             } else {
                 asset = new ERC20(this.provider, zap.inputToken);
             }
@@ -799,8 +817,20 @@ export class CToken extends Calldata<ICToken> {
             switch (zap) {
                 case 'none': asset = this.getAsset(true); break;
                 case 'vault': asset = await this.getVaultAsset(true); break;
-                case 'native-vault': asset = new NativeToken(setup_config.chain, this.provider); break;
-                case 'native-simple': asset = new NativeToken(setup_config.chain, this.provider); break;
+                case 'native-vault':
+                    asset = new NativeToken(
+                        this.currentChain,
+                        this.provider,
+                        this.setup.contracts.OracleManager as address,
+                    );
+                    break;
+                case 'native-simple':
+                    asset = new NativeToken(
+                        this.currentChain,
+                        this.provider,
+                        this.setup.contracts.OracleManager as address,
+                    );
+                    break;
                 default: throw new Error("Unsupported zap type for balance fetch");
             }
         }
@@ -950,7 +980,11 @@ export class CToken extends Calldata<ICToken> {
 
         if(this.zapTypes.includes('native-vault')) {
             tokens.push({
-                interface: new NativeToken(setup_config.chain, this.provider),
+                interface: new NativeToken(
+                    this.currentChain,
+                    this.provider,
+                    this.setup.contracts.OracleManager as address,
+                ),
                 type: 'native-vault'
             });
             tokens_exclude.push(EMPTY_ADDRESS, NATIVE_ADDRESS);
@@ -958,7 +992,11 @@ export class CToken extends Calldata<ICToken> {
 
         if(this.zapTypes.includes('native-simple')) {
             tokens.push({
-                interface: new NativeToken(setup_config.chain, this.provider),
+                interface: new NativeToken(
+                    this.currentChain,
+                    this.provider,
+                    this.setup.contracts.OracleManager as address,
+                ),
                 type: 'native-simple'
             });
 
@@ -977,14 +1015,18 @@ export class CToken extends Calldata<ICToken> {
         }
 
         if(this.zapTypes.includes('simple')) {
-            let dexAggSearch = await chain_config[setup_config.chain].dexAgg.getAvailableTokens(this.provider, search);
+            let dexAggSearch = await this.currentChainConfig.dexAgg.getAvailableTokens(this.provider, search);
             tokens = tokens.concat(dexAggSearch.filter(token => !tokens_exclude.includes(token.interface.address.toLocaleLowerCase())));
 
             // Add native MON as a zap option for any token with a simple zapper
             // (not just wrapped native). The simple zapper handles wrapping + swapping.
             if (!tokens_exclude.includes(NATIVE_ADDRESS.toLowerCase()) && !this.isWrappedNative) {
                 tokens.push({
-                    interface: new NativeToken(setup_config.chain, this.provider),
+                    interface: new NativeToken(
+                        this.currentChain,
+                        this.provider,
+                        this.setup.contracts.OracleManager as address,
+                    ),
                     type: 'simple'
                 });
                 tokens_exclude.push(NATIVE_ADDRESS.toLowerCase());
@@ -1081,7 +1123,7 @@ export class CToken extends Calldata<ICToken> {
 
         // Fee preview: queried from the configured fee policy.
         const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
-        const feeBps = setup_config.feePolicy.getFeeBps({
+        const feeBps = this.setup.feePolicy.getFeeBps({
             operation: 'leverage-up',
             inputToken: borrow.asset.address,
             outputToken: this.asset.address,
@@ -1136,7 +1178,7 @@ export class CToken extends Calldata<ICToken> {
         // (exact for partial; for full deleverage the actual swap is sized
         // by leverageDown using the snapshot, but the preview is close enough
         // for display purposes).
-        const feeBps = borrow ? setup_config.feePolicy.getFeeBps({
+        const feeBps = borrow ? this.setup.feePolicy.getFeeBps({
             operation: 'leverage-down',
             inputToken: this.asset.address,
             outputToken: borrow.asset.address,
@@ -1182,7 +1224,7 @@ export class CToken extends Calldata<ICToken> {
             switch(type) {
                 case 'simple': {
                     const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
-                    const feeBps = setup_config.feePolicy.getFeeBps({
+                    const feeBps = this.setup.feePolicy.getFeeBps({
                         operation: 'leverage-up',
                         inputToken: borrow.asset.address,
                         outputToken: this.asset.address,
@@ -1190,9 +1232,9 @@ export class CToken extends Calldata<ICToken> {
                         currentLeverage: this.getLeverage() ?? Decimal(1),
                         targetLeverage: newLeverage,
                     });
-                    const feeReceiver = feeBps > 0n ? setup_config.feePolicy.feeReceiver : undefined;
+                    const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
 
-                    const { action, quote } = await chain_config[setup_config.chain].dexAgg.quoteAction(
+                    const { action, quote } = await this.currentChainConfig.dexAgg.quoteAction(
                         manager.address,
                         borrow.asset.address,
                         this.asset.address,
@@ -1288,7 +1330,7 @@ export class CToken extends Calldata<ICToken> {
 
             validateProviderAsSigner(this.provider);
 
-            const config = getChainConfig();
+            const config = this.currentChainConfig;
             const slippage = toBps(slippage_);
             const manager = this.getPositionManager(type);
             let calldata: bytes;
@@ -1316,7 +1358,7 @@ export class CToken extends Calldata<ICToken> {
                     // exact for current callers. Future notional-tiered policies
                     // should be aware that for full deleverage the inputAmount
                     // passed here is an underestimate.
-                    const feeBps = setup_config.feePolicy.getFeeBps({
+                    const feeBps = this.setup.feePolicy.getFeeBps({
                         operation: 'leverage-down',
                         inputToken: this.asset.address,
                         outputToken: borrowToken.asset.address,
@@ -1324,7 +1366,7 @@ export class CToken extends Calldata<ICToken> {
                         currentLeverage: currentLeverage,
                         targetLeverage: newLeverage,
                     });
-                    const feeReceiver = feeBps > 0n ? setup_config.feePolicy.feeReceiver : undefined;
+                    const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
 
                     if (isFullDeleverage) {
                         // Use exact projected debt from snapshot to size the swap.
@@ -1455,7 +1497,7 @@ export class CToken extends Calldata<ICToken> {
             switch(type) {
                 case 'simple': {
                     const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
-                    const feeBps = setup_config.feePolicy.getFeeBps({
+                    const feeBps = this.setup.feePolicy.getFeeBps({
                         operation: 'deposit-and-leverage',
                         inputToken: borrow.asset.address,
                         outputToken: this.asset.address,
@@ -1463,9 +1505,9 @@ export class CToken extends Calldata<ICToken> {
                         currentLeverage: this.getLeverage() ?? Decimal(1),
                         targetLeverage: multiplier,
                     });
-                    const feeReceiver = feeBps > 0n ? setup_config.feePolicy.feeReceiver : undefined;
+                    const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
 
-                    const { action, quote } = await chain_config[setup_config.chain].dexAgg.quoteAction(
+                    const { action, quote } = await this.currentChainConfig.dexAgg.quoteAction(
                         manager.address,
                         borrow.asset.address,
                         this.asset.address,
@@ -1836,11 +1878,11 @@ export class CToken extends Calldata<ICToken> {
     }
 
     private async _checkZapperApproval(zapper: Zapper) {
-        if(!setup_config.approval_protection) {
+        if(!this.setup.approval_protection) {
             return;
         }
 
-        if (setup_config.approval_protection && zapper) {
+        if (this.setup.approval_protection && zapper) {
             const plugin_allowed = await this.isPluginApproved(zapper.type, 'zapper');
             if (!plugin_allowed) {
                 throw new Error(`Please approve the ${zapper.type} Zapper to be able to move ${this.symbol} on your behalf.`);
@@ -1859,7 +1901,7 @@ export class CToken extends Calldata<ICToken> {
     }
 
     private async _checkAssetApproval(assets: bigint) {
-        if(!setup_config.approval_protection) {
+        if(!this.setup.approval_protection) {
             return;
         }
 
@@ -1872,7 +1914,7 @@ export class CToken extends Calldata<ICToken> {
     }
 
     private async _checkDepositApprovals(zapper: Zapper | null, assets: bigint) {
-        if(!setup_config.approval_protection) {
+        if(!this.setup.approval_protection) {
             return;
         }
 

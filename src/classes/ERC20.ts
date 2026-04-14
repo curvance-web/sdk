@@ -24,15 +24,18 @@ export class ERC20 {
     address: address;
     contract: Contract & IERC20;
     cache: StaticMarketAsset | undefined = undefined;
+    protected oracleManagerAddress: address | undefined;
 
     constructor(
         provider: curvance_provider,
         address: address,
-        cache: StaticMarketAsset | undefined = undefined
+        cache: StaticMarketAsset | undefined = undefined,
+        oracleManagerAddress: address | undefined = undefined,
     ) {
         this.provider = provider;
         this.address = address;
         this.cache = cache;
+        this.oracleManagerAddress = oracleManagerAddress;
         this.contract = contractSetup<IERC20>(provider, address, [
             "function balanceOf(address owner) view returns (uint256)",
             "function transfer(address to, uint256 amount) returns (bool)",
@@ -109,7 +112,9 @@ export class ERC20 {
     async getPrice(inTokenInput: true, inUSD: boolean, getLower: boolean): Promise<USD>
     async getPrice(inTokenInput: false, inUSD: boolean, getLower: boolean): Promise<bigint>
     async getPrice(inTokenInput: boolean, inUSD = true, getLower = false): Promise<USD | bigint> {
-        const oracle_manager = new OracleManager(setup_config.contracts.OracleManager as address, this.provider);
+        const oracleManagerAddress =
+            this.oracleManagerAddress ?? (setup_config.contracts.OracleManager as address);
+        const oracle_manager = new OracleManager(oracleManagerAddress, this.provider);
         const price = await oracle_manager.getPrice(this.address, inUSD, getLower);
 
         return inTokenInput ? Decimal(price).div(WAD) : price;

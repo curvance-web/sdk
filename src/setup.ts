@@ -9,21 +9,49 @@ import { Api } from "./classes/Api";
 import { validateApiUrl } from "./validation";
 import { FeePolicy, NO_FEE_POLICY } from "./feePolicy";
 
-export let setup_config: {
+export interface SetupConfigSnapshot {
     chain: ChainRpcPrefix;
     contracts: ReturnType<typeof getContractAddresses>;
     provider: curvance_provider;
     approval_protection: boolean;
     api_url: string;
     feePolicy: FeePolicy;
-};
+}
+
+export let setup_config: SetupConfigSnapshot;
 
 export let all_markets: Market[] = [];
+let latest_setup_invocation = 0;
 
 export interface SetupChainOptions {
     /** Optional fee policy for SDK-initiated DEX swaps (zaps + leverage).
      *  Defaults to NO_FEE_POLICY (zero fees) for backward compatibility. */
     feePolicy?: FeePolicy;
+}
+
+function createSetupConfig(
+    chain: ChainRpcPrefix,
+    provider: curvance_provider,
+    approval_protection: boolean,
+    api_url: string,
+    options: SetupChainOptions,
+): SetupConfigSnapshot {
+    return {
+        chain,
+        provider,
+        approval_protection,
+        contracts: getContractAddresses(chain),
+        api_url,
+        feePolicy: options.feePolicy ?? NO_FEE_POLICY,
+    };
+}
+
+function validateSetupConfig(config: SetupConfigSnapshot) {
+    if(!("ProtocolReader" in config.contracts)) {
+        throw new Error(`Chain configuration for ${config.chain} is missing ProtocolReader address.`);
+    } else if (!("OracleManager" in config.contracts)) {
+        throw new Error(`Chain configuration for ${config.chain} is missing OracleManager address.`);
+    }
 }
 
 export async function setupChain(
@@ -45,30 +73,35 @@ export async function setupChain(
     }
 
     provider = wrapProviderWithRetries(provider);
+    const nextSetupConfig = createSetupConfig(chain, provider, approval_protection, api_url, options);
+    validateSetupConfig(nextSetupConfig);
 
-    setup_config = {
-        chain,
-        provider,
-        approval_protection,
-        contracts: getContractAddresses(chain),
-        api_url,
-        feePolicy: options.feePolicy ?? NO_FEE_POLICY,
+    const setupInvocation = ++latest_setup_invocation;
+    const { milestones, incentives } = await Api.getRewards(nextSetupConfig);
+    const reader = new ProtocolReader(
+        nextSetupConfig.contracts.ProtocolReader as address,
+        nextSetupConfig.provider,
+    );
+    const oracle_manager = new OracleManager(
+        nextSetupConfig.contracts.OracleManager as address,
+        nextSetupConfig.provider,
+    );
+    const markets = await Market.getAll(
+        reader,
+        oracle_manager,
+        nextSetupConfig.provider,
+        milestones,
+        incentives,
+        nextSetupConfig,
+    );
+
+    if(setupInvocation === latest_setup_invocation) {
+        setup_config = nextSetupConfig;
+        all_markets = markets;
     }
-
-    if(!("ProtocolReader" in setup_config.contracts)) {
-        throw new Error(`Chain configuration for ${chain} is missing ProtocolReader address.`);
-    } else if (!("OracleManager" in setup_config.contracts)) {
-        throw new Error(`Chain configuration for ${chain} is missing OracleManager address.`);
-    }
-
-    const { milestones, incentives } = await Api.getRewards();
-    const reader = new ProtocolReader(setup_config.contracts.ProtocolReader as address)
-    const oracle_manager = new OracleManager(setup_config.contracts.OracleManager as address);
-
-    all_markets = await Market.getAll(reader, oracle_manager, setup_config.provider, milestones, incentives);
 
     return {
-        markets: all_markets,
+        markets,
         reader,
         dexAgg: chain_config[chain].dexAgg,
         global_milestone: milestones['global'] ?? null

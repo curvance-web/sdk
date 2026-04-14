@@ -65,8 +65,7 @@ export function toBigInt(value: number | Decimal, decimals: bigint): bigint {
     return FormatConverter.decimalToBigInt(Decimal(value), decimals);
 }
 
-export function getChainConfig() {
-    const chain = setup_config.chain;
+export function getChainConfig(chain: ChainRpcPrefix = setup_config.chain) {
     const config = chain_config[chain];
     if (!config) {
         throw new Error(`No configuration found for chain ${chain}`);
