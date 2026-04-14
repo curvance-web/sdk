@@ -11,7 +11,7 @@ export type ChainConfig = {
     dexAgg: IDexAgg;
     rpc: ChainRpcConfig;
     provider: JsonRpcProvider;
-    fallbackProvider: JsonRpcProvider | null;
+    fallbackProviders: JsonRpcProvider[];
     native_symbol: string;
     native_name: string;
     wrapped_native: address;

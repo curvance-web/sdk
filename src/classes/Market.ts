@@ -332,6 +332,15 @@ export class Market {
         return snapshots;
     }
 
+    hasUserActivity() {
+        return this.tokens.some((token) =>
+            token.cache.userAssetBalance > 0n ||
+            token.cache.userShareBalance > 0n ||
+            token.cache.userCollateral > 0n ||
+            token.cache.userDebt > 0n
+        );
+    }
+
     applyState(dynamicData: DynamicMarketData, userData?: UserMarket) {
         this.cache.dynamic = dynamicData;
 
@@ -369,6 +378,46 @@ export class Market {
         }
 
         this.applyState(dynamic, user);
+    }
+
+    static getActiveUserMarkets(markets: Market[]): Market[] {
+        return markets.filter((market) => market.hasUserActivity());
+    }
+
+    static async reloadUserMarkets(markets: Market[], account: address): Promise<Market[]> {
+        if(markets.length === 0) {
+            return [];
+        }
+
+        const groups = new Map<ProtocolReader, Market[]>();
+        for(const market of markets) {
+            const existing = groups.get(market.reader);
+            if(existing) {
+                existing.push(market);
+            } else {
+                groups.set(market.reader, [market]);
+            }
+        }
+
+        for(const [reader, groupedMarkets] of groups) {
+            const addresses = groupedMarkets.map((market) => market.address);
+            const { dynamicMarkets, userMarkets } = await reader.getMarketStates(addresses, account);
+            const dynamicByAddress = new Map(dynamicMarkets.map((market) => [market.address, market]));
+            const userByAddress = new Map(userMarkets.map((market) => [market.address, market]));
+
+            for(const market of groupedMarkets) {
+                const dynamic = dynamicByAddress.get(market.address);
+                const user = userByAddress.get(market.address);
+
+                if(dynamic == undefined || user == undefined) {
+                    throw new Error(`Could not reload market state for ${market.address}.`);
+                }
+
+                market.applyState(dynamic, user);
+            }
+        }
+
+        return markets;
     }
 
     /**

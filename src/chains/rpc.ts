@@ -6,6 +6,13 @@ export interface ChainRpcPolicy {
     retryDelayMs: number;
     timeoutMs: number;
     fallbackCooldownMs: number;
+    rankIntervalMs: number;
+    rankSampleCount: number;
+    rankTimeoutMs: number;
+    rankWeights: {
+        latency: number;
+        stability: number;
+    };
 }
 
 export interface ChainRpcConfig extends ChainRpcPolicy {
@@ -18,6 +25,13 @@ export const DEFAULT_CHAIN_RPC_POLICY: ChainRpcPolicy = {
     retryDelayMs: 150,
     timeoutMs: 10_000,
     fallbackCooldownMs: 30_000,
+    rankIntervalMs: 30_000,
+    rankSampleCount: 5,
+    rankTimeoutMs: 1_000,
+    rankWeights: {
+        latency: 0.3,
+        stability: 0.7,
+    },
 };
 
 export const chain_rpc_config = {
@@ -46,4 +60,8 @@ export function createChainPrimaryProvider(chain: SupportedRpcChain): JsonRpcPro
 export function createChainFallbackProvider(chain: SupportedRpcChain): JsonRpcProvider | null {
     const fallback = getChainRpcConfig(chain).fallbacks[0];
     return fallback ? new JsonRpcProvider(fallback) : null;
+}
+
+export function createChainFallbackProviders(chain: SupportedRpcChain): JsonRpcProvider[] {
+    return getChainRpcConfig(chain).fallbacks.map((url) => new JsonRpcProvider(url));
 }

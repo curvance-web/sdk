@@ -186,6 +186,90 @@ test("fallback gets its own retry cycle", async () => {
     assert.equal(fallbackCallCount, 2, "fallback: 1 failure + 1 success");
 });
 
+test("read methods cascade across multiple fallback providers", async () => {
+    const calls: Array<{ label: string; method: string }> = [];
+
+    const primary = createStubProvider({
+        label: "primary",
+        failMethods: new Set(["eth_call"]),
+        calls,
+    });
+    const fallbackOne = createStubProvider({
+        label: "fallback-1",
+        failMethods: new Set(["eth_call"]),
+        calls,
+    });
+    const fallbackTwo = createStubProvider({
+        label: "fallback-2",
+        calls,
+    });
+
+    const rp = new RetryableProvider(
+        { maxRetries: 0, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, retryableErrors: ["timeout"] },
+        [fallbackOne, fallbackTwo] as any,
+    );
+    const wrapped = rp.wrapProvider(primary) as any;
+
+    const result = await wrapped.send("eth_call", []);
+    assert.equal(result, "fallback-2:eth_call:ok");
+    assert.deepEqual(
+        calls.map((call) => call.label),
+        ["primary", "fallback-1", "fallback-2"],
+        "primary failure should advance through the configured fallback chain",
+    );
+});
+
+test("failed fallback providers are deprioritized during cooldown", async () => {
+    const calls: Array<{ label: string; method: string }> = [];
+    let shouldPrimaryFail = true;
+
+    const primary = {
+        send: async (method: string) => {
+            calls.push({ label: "primary", method });
+            if (shouldPrimaryFail) {
+                throw new Error(`timeout: primary ${method}`);
+            }
+            return `primary:${method}:ok`;
+        },
+    } as any;
+
+    const fallbackOne = createStubProvider({
+        label: "fallback-1",
+        failMethods: new Set(["eth_call"]),
+        calls,
+    });
+    const fallbackTwo = createStubProvider({
+        label: "fallback-2",
+        calls,
+    });
+
+    const rp = new RetryableProvider(
+        {
+            maxRetries: 0,
+            baseDelay: 1,
+            maxDelay: 1,
+            backoffMultiplier: 1,
+            fallbackCooldownMs: 50,
+            retryableErrors: ["timeout"],
+        },
+        [fallbackOne, fallbackTwo] as any,
+    );
+    const wrapped = rp.wrapProvider(primary) as any;
+
+    const first = await wrapped.send("eth_call", []);
+    assert.equal(first, "fallback-2:eth_call:ok");
+
+    shouldPrimaryFail = false;
+    const second = await wrapped.send("eth_call", []);
+    assert.equal(second, "fallback-2:eth_call:ok");
+
+    assert.deepEqual(
+        calls.map((call) => call.label),
+        ["primary", "fallback-1", "fallback-2", "fallback-2"],
+        "during cooldown the healthy fallback should be preferred over the failed one and the primary",
+    );
+});
+
 test("read timeouts fall through to fallback", async () => {
     const calls: Array<{ label: string; method: string }> = [];
 

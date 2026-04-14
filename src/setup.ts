@@ -69,15 +69,15 @@ export async function setupChain(
     validateApiUrl(api_url);
 
     const readProvider = chain_config[chain].provider;
-    const readFallback = chain_config[chain].fallbackProvider;
+    const readFallbacks = chain_config[chain].fallbackProviders;
 
     if(provider == null) {
-        provider = wrapProviderWithRetries(readProvider, readFallback);
+        provider = wrapProviderWithRetries(readProvider, readFallbacks);
     } else {
         // Caller provided a provider (wallet signer).  Use the chain's
-        // dedicated RPC as a read-only fallback so that unreliable wallet
-        // RPCs (e.g. Rabby) don't prevent market data from loading.
-        provider = wrapProviderWithRetries(provider, readFallback);
+        // dedicated RPC stack as a read-only fallback so that unreliable
+        // wallet RPCs (e.g. Rabby) don't prevent market data from loading.
+        provider = wrapProviderWithRetries(provider, [readProvider, ...readFallbacks]);
     }
 
     const nextSetupConfig = createSetupConfig(chain, provider, approval_protection, api_url, options);
@@ -117,4 +117,15 @@ export async function setupChain(
         dexAgg: chain_config[chain].dexAgg,
         global_milestone: milestones['global'] ?? null
     };
+}
+
+export function getActiveUserMarkets(markets: Market[] = all_markets): Market[] {
+    return Market.getActiveUserMarkets(markets);
+}
+
+export async function refreshActiveUserMarkets(
+    account: address,
+    markets: Market[] = all_markets,
+): Promise<Market[]> {
+    return Market.reloadUserMarkets(getActiveUserMarkets(markets), account);
 }

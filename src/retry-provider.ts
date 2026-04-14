@@ -117,15 +117,38 @@ export const DEFAULT_RETRY_CONFIG: RetryConfig = {
     ]
 };
 
+interface FallbackProviderState {
+    provider: JsonRpcProvider;
+    index: number;
+    cooldownUntil: number;
+    lastFailureAt: number;
+    lastSuccessAt: number;
+}
+
 class RetryableProvider {
     private config: RetryConfig;
-    private fallbackProvider: JsonRpcProvider | null;
+    private fallbackProviders: JsonRpcProvider[];
+    private fallbackProviderStates: FallbackProviderState[];
     private _fallbackActivated = false;
     private primaryReadCooldownUntil = 0;
 
-    constructor(config: Partial<RetryConfig> = {}, fallbackProvider: JsonRpcProvider | null = null) {
+    constructor(
+        config: Partial<RetryConfig> = {},
+        fallbackProviders: JsonRpcProvider | JsonRpcProvider[] | null = null,
+    ) {
         this.config = { ...DEFAULT_RETRY_CONFIG, ...config };
-        this.fallbackProvider = fallbackProvider;
+        this.fallbackProviders = Array.isArray(fallbackProviders)
+            ? fallbackProviders
+            : fallbackProviders
+                ? [fallbackProviders]
+                : [];
+        this.fallbackProviderStates = this.fallbackProviders.map((provider, index) => ({
+            provider,
+            index,
+            cooldownUntil: 0,
+            lastFailureAt: 0,
+            lastSuccessAt: 0,
+        }));
     }
 
     private async sleep(ms: number): Promise<void> {
@@ -205,6 +228,71 @@ class RetryableProvider {
         return true;
     }
 
+    private getFallbackProviderLabel(state: FallbackProviderState): string {
+        return `fallback-${state.index + 1}`;
+    }
+
+    private isProviderCoolingDown(cooldownUntil: number): boolean {
+        return cooldownUntil > Date.now();
+    }
+
+    private compareFallbackProviders(a: FallbackProviderState, b: FallbackProviderState): number {
+        const aCooling = this.isProviderCoolingDown(a.cooldownUntil);
+        const bCooling = this.isProviderCoolingDown(b.cooldownUntil);
+
+        if (aCooling !== bCooling) {
+            return aCooling ? 1 : -1;
+        }
+
+        if (aCooling && bCooling) {
+            return a.cooldownUntil - b.cooldownUntil || a.index - b.index;
+        }
+
+        if (a.lastSuccessAt !== b.lastSuccessAt) {
+            return b.lastSuccessAt - a.lastSuccessAt;
+        }
+
+        if (a.lastFailureAt !== b.lastFailureAt) {
+            return a.lastFailureAt - b.lastFailureAt;
+        }
+
+        return a.index - b.index;
+    }
+
+    private getOrderedFallbackProviders(): FallbackProviderState[] {
+        return [...this.fallbackProviderStates].sort((a, b) => this.compareFallbackProviders(a, b));
+    }
+
+    private markFallbackFailure(state: FallbackProviderState): void {
+        state.lastFailureAt = Date.now();
+        state.cooldownUntil = state.lastFailureAt + this.config.fallbackCooldownMs;
+    }
+
+    private markFallbackSuccess(state: FallbackProviderState): void {
+        state.lastSuccessAt = Date.now();
+        state.lastFailureAt = 0;
+        state.cooldownUntil = 0;
+    }
+
+    private getOrderedFallbackOps<T>(
+        fallbackOps: Array<{ state: FallbackProviderState; operation: () => Promise<T> }>,
+    ): Array<{ state: FallbackProviderState; operation: () => Promise<T> }> {
+        const fallbackOpMap = new Map(
+            fallbackOps.map((entry) => [entry.state, entry.operation] as const),
+        );
+
+        return this.getOrderedFallbackProviders()
+            .map((state) => {
+                const operation = fallbackOpMap.get(state);
+                if (!operation) {
+                    return null;
+                }
+
+                return { state, operation };
+            })
+            .filter((entry): entry is { state: FallbackProviderState; operation: () => Promise<T> } => entry != null);
+    }
+
     private async executeWithTimeout<T>(
         operation: () => Promise<T>,
         timeoutMs: number,
@@ -279,22 +367,55 @@ class RetryableProvider {
 
     /**
      * Execute a read operation against the primary provider, falling back to
-     * the dedicated RPC provider if the primary exhausts all retries.
+     * the dedicated RPC providers if the primary exhausts all retries.
      *
      * Write operations (signing, sending transactions) never use the fallback
-     * because the fallback provider cannot sign.
+     * because the fallback providers cannot sign.
      */
+    private async executeFallbackChain<T>(
+        fallbackOps: Array<{ state: FallbackProviderState; operation: () => Promise<T> }>,
+        context: string,
+        originalError?: Error,
+    ): Promise<T> {
+        let lastError = originalError;
+
+        for (const { state, operation } of fallbackOps) {
+            const fallbackContext = `${context} [${this.getFallbackProviderLabel(state)}]`;
+
+            try {
+                const result = await this.executeWithRetry(
+                    this.withReadTimeout(operation, fallbackContext),
+                    fallbackContext,
+                );
+                this.markFallbackSuccess(state);
+                return result;
+            } catch (fallbackError: any) {
+                if (!this.isRetryableError(fallbackError)) {
+                    throw fallbackError;
+                }
+
+                this.markFallbackFailure(state);
+                lastError = fallbackError;
+                console.warn(
+                    `[rpc] ${fallbackContext} failed after ${this.config.maxRetries + 1} attempts. ` +
+                    `Trying the next configured read RPC.`
+                );
+            }
+        }
+
+        throw lastError!;
+    }
+
     private async executeWithReadFallback<T>(
         primaryOp: () => Promise<T>,
-        fallbackOp: () => Promise<T>,
+        fallbackOps: Array<{ state: FallbackProviderState; operation: () => Promise<T> }>,
         context: string,
     ): Promise<T> {
-        const fallbackContext = `${context} [fallback]`;
         const timedPrimaryOp = this.withReadTimeout(primaryOp, context);
-        const timedFallbackOp = this.withReadTimeout(fallbackOp, fallbackContext);
+        const orderedFallbackOps = this.getOrderedFallbackOps(fallbackOps);
 
         if (this.isReadFallbackActive()) {
-            return this.executeWithRetry(timedFallbackOp, fallbackContext);
+            return this.executeFallbackChain(orderedFallbackOps, context);
         }
 
         try {
@@ -310,11 +431,11 @@ class RetryableProvider {
                 this._fallbackActivated = true;
                 console.warn(
                     `[rpc] Primary provider failed for ${context} after ${this.config.maxRetries + 1} attempts. ` +
-                    `Falling back to dedicated RPC for read operations for ${this.config.fallbackCooldownMs}ms.`
+                    `Falling back to dedicated RPCs for read operations for ${this.config.fallbackCooldownMs}ms.`
                 );
             }
 
-            return this.executeWithRetry(timedFallbackOp, fallbackContext);
+            return this.executeFallbackChain(orderedFallbackOps, context, primaryError);
         }
     }
 
@@ -324,7 +445,7 @@ class RetryableProvider {
             return provider;
         }
 
-        const hasFallback = this.fallbackProvider != null;
+        const hasFallback = this.fallbackProviders.length > 0;
 
         const retryableProvider = new Proxy(provider, {
             get: (target, prop, receiver) => {
@@ -341,9 +462,11 @@ class RetryableProvider {
                         const primaryOp = () => original.apply(target, [method, params]);
 
                         if (hasFallback && READ_RPC_METHODS.has(method)) {
-                            const fb = this.fallbackProvider!;
-                            const fallbackOp = () => fb.send(method, params);
-                            return this.executeWithReadFallback(primaryOp, fallbackOp, `RPC ${method}`);
+                            const fallbackOps = this.fallbackProviderStates.map((state) => ({
+                                state,
+                                operation: () => state.provider.send(method, params),
+                            }));
+                            return this.executeWithReadFallback(primaryOp, fallbackOps, `RPC ${method}`);
                         }
 
                         return this.executeWithRetry(primaryOp, `RPC ${method}`);
@@ -357,9 +480,11 @@ class RetryableProvider {
                         const primaryOp = () => original.apply(target, [payload, callback]);
 
                         if (hasFallback && READ_RPC_METHODS.has(method)) {
-                            const fb = this.fallbackProvider!;
-                            const fallbackOp = () => (fb as any)._send(payload, callback);
-                            return this.executeWithReadFallback(primaryOp, fallbackOp, `RPC ${method}`);
+                            const fallbackOps = this.fallbackProviderStates.map((state) => ({
+                                state,
+                                operation: () => (state.provider as any)._send(payload, callback),
+                            }));
+                            return this.executeWithReadFallback(primaryOp, fallbackOps, `RPC ${method}`);
                         }
 
                         return this.executeWithRetry(primaryOp, `RPC ${method}`);
@@ -372,11 +497,22 @@ class RetryableProvider {
                         const primaryOp = () => original.apply(target, args);
 
                         if (hasFallback && READ_PROVIDER_METHODS.has(prop as string)) {
-                            const fb = this.fallbackProvider!;
-                            const fbMethod = (fb as any)[prop as string];
-                            if (typeof fbMethod === 'function') {
-                                const fallbackOp = () => fbMethod.apply(fb, args);
-                                return this.executeWithReadFallback(primaryOp, fallbackOp, `Provider method ${String(prop)}`);
+                            const fallbackOps = this.fallbackProviderStates
+                                .map((state) => {
+                                    const fbMethod = (state.provider as any)[prop as string];
+                                    if (typeof fbMethod !== 'function') {
+                                        return null;
+                                    }
+
+                                    return {
+                                        state,
+                                        operation: () => fbMethod.apply(state.provider, args),
+                                    };
+                                })
+                                .filter((entry): entry is { state: FallbackProviderState; operation: () => Promise<any> } => entry != null);
+
+                            if (fallbackOps.length > 0) {
+                                return this.executeWithReadFallback(primaryOp, fallbackOps, `Provider method ${String(prop)}`);
                             }
                         }
 
@@ -452,7 +588,7 @@ export function configureRetries(config: Partial<RetryConfig> = {}): void {
 export function createRetryableProvider(
     provider: curvance_provider, 
     config: Partial<RetryConfig> = {},
-    readFallback: JsonRpcProvider | null = null,
+    readFallback: JsonRpcProvider | JsonRpcProvider[] | null = null,
 ): curvance_provider {
     const retryProvider = new RetryableProvider(config, readFallback);
     return retryProvider.wrapProvider(provider);
@@ -472,17 +608,18 @@ function getGlobalRetryProvider(): RetryableProvider {
  * Wrap a provider with the global retry configuration.
  *
  * When `readFallback` is supplied, read-only RPC methods (eth_call,
- * eth_getBalance, etc.) will fall through to the fallback provider after
+ * eth_getBalance, etc.) will fall through to the fallback providers after
  * exhausting retries on the primary.  Write/signing methods never use
  * the fallback because only the primary (wallet) provider can sign.
  */
 export function wrapProviderWithRetries(
     provider: curvance_provider,
-    readFallback: JsonRpcProvider | null = null,
+    readFallback: JsonRpcProvider | JsonRpcProvider[] | null = null,
 ): curvance_provider {
-    if (readFallback) {
+    const hasFallback = Array.isArray(readFallback) ? readFallback.length > 0 : readFallback != null;
+    if (hasFallback) {
         // Fallback is per-invocation — create a dedicated instance so the
-        // fallback provider isn't shared across setupChain calls.
+        // fallback providers aren't shared across setupChain calls.
         const retryProvider = new RetryableProvider(
             getGlobalRetryProvider().getConfig(),
             readFallback,
