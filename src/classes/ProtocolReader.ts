@@ -142,6 +142,7 @@ export interface IProtocolReader {
 const PROTOCOL_READER_EXTRA_ABI = [
     "function getMarketStates(address[] markets, address account) view returns ((address _address,(address _address,uint256 totalSupply,uint256 exchangeRate,uint256 totalAssets,uint256 collateral,uint256 debt,uint256 sharePrice,uint256 assetPrice,uint256 sharePriceLower,uint256 assetPriceLower,uint256 borrowRate,uint256 predictedBorrowRate,uint256 utilizationRate,uint256 supplyRate,uint256 liquidity)[] tokens)[] dynamicMarkets,(address _address,uint256 collateral,uint256 maxDebt,uint256 debt,uint256 positionHealth,uint256 cooldown,bool errorCodeHit,(address _address,uint256 userAssetBalance,uint256 userShareBalance,uint256 userUnderlyingBalance,uint256 userCollateral,uint256 userDebt,uint256 liquidationPrice)[] tokens)[] userMarkets)",
 ] as const;
+const GET_MARKET_STATES_SELECTOR = "0xaa78b4d4";
 
 function normalizeDynamicMarketData(data: any[]): DynamicMarketData[] {
     return data.map((market: any) => ({
@@ -227,11 +228,71 @@ export class ProtocolReader {
     provider: curvance_read_provider;
     address: address;
     contract: Contract & IProtocolReader;
+    private supportsGetMarketStates: boolean | null = null;
+    private hasWarnedAboutMarketStatesFallback = false;
 
     constructor(address: address, provider: curvance_read_provider = setup_config.readProvider) {
         this.provider = provider;
         this.address = address;
         this.contract = contractSetup<IProtocolReader>(provider, address, [...abi, ...PROTOCOL_READER_EXTRA_ABI]);
+    }
+
+    private isMissingGetMarketStates(error: any): boolean {
+        const message = String(error?.message ?? "").toLowerCase();
+        const shortMessage = String(error?.shortMessage ?? "").toLowerCase();
+        const revertReason = String(error?.reason ?? "").toLowerCase();
+        const txData = String(error?.transaction?.data ?? "").toLowerCase();
+
+        const looksLikeSelectorMiss =
+            txData.startsWith(GET_MARKET_STATES_SELECTOR) &&
+            (
+                shortMessage.includes("no data present") ||
+                shortMessage.includes("missing revert data") ||
+                message.includes("no data present") ||
+                message.includes("missing revert data") ||
+                revertReason === "require(false)"
+            );
+
+        return looksLikeSelectorMiss;
+    }
+
+    private async getMarketStatesFallback(markets: address[], account: address) {
+        if (!this.hasWarnedAboutMarketStatesFallback) {
+            this.hasWarnedAboutMarketStatesFallback = true;
+            console.warn(
+                "[ProtocolReader] getMarketStates is not available on this deployment yet. " +
+                "Falling back to getDynamicMarketData + getUserData for targeted refreshes."
+            );
+        }
+
+        const [allDynamicMarkets, userData] = await Promise.all([
+            this.getDynamicMarketData(),
+            this.getUserData(account),
+        ]);
+
+        const dynamicByAddress = new Map(allDynamicMarkets.map((market) => [market.address, market] as const));
+        const userByAddress = new Map(userData.markets.map((market) => [market.address, market] as const));
+
+        const dynamicMarkets = markets.map((marketAddress) => {
+            const dynamicMarket = dynamicByAddress.get(marketAddress);
+            if (!dynamicMarket) {
+                throw new Error(`Fallback could not find dynamic market state for ${marketAddress}.`);
+            }
+            return dynamicMarket;
+        });
+
+        const userMarkets = markets.map((marketAddress) => {
+            const userMarket = userByAddress.get(marketAddress);
+            if (!userMarket) {
+                throw new Error(`Fallback could not find user market state for ${marketAddress}.`);
+            }
+            return userMarket;
+        });
+
+        return {
+            dynamicMarkets,
+            userMarkets,
+        };
     }
 
     async getAllMarketData(account: address | null = null, use_api = true) {
@@ -327,11 +388,25 @@ export class ProtocolReader {
     }
 
     async getMarketStates(markets: address[], account: address) {
-        const data = await this.contract.getMarketStates(markets, account);
-        return {
-            dynamicMarkets: normalizeDynamicMarketData(data.dynamicMarkets ?? data[0] ?? []),
-            userMarkets: normalizeUserMarkets(data.userMarkets ?? data[1] ?? []),
-        };
+        if (this.supportsGetMarketStates === false) {
+            return this.getMarketStatesFallback(markets, account);
+        }
+
+        try {
+            const data = await this.contract.getMarketStates(markets, account);
+            this.supportsGetMarketStates = true;
+            return {
+                dynamicMarkets: normalizeDynamicMarketData(data.dynamicMarkets ?? data[0] ?? []),
+                userMarkets: normalizeUserMarkets(data.userMarkets ?? data[1] ?? []),
+            };
+        } catch (error: any) {
+            if (!this.isMissingGetMarketStates(error)) {
+                throw error;
+            }
+
+            this.supportsGetMarketStates = false;
+            return this.getMarketStatesFallback(markets, account);
+        }
     }
 
     async previewAssetImpact(user: address, collateral_ctoken: address, debt_ctoken: address, deposit_amount: bigint, borrow_amount: bigint) {

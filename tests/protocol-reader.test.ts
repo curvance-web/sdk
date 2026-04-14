@@ -416,3 +416,69 @@ test("getMarketStates normalizes tuple payloads from ethers result arrays", asyn
     assert.equal(data.userMarkets[0]?.priceStale, true);
     assert.equal(data.userMarkets[0]?.tokens[0]?.userAssetBalance, 6n);
 });
+
+test("getMarketStates falls back to legacy calls when the selector is not deployed", async () => {
+    const reader = createReader();
+    let targetedCalls = 0;
+    let dynamicCalls = 0;
+    let userCalls = 0;
+
+    reader.contract = {
+        getMarketStates: async () => {
+            targetedCalls += 1;
+            const error: any = new Error("execution reverted (no data present; likely require(false) occurred)");
+            error.shortMessage = "execution reverted (no data present; likely require(false) occurred)";
+            error.reason = "require(false)";
+            error.transaction = {
+                data: "0xaa78b4d400000000000000000000000000000000000000000000000000000000",
+            };
+            throw error;
+        },
+    } as any;
+
+    reader.getDynamicMarketData = async () => {
+        dynamicCalls += 1;
+        return [
+            createDynamicMarket(MARKET, TOKEN),
+            createDynamicMarket(MARKET_B, TOKEN_B),
+        ];
+    };
+    reader.getUserData = async () => {
+        userCalls += 1;
+        return {
+            locks: [],
+            markets: [
+                createUserData().markets[0]!,
+                {
+                    address: MARKET_B as any,
+                    collateral: 10n,
+                    maxDebt: 11n,
+                    debt: 12n,
+                    positionHealth: 13n,
+                    cooldown: 14n,
+                    priceStale: false,
+                    tokens: [{
+                        address: TOKEN_B as any,
+                        userAssetBalance: 15n,
+                        userShareBalance: 16n,
+                        userUnderlyingBalance: 17n,
+                        userCollateral: 18n,
+                        userDebt: 19n,
+                        liquidationPrice: 20n,
+                    }],
+                },
+            ],
+        };
+    };
+
+    const first = await reader.getMarketStates([MARKET_B as any], ACCOUNT as any);
+    const second = await reader.getMarketStates([MARKET as any], ACCOUNT as any);
+
+    assert.equal(targetedCalls, 1);
+    assert.equal(dynamicCalls, 2);
+    assert.equal(userCalls, 2);
+    assert.equal(first.dynamicMarkets[0]?.address, MARKET_B);
+    assert.equal(first.userMarkets[0]?.tokens[0]?.userDebt, 19n);
+    assert.equal(second.dynamicMarkets[0]?.address, MARKET);
+    assert.equal(second.userMarkets[0]?.tokens[0]?.userDebt, 5n);
+});

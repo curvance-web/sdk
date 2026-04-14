@@ -6,13 +6,14 @@ import { after, afterEach, before, describe, test } from "node:test";
 import Decimal from "decimal.js";
 import { Wallet } from "ethers";
 import { type Market } from "../src/classes/Market";
+import FormatConverter from "../src/classes/FormatConverter";
 import { refreshActiveUserMarkets, setup_config, setupChain } from "../src/setup";
 import type { ChainRpcPrefix, address } from "../src";
 import { TestFramework } from "./utils/TestFramework";
 
 const TEST_CHAIN = (process.env.TEST_CHAIN ?? "monad-mainnet") as ChainRpcPrefix;
 const TEST_API_URL = process.env.TEST_API_URL ?? "https://api.curvance.com";
-const TARGET_MARKET = "earnAUSD | AUSD";
+const PREFERRED_MARKET = "earnAUSD | AUSD";
 const DEPOSIT_AMOUNT = Decimal(250);
 const HAS_FORK_ENV = Boolean(process.env.TEST_RPC);
 const describeFork = HAS_FORK_ENV ? describe : describe.skip;
@@ -35,6 +36,35 @@ function findToken(market: Market, tokenAddress: address) {
     const token = market.tokens.find((candidate) => candidate.address === tokenAddress);
     assert.ok(token, `Expected token ${tokenAddress} in market ${market.address}`);
     return token;
+}
+
+async function resolveDepositTarget(framework: TestFramework) {
+    const preferred = framework.curvance.markets.find((market) => market.name === PREFERRED_MARKET);
+    const orderedMarkets = preferred
+        ? [preferred, ...framework.curvance.markets.filter((market) => market.address !== preferred.address)]
+        : framework.curvance.markets;
+
+    for (const market of orderedMarkets) {
+        for (const token of market.tokens) {
+            const balance = await token.getAsset(true).balanceOf(framework.account);
+            if (balance === 0n) {
+                continue;
+            }
+
+            const depositAmount = Decimal.min(
+                DEPOSIT_AMOUNT,
+                FormatConverter.bigIntToDecimal(balance, token.asset.decimals),
+            );
+
+            if (depositAmount.lte(0)) {
+                continue;
+            }
+
+            return { market, token, depositAmount };
+        }
+    }
+
+    throw new Error("No fork market had seeded underlying balance for the test account.");
 }
 
 if (!HAS_FORK_ENV) {
@@ -65,11 +95,11 @@ describeFork("Fork integration", () => {
     });
 
     test("public account-only setup rehydrates signer-created state on the fork", async () => {
+        const { market: signerMarket, token: signerToken, depositAmount } = await resolveDepositTarget(framework);
         const publicBefore = await setupChain(TEST_CHAIN, null, true, TEST_API_URL, {
             account: framework.account,
             readProvider: framework.provider,
         });
-        const [signerMarket, signerToken] = await framework.getMarket(TARGET_MARKET);
         const beforeMarket = findMarket(publicBefore.markets, signerMarket.address);
         const beforeToken = findToken(beforeMarket, signerToken.address);
 
@@ -77,7 +107,7 @@ describeFork("Fork integration", () => {
         assert.equal(beforeMarket.cache.user.collateral, 0n);
 
         await signerToken.approveUnderlying();
-        await signerToken.depositAsCollateral(DEPOSIT_AMOUNT);
+        await signerToken.depositAsCollateral(depositAmount);
         await signerMarket.reloadUserData(framework.account);
 
         const signerAssetBalance = signerToken.cache.userAssetBalance;
@@ -99,10 +129,10 @@ describeFork("Fork integration", () => {
     });
 
     test("getMarketStates targeted refresh matches live market cache after a write", async () => {
-        const [market, token] = await framework.getMarket(TARGET_MARKET);
+        const { market, token, depositAmount } = await resolveDepositTarget(framework);
 
         await token.approveUnderlying();
-        await token.depositAsCollateral(DEPOSIT_AMOUNT);
+        await token.depositAsCollateral(depositAmount);
         await market.reloadUserData(framework.account);
 
         const { dynamicMarkets, userMarkets } = await framework.curvance.reader.getMarketStates([market.address], framework.account);
@@ -126,10 +156,10 @@ describeFork("Fork integration", () => {
     });
 
     test("refreshActiveUserMarkets returns only the markets that became active on-chain", async () => {
-        const [targetMarket, targetToken] = await framework.getMarket(TARGET_MARKET);
+        const { market: targetMarket, token: targetToken, depositAmount } = await resolveDepositTarget(framework);
 
         await targetToken.approveUnderlying();
-        await targetToken.depositAsCollateral(DEPOSIT_AMOUNT);
+        await targetToken.depositAsCollateral(depositAmount);
         await targetMarket.reloadUserData(framework.account);
 
         const refreshed = await refreshActiveUserMarkets(framework.account, framework.curvance.markets);
