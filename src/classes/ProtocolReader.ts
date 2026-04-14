@@ -1,7 +1,7 @@
 import { Contract } from "ethers";
 import { contractSetup, EMPTY_ADDRESS, toDecimal, UINT256_MAX, WAD } from "../helpers";
 import abi from '../abis/ProtocolReader.json'
-import { address, curvance_provider, TokenInput, TypeBPS } from "../types";
+import { address, curvance_read_provider, TokenInput, TypeBPS } from "../types";
 import Decimal from "decimal.js";
 import { setup_config } from "../setup";
 import { MarketToken } from "./Market";
@@ -224,11 +224,11 @@ function createEmptyUserData(staticMarkets: StaticMarketData[]): UserData {
 }
 
 export class ProtocolReader {
-    provider: curvance_provider;
+    provider: curvance_read_provider;
     address: address;
     contract: Contract & IProtocolReader;
 
-    constructor(address: address, provider: curvance_provider = setup_config.provider) {
+    constructor(address: address, provider: curvance_read_provider = setup_config.readProvider) {
         this.provider = provider;
         this.address = address;
         this.contract = contractSetup<IProtocolReader>(provider, address, [...abi, ...PROTOCOL_READER_EXTRA_ABI]);

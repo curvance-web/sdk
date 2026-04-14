@@ -27,7 +27,7 @@ test("setupChain only publishes the latest invocation", async (t) => {
         return rewardsCall === 1 ? rewardsA.promise : rewardsB.promise;
     }) as typeof Api.getRewards;
 
-    Market.getAll = (async (_reader, _oracleManager, _provider, _milestones, _incentives, setup) => {
+    Market.getAll = (async (_reader, _oracleManager, _provider, _signer, _account, _milestones, _incentives, setup) => {
         const activeSetup = setup!;
         return [{ marker: activeSetup.api_url, approvalProtection: activeSetup.approval_protection }] as any;
     }) as typeof Market.getAll;
@@ -48,8 +48,59 @@ test("setupChain only publishes the latest invocation", async (t) => {
 
     assert.equal(setup_config.api_url, "https://api.newer.example");
     assert.equal(setup_config.approval_protection, true);
+    assert.equal(setup_config.signer, null);
+    assert.equal(setup_config.account, null);
+    assert.equal(setup_config.provider, setup_config.readProvider);
     assert.deepEqual(all_markets, newerResult.markets);
     assert.notDeepEqual(all_markets, olderResult.markets);
     assert.equal((newerResult.markets[0] as any).marker, "https://api.newer.example");
     assert.equal((olderResult.markets[0] as any).marker, "https://api.older.example");
+});
+
+test("setupChain keeps signer writes separate from dedicated read transport", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const fakeSigner = {
+        address: "0x000000000000000000000000000000000000dEaD",
+    } as any;
+
+    let captured: {
+        provider: any;
+        signer: any;
+        account: any;
+        setup: typeof setup_config | null;
+    } = {
+        provider: null,
+        signer: null,
+        account: null,
+        setup: null,
+    };
+
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async (_reader, _oracleManager, provider, signer, account, _milestones, _incentives, setup) => {
+        captured = {
+            provider,
+            signer,
+            account,
+            setup: setup ?? null,
+        };
+        return [] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    await setupChain("monad-mainnet", fakeSigner, false, "https://api.example");
+
+    assert.equal(setup_config.signer, fakeSigner);
+    assert.equal(setup_config.account, fakeSigner.address);
+    assert.equal(setup_config.provider, fakeSigner);
+    assert.notEqual(setup_config.readProvider, fakeSigner);
+    assert.equal(captured.signer, fakeSigner);
+    assert.equal(captured.account, fakeSigner.address);
+    assert.equal(captured.setup, setup_config);
+    assert.equal(captured.provider, setup_config.readProvider);
+    assert.notEqual(captured.provider, fakeSigner);
 });

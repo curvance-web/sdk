@@ -1,8 +1,8 @@
 import { TransactionResponse } from "ethers";
-import { contractSetup, toBigInt, toDecimal, UINT256_MAX, validateProviderAsSigner, WAD } from "../helpers";
+import { contractSetup, requireSigner, toBigInt, toDecimal, UINT256_MAX, WAD } from "../helpers";
 import { Contract } from "ethers";
 import { StaticMarketAsset } from "./ProtocolReader";
-import { address, curvance_provider, TokenInput, USD } from "../types";
+import { address, curvance_read_provider, curvance_signer, TokenInput, USD } from "../types";
 import { setup_config } from "../setup";
 import { OracleManager } from "./OracleManager";
 import Decimal from "decimal.js";
@@ -19,32 +19,37 @@ export interface IERC20 {
     allowance(owner: address, spender: address): Promise<bigint>;
 }
 
+const ERC20_ABI = [
+    "function balanceOf(address owner) view returns (uint256)",
+    "function transfer(address to, uint256 amount) returns (bool)",
+    "function approve(address spender, uint256 amount) returns (bool)",
+    "function name() view returns (string)",
+    "function symbol() view returns (string)",
+    "function decimals() view returns (uint8)",
+    "function allowance(address owner, address spender) view returns (uint256)",
+] as const;
+
 export class ERC20 {
-    provider: curvance_provider;
+    provider: curvance_read_provider;
+    signer: curvance_signer | null;
     address: address;
     contract: Contract & IERC20;
     cache: StaticMarketAsset | undefined = undefined;
     protected oracleManagerAddress: address | undefined;
 
     constructor(
-        provider: curvance_provider,
+        provider: curvance_read_provider,
         address: address,
         cache: StaticMarketAsset | undefined = undefined,
         oracleManagerAddress: address | undefined = undefined,
+        signer: curvance_signer | null = setup_config.signer,
     ) {
         this.provider = provider;
+        this.signer = signer;
         this.address = address;
         this.cache = cache;
         this.oracleManagerAddress = oracleManagerAddress;
-        this.contract = contractSetup<IERC20>(provider, address, [
-            "function balanceOf(address owner) view returns (uint256)",
-            "function transfer(address to, uint256 amount) returns (bool)",
-            "function approve(address spender, uint256 amount) returns (bool)",
-            "function name() view returns (string)",
-            "function symbol() view returns (string)",
-            "function decimals() view returns (uint8)",
-            "function allowance(address owner, address spender) view returns (uint256)",
-        ]);
+        this.contract = contractSetup<IERC20>(provider, address, ERC20_ABI);
     }
 
     get name() { return this.cache?.name; }
@@ -68,17 +73,17 @@ export class ERC20 {
     async transfer(to: address, amount: TokenInput) {
         const decimals = this.decimals ?? await this.contract.decimals();
         const tokens = toBigInt(amount, decimals);
-        return this.contract.transfer(to, tokens);
+        return contractSetup<IERC20>(requireSigner(this.signer), this.address, ERC20_ABI).transfer(to, tokens);
     }
 
     async rawTransfer(to: address, amount: bigint) {
-        return this.contract.transfer(to, amount);
+        return contractSetup<IERC20>(requireSigner(this.signer), this.address, ERC20_ABI).transfer(to, amount);
     }
 
     async approve(spender: address, amount: TokenInput | null) {
         const decimals = this.decimals ?? await this.fetchDecimals();
         const tokens = amount == null ? UINT256_MAX : toBigInt(amount, decimals);
-        return this.contract.approve(spender, tokens);
+        return contractSetup<IERC20>(requireSigner(this.signer), this.address, ERC20_ABI).approve(spender, tokens);
     }
 
     async fetchName() {

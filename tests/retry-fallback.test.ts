@@ -53,18 +53,21 @@ test("read methods fall through to fallback when primary exhausts retries", asyn
     assert.equal(fallbackCalls.length, 1, "fallback: called once after primary exhausted");
 });
 
-test("write methods do NOT fall through to fallback", async () => {
+test("read provider methods fall through to fallback", async () => {
     const calls: Array<{ label: string; method: string }> = [];
 
-    const primary = createStubProvider({
-        label: "primary",
-        failMethods: new Set(["eth_sendTransaction"]),
-        calls,
-    });
-    const fallback = createStubProvider({
-        label: "fallback",
-        calls,
-    });
+    const primary = {
+        getBlockNumber: async () => {
+            calls.push({ label: "primary", method: "getBlockNumber" });
+            throw new Error("timeout: primary getBlockNumber");
+        },
+    } as any;
+    const fallback = {
+        getBlockNumber: async () => {
+            calls.push({ label: "fallback", method: "getBlockNumber" });
+            return 123;
+        },
+    } as any;
 
     const rp = new RetryableProvider(
         { maxRetries: 0, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, retryableErrors: ["timeout"] },
@@ -72,10 +75,12 @@ test("write methods do NOT fall through to fallback", async () => {
     );
     const wrapped = rp.wrapProvider(primary) as any;
 
-    await assert.rejects(() => wrapped.send("eth_sendTransaction", []), /timeout/);
-
-    const fallbackCalls = calls.filter((c) => c.label === "fallback");
-    assert.equal(fallbackCalls.length, 0, "fallback must never be called for write methods");
+    const result = await wrapped.getBlockNumber();
+    assert.equal(result, 123);
+    assert.deepEqual(calls, [
+        { label: "primary", method: "getBlockNumber" },
+        { label: "fallback", method: "getBlockNumber" },
+    ]);
 });
 
 test("without a fallback, read methods fail normally after retries", async () => {

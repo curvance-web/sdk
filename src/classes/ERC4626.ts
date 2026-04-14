@@ -25,7 +25,7 @@ export class ERC4626 extends ERC20 {
     async fetchAsset(asErc20: boolean) {
         const vault_asset_address = await this.get4626Contract().asset();
         return asErc20
-            ? new ERC20(this.provider, vault_asset_address, undefined, this.oracleManagerAddress)
+            ? new ERC20(this.provider, vault_asset_address, undefined, this.oracleManagerAddress, this.signer)
             : vault_asset_address as address;
     }
 

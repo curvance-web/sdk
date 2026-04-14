@@ -1,5 +1,5 @@
 import { JsonRpcProvider } from "ethers";
-import { curvance_read_provider } from "./types";
+import { curvance_provider, curvance_read_provider } from "./types";
 import { DEFAULT_CHAIN_RPC_POLICY } from "./chains/rpc";
 
 /** Named ethers provider methods that make RPC calls on the read transport. */

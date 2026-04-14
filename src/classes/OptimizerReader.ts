@@ -1,7 +1,7 @@
 import { Contract } from "ethers";
 import { contractSetup } from "../helpers";
 import abi from '../abis/OptimizerReader.json'
-import { address, curvance_provider } from "../types";
+import { address, curvance_read_provider } from "../types";
 import { setup_config } from "../setup";
 
 export interface OptimizerCTokenData {
@@ -40,11 +40,11 @@ export interface IOptimizerReader {
 }
 
 export class OptimizerReader {
-    provider: curvance_provider;
+    provider: curvance_read_provider;
     address: address;
     contract: Contract & IOptimizerReader;
 
-    constructor(address: address, provider: curvance_provider = setup_config.provider) {
+    constructor(address: address, provider: curvance_read_provider = setup_config.readProvider) {
         this.provider = provider;
         this.address = address;
         this.contract = contractSetup<IOptimizerReader>(provider, address, abi);

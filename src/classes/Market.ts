@@ -1,10 +1,10 @@
-import { BPS, ChangeRate, contractSetup, EMPTY_ADDRESS, getRateSeconds, toBigInt, toDecimal, UINT256_MAX, validateProviderAsSigner, WAD, WAD_DECIMAL } from "../helpers";
+import { BPS, ChangeRate, contractSetup, EMPTY_ADDRESS, getRateSeconds, requireAccount, toBigInt, toDecimal, UINT256_MAX, WAD, WAD_DECIMAL } from "../helpers";
 import { Contract } from "ethers";
 import { DynamicMarketData, ProtocolReader, StaticMarketData, UserMarket } from "./ProtocolReader";
 import { AccountSnapshot, CToken } from "./CToken";
 import abi from '../abis/MarketManagerIsolated.json';
 import { Decimal } from "decimal.js";
-import { address, curvance_provider, Percentage, TokenInput, USD } from "../types";
+import { address, curvance_read_provider, curvance_signer, Percentage, TokenInput, USD } from "../types";
 import { OracleManager } from "./OracleManager";
 import { setup_config, type SetupConfigSnapshot } from "../setup";
 import { fetchMerklOpportunities, MerklOpportunity } from "../integrations/merkl";
@@ -56,7 +56,9 @@ export interface IMarket {
 }
 
 export class Market {
-    provider: curvance_provider;
+    provider: curvance_read_provider;
+    signer: curvance_signer | null;
+    account: address | null;
     address: address;
     contract: Contract & IMarket;
     tokens: (CToken | BorrowableCToken)[] = [];
@@ -68,7 +70,9 @@ export class Market {
     incentives: Array<IncentiveResponse> = [];
 
     constructor(
-        provider: curvance_provider,
+        provider: curvance_read_provider,
+        signer: curvance_signer | null,
+        account: address | null,
         static_data: StaticMarketData,
         dynamic_data: DynamicMarketData,
         user_data: UserMarket,
@@ -78,6 +82,8 @@ export class Market {
         setup: SetupConfigSnapshot
     ) {
         this.provider = provider;
+        this.signer = signer;
+        this.account = account;
         this.address = static_data.address;
         this.oracle_manager = oracle_manager;
         this.reader = reader;
@@ -102,6 +108,10 @@ export class Market {
                 this.tokens.push(ctoken);
             }
         }
+    }
+
+    private getAccountOrThrow(): address {
+        return requireAccount(this.account, this.signer);
     }
 
     /** @returns {string} - The name of the market at deployment. */
@@ -551,8 +561,7 @@ export class Market {
         debt_amount: TokenInput = Decimal(0),
         bufferTime: bigint = 0n
     ) {
-        const provider = validateProviderAsSigner(this.provider);
-        const user = provider.address as address;
+        const user = this.getAccountOrThrow();
 
         // Pass underlying asset amounts — NOT shares.
         // The on-chain reader's _collateralValue calls previewDeposit(assets) internally,
@@ -597,8 +606,7 @@ export class Market {
      * @returns The new position health
      */
     async previewPositionHealthRedeem(ctoken: CToken, amount: TokenInput) {
-        const provider = validateProviderAsSigner(this.provider);
-        const user = provider.address as address;
+        const user = this.getAccountOrThrow();
         const redeem_amount = ctoken.convertTokenInputToShares(amount);
         const existing_collateral = ctoken.cache.userCollateral;
 
@@ -642,8 +650,7 @@ export class Market {
      * @returns The new position health
      */
     async previewPositionHealthBorrow(token: BorrowableCToken, amount: TokenInput) {
-        const provider = validateProviderAsSigner(this.provider);
-        const user = provider.address as address;
+        const user = this.getAccountOrThrow();
         const data = await this.reader.getPositionHealth(
             this.address,
             user,
@@ -670,8 +677,7 @@ export class Market {
      * @returns The new position health
      */
     async previewPositionHealthRepay(token: BorrowableCToken, amount: TokenInput) {
-        const provider = validateProviderAsSigner(this.provider);
-        const user = provider.address as address;
+        const user = this.getAccountOrThrow();
         const data = await this.reader.getPositionHealth(
             this.address,
             user,
@@ -722,13 +728,13 @@ export class Market {
      * @returns An object mapping market addresses to their cooldown expiration dates OR null if its not in cooldown
      */
     async multiHoldExpiresAt(markets: Market[]) {
-        const provider = validateProviderAsSigner(this.provider);
+        const account = this.getAccountOrThrow();
         if(markets.length == 0) {
             throw new Error("You can't fetch expirations for no markets.");
         }
 
         const marketAddresses = markets.map(market => market.address);
-        const cooldownTimestamps = await this.reader.marketMultiCooldown(marketAddresses, provider.address as address);
+        const cooldownTimestamps = await this.reader.marketMultiCooldown(marketAddresses, account);
 
         let cooldowns: { [address: address]: Date | null } = {};
         for(let i = 0; i < markets.length; i++) {
@@ -752,13 +758,14 @@ export class Market {
     static async getAll(
         reader: ProtocolReader,
         oracle_manager: OracleManager,
-        provider: curvance_provider = setup_config.provider,
+        provider: curvance_read_provider = setup_config.readProvider,
+        signer: curvance_signer | null = setup_config.signer,
+        account: address | null = setup_config.account,
         milestones: Milestones = {},
         incentives: Incentives = {},
         setup: SetupConfigSnapshot = setup_config,
     ) {
-        const user = "address" in provider ? provider.address as address : null;
-        const all_data = await reader.getAllMarketData(user);
+        const all_data = await reader.getAllMarketData(account);
         const deploy_keys: string[] = Object.keys(setup.contracts.markets) as (keyof typeof setup.contracts.markets)[];
         // Filter out USDC — DeFiLlama incorrectly returns YZM vault yield labeled as USDC
         const [yields, merklLendOpps, merklBorrowOpps] = await Promise.all([
@@ -813,7 +820,7 @@ export class Market {
                 continue;
             }
 
-            const market = new Market(provider, staticData, dynamicData, userData, deploy_data, oracle_manager, reader, setup);
+            const market = new Market(provider, signer, account, staticData, dynamicData, userData, deploy_data, oracle_manager, reader, setup);
             if(milestones[market.address] != undefined) {
                 market.milestone = milestones[market.address]!;
             }

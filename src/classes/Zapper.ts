@@ -37,19 +37,19 @@ export interface IZapper {
 }
 
 export class Zapper extends Calldata<IZapper> {
-    provider: curvance_signer;
+    signer: curvance_signer;
     contract: Contract & IZapper;
     address: address;
     type: ZapperTypes;
     setup: SetupConfigSnapshot;
 
-    constructor(address: address, provider: curvance_signer, type: ZapperTypes, setup: SetupConfigSnapshot) {
+    constructor(address: address, signer: curvance_signer, type: ZapperTypes, setup: SetupConfigSnapshot) {
         super();
         this.address = address;
-        this.provider = provider;
+        this.signer = signer;
         this.type = type;
         this.setup = setup;
-        this.contract = contractSetup<IZapper>(provider, address, abi);
+        this.contract = contractSetup<IZapper>(signer, address, abi);
     }
 
     async nativeZap(ctoken: CToken, amount: bigint, collateralize: boolean) {
@@ -95,7 +95,7 @@ export class Zapper extends Calldata<IZapper> {
                 swap,
                 expected_shares,
                 collateralize,
-                this.provider.address as address
+                this.signer.address as address
             ]);
         }
 
@@ -131,7 +131,7 @@ export class Zapper extends Calldata<IZapper> {
             swap,
             expected_shares,
             collateralize,
-            this.provider.address as address
+            this.signer.address as address
         ]);
     }
 
@@ -153,7 +153,7 @@ export class Zapper extends Calldata<IZapper> {
             swap,
             expected_shares,
             collateralize,
-            this.provider.address as address
+            this.signer.address as address
         ]);
     }
 
@@ -190,7 +190,7 @@ export class Zapper extends Calldata<IZapper> {
             swap,
             expected_shares,
             collateralize,
-            this.provider.address as address
+            this.signer.address as address
         ]);
     }
 }
