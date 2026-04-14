@@ -1,20 +1,31 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { UINT256_MAX } from "../src/helpers";
-import { ProtocolReader, type DynamicMarketData, type StaticMarketData } from "../src/classes/ProtocolReader";
+import {
+    ProtocolReader,
+    type DynamicMarketData,
+    type StaticMarketData,
+    type UserData,
+} from "../src/classes/ProtocolReader";
 
 const MARKET = "0x0000000000000000000000000000000000000001";
+const MARKET_B = "0x0000000000000000000000000000000000000003";
 const TOKEN = "0x0000000000000000000000000000000000000002";
+const TOKEN_B = "0x0000000000000000000000000000000000000004";
+const ACCOUNT = "0x00000000000000000000000000000000000000aa";
 
 function createReader(): ProtocolReader {
     return Object.create(ProtocolReader.prototype) as ProtocolReader;
 }
 
-function createDynamicMarket(): DynamicMarketData {
+function createDynamicMarket(
+    marketAddress: string = MARKET,
+    tokenAddress: string = TOKEN,
+): DynamicMarketData {
     return {
-        address: MARKET as any,
+        address: marketAddress as any,
         tokens: [{
-            address: TOKEN as any,
+            address: tokenAddress as any,
             totalSupply: 10n,
             totalAssets: 20n,
             exchangeRate: 2n,
@@ -33,18 +44,21 @@ function createDynamicMarket(): DynamicMarketData {
     };
 }
 
-function createStaticMarket(): StaticMarketData {
+function createStaticMarket(
+    marketAddress: string = MARKET,
+    tokenAddress: string = TOKEN,
+): StaticMarketData {
     return {
-        address: MARKET as any,
+        address: marketAddress as any,
         adapters: [],
         cooldownLength: 1200n,
         tokens: [{
-            address: TOKEN as any,
+            address: tokenAddress as any,
             name: "Token",
             symbol: "TOK",
             decimals: 18n,
             asset: {
-                address: TOKEN as any,
+                address: tokenAddress as any,
                 name: "Token",
                 symbol: "TOK",
                 decimals: 18n,
@@ -78,26 +92,113 @@ function createStaticMarket(): StaticMarketData {
     };
 }
 
-test("getAllMarketData skips address(0) user reads for public loads", async () => {
-    const reader = createReader();
-    let allDynamicStateCalls = 0;
+function createUserData(): UserData {
+    return {
+        locks: [{ lockIndex: 1n, amount: 2n, unlockTime: 3n }],
+        markets: [{
+            address: MARKET as any,
+            collateral: 0n,
+            maxDebt: 0n,
+            debt: 0n,
+            positionHealth: UINT256_MAX,
+            cooldown: 1200n,
+            priceStale: true,
+            tokens: [{
+                address: TOKEN as any,
+                userAssetBalance: 1n,
+                userShareBalance: 2n,
+                userUnderlyingBalance: 3n,
+                userCollateral: 4n,
+                userDebt: 5n,
+                liquidationPrice: 6n,
+            }],
+        }],
+    };
+}
 
-    reader.getStaticMarketData = async () => [createStaticMarket()];
-    reader.getDynamicMarketData = async () => [createDynamicMarket()];
+test("public loads synthesize empty user state from static market data", async () => {
+    const reader = createReader();
+    const counters = {
+        static: 0,
+        dynamic: 0,
+        combined: 0,
+    };
+
+    reader.getStaticMarketData = async () => {
+        counters.static += 1;
+        return [
+            createStaticMarket(MARKET, TOKEN),
+            createStaticMarket(MARKET_B, TOKEN_B),
+        ];
+    };
+    reader.getDynamicMarketData = async () => {
+        counters.dynamic += 1;
+        return [
+            createDynamicMarket(MARKET, TOKEN),
+            createDynamicMarket(MARKET_B, TOKEN_B),
+        ];
+    };
     reader.getAllDynamicState = async () => {
-        allDynamicStateCalls++;
+        counters.combined += 1;
         throw new Error("public reads should not request user state");
     };
 
     const data = await reader.getAllMarketData(null);
 
-    assert.equal(allDynamicStateCalls, 0);
-    assert.equal(data.staticMarket.length, 1);
-    assert.equal(data.dynamicMarket.length, 1);
+    assert.deepEqual(counters, {
+        static: 1,
+        dynamic: 1,
+        combined: 0,
+    });
+    assert.equal(data.staticMarket.length, 2);
+    assert.equal(data.dynamicMarket.length, 2);
     assert.equal(data.userData.locks.length, 0);
     assert.equal(data.userData.markets[0]?.cooldown, 1200n);
     assert.equal(data.userData.markets[0]?.positionHealth, UINT256_MAX);
     assert.equal(data.userData.markets[0]?.tokens[0]?.liquidationPrice, UINT256_MAX);
+    assert.equal(data.userData.markets[1]?.address, MARKET_B);
+    assert.equal(data.userData.markets[1]?.tokens[0]?.address, TOKEN_B);
+});
+
+test("account loads use static + combined dynamic state without separate dynamic/user reads", async () => {
+    const reader = createReader();
+    const counters = {
+        static: 0,
+        dynamic: 0,
+        user: 0,
+        combined: 0,
+    };
+
+    reader.getStaticMarketData = async () => {
+        counters.static += 1;
+        return [createStaticMarket()];
+    };
+    reader.getDynamicMarketData = async () => {
+        counters.dynamic += 1;
+        throw new Error("connected loads should use getAllDynamicState");
+    };
+    reader.getUserData = async () => {
+        counters.user += 1;
+        throw new Error("connected loads should not call getUserData directly");
+    };
+    reader.getAllDynamicState = async () => {
+        counters.combined += 1;
+        return {
+            dynamicMarket: [createDynamicMarket()],
+            userData: createUserData(),
+        };
+    };
+
+    const data = await reader.getAllMarketData(ACCOUNT as any);
+
+    assert.deepEqual(counters, {
+        static: 1,
+        dynamic: 0,
+        user: 0,
+        combined: 1,
+    });
+    assert.equal(data.dynamicMarket[0]?.tokens[0]?.assetPrice, 6n);
+    assert.equal(data.userData.markets[0]?.tokens[0]?.userDebt, 5n);
 });
 
 test("getAllDynamicState normalizes combined market and user payloads", async () => {
@@ -156,6 +257,62 @@ test("getAllDynamicState normalizes combined market and user payloads", async ()
     assert.equal(data.userData.markets[0]?.tokens[0]?.userDebt, 5n);
 });
 
+test("getAllDynamicState normalizes tuple payloads from ethers result arrays", async () => {
+    const reader = createReader();
+    reader.contract = {
+        getAllDynamicState: async () => ([
+            [{
+                _address: MARKET,
+                tokens: [{
+                    _address: TOKEN,
+                    totalSupply: 10n,
+                    exchangeRate: 2n,
+                    totalAssets: 20n,
+                    collateral: 3n,
+                    debt: 4n,
+                    sharePrice: 5n,
+                    assetPrice: 6n,
+                    sharePriceLower: 7n,
+                    assetPriceLower: 8n,
+                    borrowRate: 9n,
+                    predictedBorrowRate: 10n,
+                    utilizationRate: 11n,
+                    supplyRate: 12n,
+                    liquidity: 13n,
+                }],
+            }],
+            {
+                locks: [{ lockIndex: 9n, amount: 8n, unlockTime: 7n }],
+                markets: [{
+                    _address: MARKET,
+                    collateral: 1n,
+                    maxDebt: 2n,
+                    debt: 3n,
+                    positionHealth: 4n,
+                    cooldown: 5n,
+                    errorCodeHit: false,
+                    tokens: [{
+                        _address: TOKEN,
+                        userAssetBalance: 6n,
+                        userShareBalance: 7n,
+                        userUnderlyingBalance: 8n,
+                        userCollateral: 9n,
+                        userDebt: 10n,
+                        liquidationPrice: 11n,
+                    }],
+                }],
+            },
+        ]),
+    } as any;
+
+    const data = await reader.getAllDynamicState(ACCOUNT as any);
+
+    assert.equal(data.dynamicMarket[0]?.tokens[0]?.totalAssets, 20n);
+    assert.equal(data.userData.locks[0]?.lockIndex, 9n);
+    assert.equal(data.userData.markets[0]?.priceStale, false);
+    assert.equal(data.userData.markets[0]?.tokens[0]?.liquidationPrice, 11n);
+});
+
 test("getMarketStates normalizes targeted refresh payloads", async () => {
     const reader = createReader();
     reader.contract = {
@@ -206,4 +363,56 @@ test("getMarketStates normalizes targeted refresh payloads", async () => {
     assert.equal(data.dynamicMarkets[0]?.tokens[0]?.assetPrice, 6n);
     assert.equal(data.userMarkets[0]?.tokens[0]?.userCollateral, 9n);
     assert.equal(data.userMarkets[0]?.priceStale, false);
+});
+
+test("getMarketStates normalizes tuple payloads from ethers result arrays", async () => {
+    const reader = createReader();
+    reader.contract = {
+        getMarketStates: async () => ([
+            [{
+                _address: MARKET,
+                tokens: [{
+                    _address: TOKEN,
+                    totalSupply: 10n,
+                    exchangeRate: 2n,
+                    totalAssets: 20n,
+                    collateral: 3n,
+                    debt: 4n,
+                    sharePrice: 5n,
+                    assetPrice: 6n,
+                    sharePriceLower: 7n,
+                    assetPriceLower: 8n,
+                    borrowRate: 9n,
+                    predictedBorrowRate: 10n,
+                    utilizationRate: 11n,
+                    supplyRate: 12n,
+                    liquidity: 13n,
+                }],
+            }],
+            [{
+                _address: MARKET,
+                collateral: 1n,
+                maxDebt: 2n,
+                debt: 3n,
+                positionHealth: 4n,
+                cooldown: 5n,
+                errorCodeHit: true,
+                tokens: [{
+                    _address: TOKEN,
+                    userAssetBalance: 6n,
+                    userShareBalance: 7n,
+                    userUnderlyingBalance: 8n,
+                    userCollateral: 9n,
+                    userDebt: 10n,
+                    liquidationPrice: 11n,
+                }],
+            }],
+        ]),
+    } as any;
+
+    const data = await reader.getMarketStates([MARKET as any], ACCOUNT as any);
+
+    assert.equal(data.dynamicMarkets[0]?.tokens[0]?.borrowRate, 9n);
+    assert.equal(data.userMarkets[0]?.priceStale, true);
+    assert.equal(data.userMarkets[0]?.tokens[0]?.userAssetBalance, 6n);
 });
