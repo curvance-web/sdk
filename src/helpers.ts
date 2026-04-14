@@ -83,6 +83,25 @@ export function validateProviderAsSigner(provider: curvance_provider) {
     return provider as curvance_signer;
 }
 
+export function requireSigner(signer: curvance_signer | null | undefined): curvance_signer {
+    if (!signer) {
+        throw new Error("Provider is not a signer, therefor this action is not available. Please connect a wallet to execute this action.");
+    }
+
+    return signer;
+}
+
+export function requireAccount(
+    account: address | null | undefined,
+    signer: curvance_signer | null | undefined = null,
+): address {
+    if (account) {
+        return account;
+    }
+
+    return requireSigner(signer).address as address;
+}
+
 export function contractSetup<I>(provider: curvance_provider, contractAddress: address, abi: any): Contract & I {
     const contract = new Contract(contractAddress, abi, provider);
     if(contract == undefined || contract == null) {

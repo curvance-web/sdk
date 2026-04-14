@@ -33,17 +33,17 @@ export interface IPositionManager {
 }
 
 export class PositionManager extends Calldata<IPositionManager> {
-    provider: curvance_signer;
+    signer: curvance_signer;
     contract: IPositionManager & Contract;
     address: address;
     type: PositionManagerTypes;
 
-    constructor(address: address, provider: curvance_signer, type: PositionManagerTypes) {
+    constructor(address: address, signer: curvance_signer, type: PositionManagerTypes) {
         super();
         this.address = address;
-        this.provider = provider;
+        this.signer = signer;
         this.type = type;
-        this.contract = contractSetup<IPositionManager>(provider, address, abi);
+        this.contract = contractSetup<IPositionManager>(signer, address, abi);
     }
 
     static emptySwapAction(): Swap {

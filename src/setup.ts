@@ -1,6 +1,6 @@
 import { ChainRpcPrefix, getContractAddresses } from "./helpers";
 import { Market } from "./classes/Market";
-import { address, curvance_provider } from './types';
+import { address, curvance_provider, curvance_read_provider, curvance_signer } from './types';
 import { ProtocolReader } from "./classes/ProtocolReader";
 import { OracleManager } from "./classes/OracleManager";
 import { wrapProviderWithRetries } from "./retry-provider";
@@ -12,6 +12,10 @@ import { FeePolicy, NO_FEE_POLICY } from "./feePolicy";
 export interface SetupConfigSnapshot {
     chain: ChainRpcPrefix;
     contracts: ReturnType<typeof getContractAddresses>;
+    readProvider: curvance_read_provider;
+    signer: curvance_signer | null;
+    account: address | null;
+    /** @deprecated Prefer readProvider/signer/account. */
     provider: curvance_provider;
     approval_protection: boolean;
     api_url: string;
@@ -27,18 +31,27 @@ export interface SetupChainOptions {
     /** Optional fee policy for SDK-initiated DEX swaps (zaps + leverage).
      *  Defaults to NO_FEE_POLICY (zero fees) for backward compatibility. */
     feePolicy?: FeePolicy;
+    /** Optional dedicated account for user-specific reads when no signer is available. */
+    account?: address | null;
+    /** Optional dedicated read provider override. */
+    readProvider?: curvance_read_provider | null;
 }
 
 function createSetupConfig(
     chain: ChainRpcPrefix,
-    provider: curvance_provider,
+    readProvider: curvance_read_provider,
+    signer: curvance_signer | null,
+    account: address | null,
     approval_protection: boolean,
     api_url: string,
     options: SetupChainOptions,
 ): SetupConfigSnapshot {
     return {
         chain,
-        provider,
+        readProvider,
+        signer,
+        account,
+        provider: signer ?? readProvider,
         approval_protection,
         contracts: getContractAddresses(chain),
         api_url,
@@ -68,35 +81,52 @@ export async function setupChain(
     // Validate api_url scheme before any network calls
     validateApiUrl(api_url);
 
-    const readProvider = chain_config[chain].provider;
+    const chainReadProvider = chain_config[chain].provider;
     const readFallbacks = chain_config[chain].fallbackProviders;
+    let signer: curvance_signer | null = null;
+    let readProviderOverride = options.readProvider ?? null;
 
-    if(provider == null) {
-        provider = wrapProviderWithRetries(readProvider, readFallbacks);
-    } else {
-        // Caller provided a provider (wallet signer).  Use the chain's
-        // dedicated RPC stack as a read-only fallback so that unreliable
-        // wallet RPCs (e.g. Rabby) don't prevent market data from loading.
-        provider = wrapProviderWithRetries(provider, [readProvider, ...readFallbacks]);
+    if(provider != null) {
+        if("address" in provider) {
+            signer = provider as curvance_signer;
+        } else {
+            readProviderOverride = provider as curvance_read_provider;
+        }
     }
 
-    const nextSetupConfig = createSetupConfig(chain, provider, approval_protection, api_url, options);
+    const readProvider = wrapProviderWithRetries(
+        readProviderOverride ?? chainReadProvider,
+        readProviderOverride ? [chainReadProvider, ...readFallbacks] : readFallbacks,
+    );
+    const account = options.account ?? (signer?.address as address | undefined) ?? null;
+
+    const nextSetupConfig = createSetupConfig(
+        chain,
+        readProvider,
+        signer,
+        account,
+        approval_protection,
+        api_url,
+        options,
+    );
     validateSetupConfig(nextSetupConfig);
 
     const setupInvocation = ++latest_setup_invocation;
     const { milestones, incentives } = await Api.getRewards(nextSetupConfig);
     const reader = new ProtocolReader(
         nextSetupConfig.contracts.ProtocolReader as address,
-        nextSetupConfig.provider,
+        nextSetupConfig.readProvider,
     );
     const oracle_manager = new OracleManager(
         nextSetupConfig.contracts.OracleManager as address,
-        nextSetupConfig.provider,
+        nextSetupConfig.readProvider,
     );
     const markets = await Market.getAll(
         reader,
         oracle_manager,
-        nextSetupConfig.provider,
+        nextSetupConfig.readProvider,
+        nextSetupConfig.signer,
+        nextSetupConfig.account,
         milestones,
         incentives,
         nextSetupConfig,

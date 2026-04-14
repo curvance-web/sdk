@@ -1,39 +1,9 @@
 import { JsonRpcProvider } from "ethers";
-import { curvance_provider } from "./types";
+import { curvance_read_provider } from "./types";
 import { DEFAULT_CHAIN_RPC_POLICY } from "./chains/rpc";
 
-/**
- * RPC methods that are pure reads — safe to retry against a fallback provider.
- * Write/signing methods are excluded because only the wallet provider can sign.
- */
-const READ_RPC_METHODS = new Set([
-    // State queries
-    'eth_call',
-    'eth_getBalance',
-    'eth_getCode',
-    'eth_getStorageAt',
-    'eth_getTransactionCount',
-    // Block data
-    'eth_blockNumber',
-    'eth_getBlockByNumber',
-    'eth_getBlockByHash',
-    // Gas / fee data
-    'eth_gasPrice',
-    'eth_feeHistory',
-    'eth_estimateGas',
-    'eth_maxPriorityFeePerGas',
-    // Transaction lookups (read-only — not sending)
-    'eth_getTransactionByHash',
-    'eth_getTransactionReceipt',
-    // Logs
-    'eth_getLogs',
-    // Network identity
-    'eth_chainId',
-    'net_version',
-]);
-
-/** Named ethers provider methods that correspond to read RPCs. */
-const READ_PROVIDER_METHODS = new Set([
+/** Named ethers provider methods that make RPC calls on the read transport. */
+const RPC_PROVIDER_METHODS = new Set([
     'getBalance',
     'getCode',
     'getStorageAt',
@@ -439,7 +409,7 @@ class RetryableProvider {
         }
     }
 
-    wrapProvider(provider: curvance_provider): curvance_provider {
+    wrapProvider(provider: curvance_read_provider): curvance_read_provider {
         // If it's already wrapped, return as-is
         if ((provider as any)._isRetryable) {
             return provider;
@@ -461,7 +431,7 @@ class RetryableProvider {
                     return async (method: string, params: any[]) => {
                         const primaryOp = () => original.apply(target, [method, params]);
 
-                        if (hasFallback && READ_RPC_METHODS.has(method)) {
+                        if (hasFallback) {
                             const fallbackOps = this.fallbackProviderStates.map((state) => ({
                                 state,
                                 operation: () => state.provider.send(method, params),
@@ -479,7 +449,7 @@ class RetryableProvider {
                         const method = payload.method || 'unknown';
                         const primaryOp = () => original.apply(target, [payload, callback]);
 
-                        if (hasFallback && READ_RPC_METHODS.has(method)) {
+                        if (hasFallback) {
                             const fallbackOps = this.fallbackProviderStates.map((state) => ({
                                 state,
                                 operation: () => (state.provider as any)._send(payload, callback),
@@ -496,7 +466,7 @@ class RetryableProvider {
                     return async (...args: any[]) => {
                         const primaryOp = () => original.apply(target, args);
 
-                        if (hasFallback && READ_PROVIDER_METHODS.has(prop as string)) {
+                        if (hasFallback) {
                             const fallbackOps = this.fallbackProviderStates
                                 .map((state) => {
                                     const fbMethod = (state.provider as any)[prop as string];
@@ -527,7 +497,7 @@ class RetryableProvider {
                 
                 return original;
             }
-        }) as curvance_provider;
+        }) as curvance_read_provider;
 
         return retryableProvider;
     }
@@ -536,27 +506,7 @@ class RetryableProvider {
         if (typeof prop !== 'string') return false;
         
         // Common ethers.js methods that make RPC calls
-        const rpcMethods = [
-            'getBalance',
-            'getCode',
-            'getStorageAt',
-            'getTransactionCount',
-            'getBlock',
-            'getBlockNumber',
-            'getGasPrice',
-            'getFeeData',
-            'getTransaction',
-            'getTransactionReceipt',
-            'call',
-            'estimateGas',
-            'sendTransaction',
-            'waitForTransaction',
-            'getLogs',
-            'getNetwork',
-            'detectNetwork'
-        ];
-        
-        return rpcMethods.includes(prop);
+        return RPC_PROVIDER_METHODS.has(prop);
     }
 
     updateConfig(newConfig: Partial<RetryConfig>): void {
@@ -586,10 +536,10 @@ export function configureRetries(config: Partial<RetryConfig> = {}): void {
  * Create a provider with retry capabilities
  */
 export function createRetryableProvider(
-    provider: curvance_provider, 
+    provider: curvance_read_provider, 
     config: Partial<RetryConfig> = {},
     readFallback: JsonRpcProvider | JsonRpcProvider[] | null = null,
-): curvance_provider {
+): curvance_read_provider {
     const retryProvider = new RetryableProvider(config, readFallback);
     return retryProvider.wrapProvider(provider);
 }
@@ -613,9 +563,9 @@ function getGlobalRetryProvider(): RetryableProvider {
  * the fallback because only the primary (wallet) provider can sign.
  */
 export function wrapProviderWithRetries(
-    provider: curvance_provider,
+    provider: curvance_read_provider,
     readFallback: JsonRpcProvider | JsonRpcProvider[] | null = null,
-): curvance_provider {
+): curvance_read_provider {
     const hasFallback = Array.isArray(readFallback) ? readFallback.length > 0 : readFallback != null;
     if (hasFallback) {
         // Fallback is per-invocation — create a dedicated instance so the
@@ -633,6 +583,10 @@ export function wrapProviderWithRetries(
  * Utility function to check if a provider is already wrapped with retries
  */
 export function isRetryableProvider(provider: curvance_provider): boolean {
+    return (provider as any)._isRetryable === true;
+}
+
+export function isRetryableReadProvider(provider: curvance_read_provider): boolean {
     return (provider as any)._isRetryable === true;
 }
 

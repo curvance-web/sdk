@@ -32,8 +32,9 @@ export type TokenInput = Decimal;
  */
 export type TypeBPS = bigint;
 
-export type curvance_provider = JsonRpcSigner | Wallet | JsonRpcProvider;
 export type curvance_signer = JsonRpcSigner | Wallet;
+export type curvance_read_provider = JsonRpcProvider;
+export type curvance_provider = curvance_signer | curvance_read_provider;
 
 // ── Market metadata ─────────────────────────────────────────────────────────
 
