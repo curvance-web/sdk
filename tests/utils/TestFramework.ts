@@ -187,7 +187,13 @@ export class TestFramework {
                     await this.provider.send("anvil_impersonateAccount", [holder]);
                     const holderSigner = await this.provider.getSigner(holder);
 
-                    const erc20 = new ERC20(holderSigner as curvance_signer, token.asset.address);
+                    const erc20 = new ERC20(
+                        this.provider,
+                        token.asset.address,
+                        undefined,
+                        undefined,
+                        holderSigner as curvance_signer,
+                    );
                     const holderBalance = await erc20.balanceOf(holderSigner.address as address);
 
                     // Transfer a large amount from the holder to our test account
@@ -215,7 +221,13 @@ export class TestFramework {
                 await this.setERC20Balance(token.asset.address, this.account, BigInt(100000000e18), storageSlot);
 
                 // Verify the balance was set correctly
-                const erc20 = new ERC20(this.signer, token.asset.address);
+                const erc20 = new ERC20(
+                    this.provider,
+                    token.asset.address,
+                    undefined,
+                    undefined,
+                    this.signer,
+                );
                 try {
                     const actualBalance = await erc20.balanceOf(this.account);
                     const expectedBalance = BigInt(100000000e18);
