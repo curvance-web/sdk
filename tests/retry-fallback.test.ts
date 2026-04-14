@@ -1,355 +1,387 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { RetryableProvider } from "../src/retry-provider";
+import { getRpcDebugSnapshot, resetRpcDebugState, RetryableProvider } from "../src/retry-provider";
+import { TransportHarness, fail, hang, ok } from "./support/transport-harness";
 
-/**
- * Minimal stub that records calls and can be configured to succeed or fail.
- * Only implements the `send(method, params)` surface used by the Proxy.
- */
-function createStubProvider(opts: {
-    label: string;
-    failMethods?: Set<string>;
-    calls?: Array<{ label: string; method: string }>;
-}) {
-    const calls = opts.calls ?? [];
-    return {
-        _label: opts.label,
-        send: async (method: string, _params: any[]) => {
-            calls.push({ label: opts.label, method });
-            if (opts.failMethods?.has(method)) {
-                throw new Error(`timeout: ${opts.label} ${method}`);
-            }
-            return `${opts.label}:${method}:ok`;
+test.beforeEach(() => {
+    resetRpcDebugState();
+});
+
+test("read methods fall through to fallback when primary exhausts retries", async (t) => {
+    const harness = new TransportHarness(t);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            send: {
+                eth_call: [
+                    fail("timeout: primary eth_call"),
+                    fail("timeout: primary eth_call"),
+                ],
+            },
         },
-    } as any;
-}
-
-test("read methods fall through to fallback when primary exhausts retries", async () => {
-    const calls: Array<{ label: string; method: string }> = [];
-
-    const primary = createStubProvider({
-        label: "primary",
-        failMethods: new Set(["eth_call"]),
-        calls,
-    });
-    const fallback = createStubProvider({
-        label: "fallback",
-        calls,
-    });
-
-    const rp = new RetryableProvider(
-        { maxRetries: 1, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, retryableErrors: ["timeout"] },
-        fallback,
+        {
+            config: { maxRetries: 1 },
+            fallbacks: [
+                {
+                    label: "fallback",
+                    send: {
+                        eth_call: ok("fallback:eth_call:ok"),
+                    },
+                },
+            ],
+        },
     );
-    const wrapped = rp.wrapProvider(primary) as any;
 
     const result = await wrapped.send("eth_call", []);
     assert.equal(result, "fallback:eth_call:ok");
-
-    // Primary should have been called 2 times (initial + 1 retry), then fallback once
-    const primaryCalls = calls.filter((c) => c.label === "primary" && c.method === "eth_call");
-    const fallbackCalls = calls.filter((c) => c.label === "fallback" && c.method === "eth_call");
-    assert.equal(primaryCalls.length, 2, "primary: initial + 1 retry");
-    assert.equal(fallbackCalls.length, 1, "fallback: called once after primary exhausted");
+    assert.equal(harness.getCalls("primary", "eth_call").length, 2, "primary: initial + 1 retry");
+    assert.equal(harness.getCalls("fallback", "eth_call").length, 1, "fallback: called once after primary exhausted");
 });
 
-test("read provider methods fall through to fallback", async () => {
-    const calls: Array<{ label: string; method: string }> = [];
-
-    const primary = {
-        getBlockNumber: async () => {
-            calls.push({ label: "primary", method: "getBlockNumber" });
-            throw new Error("timeout: primary getBlockNumber");
+test("read provider methods fall through to fallback", async (t) => {
+    const harness = new TransportHarness(t);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            methods: {
+                getBlockNumber: fail("timeout: primary getBlockNumber"),
+            },
         },
-    } as any;
-    const fallback = {
-        getBlockNumber: async () => {
-            calls.push({ label: "fallback", method: "getBlockNumber" });
-            return 123;
+        {
+            fallbacks: [
+                {
+                    label: "fallback",
+                    methods: {
+                        getBlockNumber: ok(123),
+                    },
+                },
+            ],
         },
-    } as any;
-
-    const rp = new RetryableProvider(
-        { maxRetries: 0, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, retryableErrors: ["timeout"] },
-        fallback,
     );
-    const wrapped = rp.wrapProvider(primary) as any;
 
     const result = await wrapped.getBlockNumber();
     assert.equal(result, 123);
-    assert.deepEqual(calls, [
-        { label: "primary", method: "getBlockNumber" },
-        { label: "fallback", method: "getBlockNumber" },
-    ]);
+    assert.deepEqual(harness.callLabels(), ["primary", "fallback"]);
 });
 
-test("without a fallback, read methods fail normally after retries", async () => {
-    const calls: Array<{ label: string; method: string }> = [];
-
-    const primary = createStubProvider({
-        label: "primary",
-        failMethods: new Set(["eth_call"]),
-        calls,
-    });
-
-    const rp = new RetryableProvider(
-        { maxRetries: 1, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, retryableErrors: ["timeout"] },
-        null, // no fallback
+test("without a fallback, read methods fail normally after retries", async (t) => {
+    const harness = new TransportHarness(t);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            send: {
+                eth_call: [
+                    fail("timeout: primary eth_call"),
+                    fail("timeout: primary eth_call"),
+                ],
+            },
+        },
+        {
+            config: { maxRetries: 1 },
+        },
     );
-    const wrapped = rp.wrapProvider(primary) as any;
 
     await assert.rejects(() => wrapped.send("eth_call", []), /timeout/);
-
-    const primaryCalls = calls.filter((c) => c.label === "primary");
-    assert.equal(primaryCalls.length, 2, "primary: initial + 1 retry, then throws");
+    assert.equal(harness.getCalls("primary", "eth_call").length, 2, "primary: initial + 1 retry, then throws");
 });
 
-test("primary success on read method does not touch fallback", async () => {
-    const calls: Array<{ label: string; method: string }> = [];
-
-    const primary = createStubProvider({
-        label: "primary",
-        calls,
-    });
-    const fallback = createStubProvider({
-        label: "fallback",
-        calls,
-    });
-
-    const rp = new RetryableProvider(
-        { maxRetries: 1, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, retryableErrors: ["timeout"] },
-        fallback,
+test("primary success on read method does not touch fallback", async (t) => {
+    const harness = new TransportHarness(t);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            send: {
+                eth_call: ok("primary:eth_call:ok"),
+            },
+        },
+        {
+            fallbacks: [
+                {
+                    label: "fallback",
+                    send: {
+                        eth_call: ok("fallback:eth_call:ok"),
+                    },
+                },
+            ],
+        },
     );
-    const wrapped = rp.wrapProvider(primary) as any;
 
     const result = await wrapped.send("eth_call", []);
     assert.equal(result, "primary:eth_call:ok");
-
-    const fallbackCalls = calls.filter((c) => c.label === "fallback");
-    assert.equal(fallbackCalls.length, 0, "fallback not called when primary succeeds");
+    assert.equal(harness.getCalls("fallback", "eth_call").length, 0, "fallback not called when primary succeeds");
 });
 
-test("non-retryable errors on read methods skip fallback", async () => {
-    const calls: Array<{ label: string; method: string }> = [];
-
-    const primary = createStubProvider({ label: "primary", calls });
-    // Override send to throw a non-retryable error
-    primary.send = async (method: string) => {
-        calls.push({ label: "primary", method });
-        throw new Error("execution reverted");
-    };
-
-    const fallback = createStubProvider({ label: "fallback", calls });
-
-    const rp = new RetryableProvider(
-        { maxRetries: 2, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, retryableErrors: ["timeout"] },
-        fallback,
+test("non-retryable errors on read methods skip fallback", async (t) => {
+    const harness = new TransportHarness(t);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            send: {
+                eth_call: fail("execution reverted"),
+            },
+        },
+        {
+            config: { maxRetries: 2 },
+            fallbacks: [
+                {
+                    label: "fallback",
+                    send: {
+                        eth_call: ok("fallback:eth_call:ok"),
+                    },
+                },
+            ],
+        },
     );
-    const wrapped = rp.wrapProvider(primary) as any;
 
     await assert.rejects(() => wrapped.send("eth_call", []), /execution reverted/);
-
-    // Non-retryable errors throw immediately — no retries, no fallback
-    const primaryCalls = calls.filter((c) => c.label === "primary");
-    const fallbackCalls = calls.filter((c) => c.label === "fallback");
-    assert.equal(primaryCalls.length, 1, "non-retryable: only 1 attempt");
-    assert.equal(fallbackCalls.length, 0, "non-retryable: no fallback");
+    assert.equal(harness.getCalls("primary", "eth_call").length, 1, "non-retryable: only 1 attempt");
+    assert.equal(harness.getCalls("fallback", "eth_call").length, 0, "non-retryable: no fallback");
 });
 
-test("fallback gets its own retry cycle", async () => {
-    const calls: Array<{ label: string; method: string }> = [];
-    let fallbackCallCount = 0;
-
-    const primary = createStubProvider({
-        label: "primary",
-        failMethods: new Set(["eth_call"]),
-        calls,
-    });
-
-    const fallback = createStubProvider({ label: "fallback", calls });
-    // Make fallback fail once then succeed
-    const originalSend = fallback.send;
-    fallback.send = async (method: string, params: any[]) => {
-        fallbackCallCount++;
-        if (fallbackCallCount === 1) {
-            calls.push({ label: "fallback", method });
-            throw new Error("timeout: fallback transient");
-        }
-        return originalSend(method, params);
-    };
-
-    const rp = new RetryableProvider(
-        { maxRetries: 1, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, retryableErrors: ["timeout"] },
-        fallback,
+test("fallback gets its own retry cycle", async (t) => {
+    const harness = new TransportHarness(t);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            send: {
+                eth_call: [
+                    fail("timeout: primary eth_call"),
+                    fail("timeout: primary eth_call"),
+                ],
+            },
+        },
+        {
+            config: { maxRetries: 1 },
+            fallbacks: [
+                {
+                    label: "fallback",
+                    send: {
+                        eth_call: [
+                            fail("timeout: fallback transient"),
+                            ok("fallback:eth_call:ok"),
+                        ],
+                    },
+                },
+            ],
+        },
     );
-    const wrapped = rp.wrapProvider(primary) as any;
 
     const result = await wrapped.send("eth_call", []);
     assert.equal(result, "fallback:eth_call:ok");
-
-    // Fallback had its own retry: fail once, succeed on retry
-    assert.equal(fallbackCallCount, 2, "fallback: 1 failure + 1 success");
+    assert.equal(harness.getCalls("fallback", "eth_call").length, 2, "fallback: 1 failure + 1 success");
 });
 
-test("read methods cascade across multiple fallback providers", async () => {
-    const calls: Array<{ label: string; method: string }> = [];
-
-    const primary = createStubProvider({
-        label: "primary",
-        failMethods: new Set(["eth_call"]),
-        calls,
-    });
-    const fallbackOne = createStubProvider({
-        label: "fallback-1",
-        failMethods: new Set(["eth_call"]),
-        calls,
-    });
-    const fallbackTwo = createStubProvider({
-        label: "fallback-2",
-        calls,
-    });
-
-    const rp = new RetryableProvider(
-        { maxRetries: 0, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, retryableErrors: ["timeout"] },
-        [fallbackOne, fallbackTwo] as any,
+test("read methods cascade across multiple fallback providers", async (t) => {
+    const harness = new TransportHarness(t);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            send: {
+                eth_call: fail("timeout: primary eth_call"),
+            },
+        },
+        {
+            fallbacks: [
+                {
+                    label: "fallback-1",
+                    send: {
+                        eth_call: fail("timeout: fallback-1 eth_call"),
+                    },
+                },
+                {
+                    label: "fallback-2",
+                    send: {
+                        eth_call: ok("fallback-2:eth_call:ok"),
+                    },
+                },
+            ],
+        },
     );
-    const wrapped = rp.wrapProvider(primary) as any;
 
     const result = await wrapped.send("eth_call", []);
     assert.equal(result, "fallback-2:eth_call:ok");
     assert.deepEqual(
-        calls.map((call) => call.label),
+        harness.callLabels(),
         ["primary", "fallback-1", "fallback-2"],
         "primary failure should advance through the configured fallback chain",
     );
 });
 
-test("failed fallback providers are deprioritized during cooldown", async () => {
-    const calls: Array<{ label: string; method: string }> = [];
-    let shouldPrimaryFail = true;
+test("failed fallback providers are deprioritized during cooldown", async (t) => {
+    const harness = new TransportHarness(t);
+    harness.enableMockTime();
 
-    const primary = {
-        send: async (method: string) => {
-            calls.push({ label: "primary", method });
-            if (shouldPrimaryFail) {
-                throw new Error(`timeout: primary ${method}`);
-            }
-            return `primary:${method}:ok`;
-        },
-    } as any;
-
-    const fallbackOne = createStubProvider({
-        label: "fallback-1",
-        failMethods: new Set(["eth_call"]),
-        calls,
-    });
-    const fallbackTwo = createStubProvider({
-        label: "fallback-2",
-        calls,
-    });
-
-    const rp = new RetryableProvider(
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
         {
-            maxRetries: 0,
-            baseDelay: 1,
-            maxDelay: 1,
-            backoffMultiplier: 1,
-            fallbackCooldownMs: 50,
-            retryableErrors: ["timeout"],
+            label: "primary",
+            send: {
+                eth_call: [
+                    fail("timeout: primary eth_call"),
+                    ok("primary:eth_call:ok"),
+                ],
+            },
         },
-        [fallbackOne, fallbackTwo] as any,
+        {
+            config: { fallbackCooldownMs: 50 },
+            fallbacks: [
+                {
+                    label: "fallback-1",
+                    send: {
+                        eth_call: fail("timeout: fallback-1 eth_call"),
+                    },
+                },
+                {
+                    label: "fallback-2",
+                    send: {
+                        eth_call: [
+                            ok("fallback-2:eth_call:first"),
+                            ok("fallback-2:eth_call:sticky"),
+                        ],
+                    },
+                },
+            ],
+        },
     );
-    const wrapped = rp.wrapProvider(primary) as any;
 
     const first = await wrapped.send("eth_call", []);
-    assert.equal(first, "fallback-2:eth_call:ok");
+    assert.equal(first, "fallback-2:eth_call:first");
 
-    shouldPrimaryFail = false;
     const second = await wrapped.send("eth_call", []);
-    assert.equal(second, "fallback-2:eth_call:ok");
+    assert.equal(second, "fallback-2:eth_call:sticky");
 
     assert.deepEqual(
-        calls.map((call) => call.label),
+        harness.callLabels(),
         ["primary", "fallback-1", "fallback-2", "fallback-2"],
         "during cooldown the healthy fallback should be preferred over the failed one and the primary",
     );
 });
 
-test("read timeouts fall through to fallback", async () => {
-    const calls: Array<{ label: string; method: string }> = [];
+test("read timeouts fall through to fallback", async (t) => {
+    const harness = new TransportHarness(t);
+    harness.enableMockTime();
 
-    const primary = {
-        send: async (method: string) => {
-            calls.push({ label: "primary", method });
-            return await new Promise(() => undefined);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            send: {
+                eth_call: hang(),
+            },
         },
-    } as any;
-
-    const fallback = createStubProvider({
-        label: "fallback",
-        calls,
-    });
-
-    const rp = new RetryableProvider(
-        { maxRetries: 0, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, timeoutMs: 5, retryableErrors: ["timeout"] },
-        fallback,
+        {
+            config: { timeoutMs: 5 },
+            fallbacks: [
+                {
+                    label: "fallback",
+                    send: {
+                        eth_call: ok("fallback:eth_call:ok"),
+                    },
+                },
+            ],
+        },
     );
-    const wrapped = rp.wrapProvider(primary) as any;
 
-    const result = await wrapped.send("eth_call", []);
+    const resultPromise = wrapped.send("eth_call", []);
+    await harness.flush();
+    await harness.tick(5);
+
+    const result = await resultPromise;
     assert.equal(result, "fallback:eth_call:ok");
-
-    const primaryCalls = calls.filter((c) => c.label === "primary");
-    const fallbackCalls = calls.filter((c) => c.label === "fallback");
-    assert.equal(primaryCalls.length, 1, "timed out primary is attempted once");
-    assert.equal(fallbackCalls.length, 1, "fallback handles the timed out read");
+    assert.equal(harness.getCalls("primary", "eth_call").length, 1, "timed out primary is attempted once");
+    assert.equal(harness.getCalls("fallback", "eth_call").length, 1, "fallback handles the timed out read");
 });
 
-test("fallback remains sticky during cooldown, then returns to primary", async () => {
-    const calls: Array<{ label: string; method: string }> = [];
-    let shouldPrimaryFail = true;
+test("fallback remains sticky during cooldown, then returns to primary", async (t) => {
+    const harness = new TransportHarness(t);
+    harness.enableMockTime();
 
-    const primary = {
-        send: async (method: string) => {
-            calls.push({ label: "primary", method });
-            if (shouldPrimaryFail) {
-                throw new Error(`timeout: primary ${method}`);
-            }
-            return `primary:${method}:ok`;
-        },
-    } as any;
-
-    const fallback = createStubProvider({
-        label: "fallback",
-        calls,
-    });
-
-    const rp = new RetryableProvider(
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
         {
-            maxRetries: 0,
-            baseDelay: 1,
-            maxDelay: 1,
-            backoffMultiplier: 1,
-            fallbackCooldownMs: 50,
-            retryableErrors: ["timeout"],
+            label: "primary",
+            send: {
+                eth_call: [
+                    fail("timeout: primary eth_call"),
+                    ok("primary:eth_call:ok"),
+                ],
+            },
         },
-        fallback,
+        {
+            config: { fallbackCooldownMs: 50 },
+            fallbacks: [
+                {
+                    label: "fallback",
+                    send: {
+                        eth_call: [
+                            ok("fallback:eth_call:first"),
+                            ok("fallback:eth_call:sticky"),
+                        ],
+                    },
+                },
+            ],
+        },
     );
-    const wrapped = rp.wrapProvider(primary) as any;
 
     const first = await wrapped.send("eth_call", []);
-    assert.equal(first, "fallback:eth_call:ok");
+    assert.equal(first, "fallback:eth_call:first");
 
-    shouldPrimaryFail = false;
     const second = await wrapped.send("eth_call", []);
-    assert.equal(second, "fallback:eth_call:ok");
+    assert.equal(second, "fallback:eth_call:sticky");
 
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await harness.tick(60);
     const third = await wrapped.send("eth_call", []);
     assert.equal(third, "primary:eth_call:ok");
 
-    const primaryCalls = calls.filter((c) => c.label === "primary");
-    const fallbackCalls = calls.filter((c) => c.label === "fallback");
-    assert.equal(primaryCalls.length, 2, "primary is bypassed during cooldown, then retried after it expires");
-    assert.equal(fallbackCalls.length, 2, "fallback serves the initial failure and the sticky cooldown window");
+    assert.equal(harness.getCalls("primary", "eth_call").length, 2, "primary is bypassed during cooldown, then retried after it expires");
+    assert.equal(harness.getCalls("fallback", "eth_call").length, 2, "fallback serves the initial failure and the sticky cooldown window");
+});
+
+test("rpc debug snapshot records endpoint health without request params", async (t) => {
+    const harness = new TransportHarness(t);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            send: {
+                eth_call: fail("timeout: primary eth_call"),
+            },
+        },
+        {
+            fallbacks: [
+                {
+                    label: "fallback",
+                    send: {
+                        eth_call: ok("fallback:eth_call:ok"),
+                    },
+                },
+            ],
+        },
+    );
+
+    await wrapped.send("eth_call", [{ secret: "do-not-log" }]);
+
+    const snapshot = getRpcDebugSnapshot();
+    const primaryState = snapshot.endpoints.find((endpoint) => endpoint.role === "primary");
+    const fallbackState = snapshot.endpoints.find((endpoint) => endpoint.role === "fallback");
+
+    assert.ok(primaryState, "primary endpoint should be tracked");
+    assert.ok(fallbackState, "fallback endpoint should be tracked");
+    assert.equal(primaryState?.attempts, 1);
+    assert.equal(primaryState?.retryableFailures, 1);
+    assert.equal(fallbackState?.attempts, 1);
+    assert.equal(fallbackState?.successes, 1);
+    assert.equal(fallbackState?.fallbackSelections, 1);
+    assert.equal(
+        snapshot.endpoints.some((endpoint) => endpoint.lastError?.includes("do-not-log") ?? false),
+        false,
+        "debug state must not include RPC params",
+    );
 });

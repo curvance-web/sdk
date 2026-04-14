@@ -28,6 +28,11 @@ export interface RetryConfig {
     backoffMultiplier: number;
     timeoutMs: number; // Per-attempt timeout for read operations
     fallbackCooldownMs: number; // How long to prefer the fallback after primary read failures
+    rankSampleCount: number; // Number of recent attempts to use when scoring fallback health
+    rankWeights: {
+        latency: number;
+        stability: number;
+    };
     retryableErrors: string[]; // Error messages/codes that should trigger retries
     onRetry?: (attempt: number, error: Error, delay: number) => void;
 }
@@ -39,6 +44,8 @@ export const DEFAULT_RETRY_CONFIG: RetryConfig = {
     backoffMultiplier: 2,
     timeoutMs: DEFAULT_CHAIN_RPC_POLICY.timeoutMs,
     fallbackCooldownMs: DEFAULT_CHAIN_RPC_POLICY.fallbackCooldownMs,
+    rankSampleCount: DEFAULT_CHAIN_RPC_POLICY.rankSampleCount,
+    rankWeights: DEFAULT_CHAIN_RPC_POLICY.rankWeights,
     retryableErrors: [
         // Rate limiting
         'rate limit',
@@ -87,18 +94,130 @@ export const DEFAULT_RETRY_CONFIG: RetryConfig = {
     ]
 };
 
-interface FallbackProviderState {
+export interface RpcEndpointDebugState {
+    endpointId: string;
+    label: string;
+    role: 'primary' | 'fallback';
+    url: string | null;
+    attempts: number;
+    successes: number;
+    retryableFailures: number;
+    nonRetryableFailures: number;
+    timeoutFailures: number;
+    fallbackSelections: number;
+    recentSampleCount: number;
+    recentSuccessRate: number | null;
+    averageLatencyMs: number | null;
+    lastLatencyMs: number | null;
+    rankScore: number | null;
+    lastError: string | null;
+    lastAttemptAt: number | null;
+    lastSuccessAt: number | null;
+    lastFailureAt: number | null;
+    cooldownUntil: number | null;
+}
+
+export interface RpcDebugSnapshot {
+    updatedAt: number;
+    endpoints: RpcEndpointDebugState[];
+}
+
+type RpcDebugListener = (snapshot: RpcDebugSnapshot) => void;
+
+interface ProviderAttemptSample {
+    success: boolean;
+    latencyMs: number | null;
+}
+
+interface ProviderState {
     provider: JsonRpcProvider;
+    label: string;
+    role: 'primary' | 'fallback';
+    endpointId: string;
+    url: string | null;
     index: number;
     cooldownUntil: number;
     lastFailureAt: number;
     lastSuccessAt: number;
+    attempts: number;
+    successes: number;
+    retryableFailures: number;
+    nonRetryableFailures: number;
+    timeoutFailures: number;
+    fallbackSelections: number;
+    lastLatencyMs: number | null;
+    lastError: string | null;
+    lastAttemptAt: number;
+    recentSamples: ProviderAttemptSample[];
+}
+
+const rpcDebugListeners = new Set<RpcDebugListener>();
+const rpcDebugStates = new Map<string, RpcEndpointDebugState>();
+
+function normalizeRpcUrl(url: string | null | undefined): string | null {
+    if (!url) {
+        return null;
+    }
+
+    return url.replace(/\/+$/, '');
+}
+
+function getProviderUrl(provider: JsonRpcProvider): string | null {
+    const connection = (provider as any)._getConnection?.() ?? (provider as any).connection ?? null;
+    return normalizeRpcUrl(connection?.url);
+}
+
+function getEndpointId(url: string | null, label: string): string {
+    return url ?? label;
+}
+
+function cloneRpcDebugState(state: RpcEndpointDebugState): RpcEndpointDebugState {
+    return { ...state };
+}
+
+function emitRpcDebugSnapshot(): void {
+    if (rpcDebugListeners.size === 0) {
+        return;
+    }
+
+    const snapshot = getRpcDebugSnapshot();
+    for (const listener of rpcDebugListeners) {
+        listener(snapshot);
+    }
+}
+
+export function getRpcDebugSnapshot(): RpcDebugSnapshot {
+    return {
+        updatedAt: Date.now(),
+        endpoints: [...rpcDebugStates.values()]
+            .map(cloneRpcDebugState)
+            .sort((a, b) => {
+                if (a.role !== b.role) {
+                    return a.role === 'primary' ? -1 : 1;
+                }
+
+                return a.label.localeCompare(b.label);
+            }),
+    };
+}
+
+export function subscribeToRpcDebug(listener: RpcDebugListener): () => void {
+    rpcDebugListeners.add(listener);
+    listener(getRpcDebugSnapshot());
+    return () => {
+        rpcDebugListeners.delete(listener);
+    };
+}
+
+export function resetRpcDebugState(): void {
+    rpcDebugStates.clear();
+    emitRpcDebugSnapshot();
 }
 
 class RetryableProvider {
     private config: RetryConfig;
     private fallbackProviders: JsonRpcProvider[];
-    private fallbackProviderStates: FallbackProviderState[];
+    private fallbackProviderStates: ProviderState[];
     private _fallbackActivated = false;
     private primaryReadCooldownUntil = 0;
 
@@ -112,13 +231,9 @@ class RetryableProvider {
             : fallbackProviders
                 ? [fallbackProviders]
                 : [];
-        this.fallbackProviderStates = this.fallbackProviders.map((provider, index) => ({
-            provider,
-            index,
-            cooldownUntil: 0,
-            lastFailureAt: 0,
-            lastSuccessAt: 0,
-        }));
+        this.fallbackProviderStates = this.fallbackProviders.map((provider, index) =>
+            this.createProviderState(provider, 'fallback', `fallback-${index + 1}`, index),
+        );
     }
 
     private async sleep(ms: number): Promise<void> {
@@ -130,6 +245,194 @@ class RetryableProvider {
         const capped = Math.min(base, this.config.maxDelay);
         // Add jitter to prevent thundering herd when multiple clients retry simultaneously
         return capped * (0.5 + Math.random() * 0.5);
+    }
+
+    private createProviderState(
+        provider: JsonRpcProvider,
+        role: 'primary' | 'fallback',
+        label: string,
+        index: number,
+    ): ProviderState {
+        const url = getProviderUrl(provider);
+        const state: ProviderState = {
+            provider,
+            label,
+            role,
+            endpointId: getEndpointId(url, label),
+            url,
+            index,
+            cooldownUntil: 0,
+            lastFailureAt: 0,
+            lastSuccessAt: 0,
+            attempts: 0,
+            successes: 0,
+            retryableFailures: 0,
+            nonRetryableFailures: 0,
+            timeoutFailures: 0,
+            fallbackSelections: 0,
+            lastLatencyMs: null,
+            lastError: null,
+            lastAttemptAt: 0,
+            recentSamples: [],
+        };
+
+        this.publishDebugState(state);
+        return state;
+    }
+
+    private getRecentSamples(state: ProviderState): ProviderAttemptSample[] {
+        return state.recentSamples.slice(-this.config.rankSampleCount);
+    }
+
+    private getProviderSuccessRate(state: ProviderState): number {
+        const samples = this.getRecentSamples(state);
+        if (samples.length === 0) {
+            return 0.5;
+        }
+
+        const successes = samples.filter((sample) => sample.success).length;
+        return successes / samples.length;
+    }
+
+    private getProviderAverageLatency(state: ProviderState): number | null {
+        const latencies = this.getRecentSamples(state)
+            .filter((sample) => sample.success && sample.latencyMs != null)
+            .map((sample) => sample.latencyMs as number);
+
+        if (latencies.length === 0) {
+            return null;
+        }
+
+        return latencies.reduce((sum, latency) => sum + latency, 0) / latencies.length;
+    }
+
+    private getProviderRankScore(state: ProviderState): number {
+        const averageLatencyMs = this.getProviderAverageLatency(state);
+        const latencyScore = averageLatencyMs == null
+            ? 0.5
+            : Math.max(0, 1 - Math.min(averageLatencyMs, this.config.timeoutMs) / this.config.timeoutMs);
+        const stabilityScore = this.getProviderSuccessRate(state);
+
+        return (
+            (latencyScore * this.config.rankWeights.latency) +
+            (stabilityScore * this.config.rankWeights.stability)
+        );
+    }
+
+    private publishDebugState(state: ProviderState): void {
+        const current: RpcEndpointDebugState = rpcDebugStates.get(state.endpointId) ?? {
+            endpointId: state.endpointId,
+            label: state.label,
+            role: state.role,
+            url: state.url,
+            attempts: 0,
+            successes: 0,
+            retryableFailures: 0,
+            nonRetryableFailures: 0,
+            timeoutFailures: 0,
+            fallbackSelections: 0,
+            recentSampleCount: 0,
+            recentSuccessRate: null,
+            averageLatencyMs: null,
+            lastLatencyMs: null,
+            rankScore: null,
+            lastError: null,
+            lastAttemptAt: null,
+            lastSuccessAt: null,
+            lastFailureAt: null,
+            cooldownUntil: null,
+        };
+
+        current.label = state.label;
+        current.role = state.role;
+        current.url = state.url;
+        current.recentSampleCount = this.getRecentSamples(state).length;
+        current.recentSuccessRate = current.recentSampleCount > 0 ? this.getProviderSuccessRate(state) : null;
+        current.averageLatencyMs = this.getProviderAverageLatency(state);
+        current.lastLatencyMs = state.lastLatencyMs;
+        current.rankScore = this.getProviderRankScore(state);
+        current.lastError = state.lastError;
+        current.lastAttemptAt = state.lastAttemptAt || current.lastAttemptAt;
+        current.lastSuccessAt = state.lastSuccessAt || current.lastSuccessAt;
+        current.lastFailureAt = state.lastFailureAt || current.lastFailureAt;
+        current.cooldownUntil = state.cooldownUntil || null;
+
+        rpcDebugStates.set(state.endpointId, current);
+        emitRpcDebugSnapshot();
+    }
+
+    private recordProviderSelection(state: ProviderState): void {
+        state.fallbackSelections += 1;
+        const current = rpcDebugStates.get(state.endpointId);
+        if (current) {
+            current.fallbackSelections += 1;
+        }
+        this.publishDebugState(state);
+    }
+
+    private recordProviderAttempt(state: ProviderState, latencyMs: number, error?: any): void {
+        const recordedAt = Date.now();
+        state.attempts += 1;
+        state.lastAttemptAt = recordedAt;
+        state.lastLatencyMs = latencyMs;
+        state.recentSamples.push({
+            success: error == null,
+            latencyMs,
+        });
+        if (state.recentSamples.length > this.config.rankSampleCount) {
+            state.recentSamples.shift();
+        }
+
+        const current = rpcDebugStates.get(state.endpointId);
+        if (current) {
+            current.attempts += 1;
+            current.lastAttemptAt = recordedAt;
+            current.lastLatencyMs = latencyMs;
+        }
+
+        if (error == null) {
+            state.successes += 1;
+            state.lastSuccessAt = recordedAt;
+            state.lastError = null;
+            if (current) {
+                current.successes += 1;
+                current.lastSuccessAt = recordedAt;
+                current.lastError = null;
+            }
+            this.publishDebugState(state);
+            return;
+        }
+
+        const isTimeout = error?.code === 'timeout' || String(error?.message ?? '').toLowerCase().includes('timeout');
+        const isRetryable = this.isRetryableError(error);
+
+        state.lastFailureAt = recordedAt;
+        state.lastError = error?.message ?? String(error);
+
+        if (isRetryable) {
+            state.retryableFailures += 1;
+        } else {
+            state.nonRetryableFailures += 1;
+        }
+
+        if (isTimeout) {
+            state.timeoutFailures += 1;
+        }
+
+        if (current) {
+            current.lastFailureAt = recordedAt;
+            current.lastError = state.lastError;
+            if (isRetryable) {
+                current.retryableFailures += 1;
+            } else {
+                current.nonRetryableFailures += 1;
+            }
+            if (isTimeout) {
+                current.timeoutFailures += 1;
+            }
+        }
+
+        this.publishDebugState(state);
     }
 
     private isRetryableError(error: any): boolean {
@@ -184,7 +487,7 @@ class RetryableProvider {
         );
     }
 
-    private isReadFallbackActive(): boolean {
+    private isReadFallbackActive(primaryState?: ProviderState): boolean {
         if (this.primaryReadCooldownUntil === 0) {
             return false;
         }
@@ -192,21 +495,25 @@ class RetryableProvider {
         if (Date.now() >= this.primaryReadCooldownUntil) {
             this.primaryReadCooldownUntil = 0;
             this._fallbackActivated = false;
+            if (primaryState) {
+                primaryState.cooldownUntil = 0;
+                this.publishDebugState(primaryState);
+            }
             return false;
         }
 
         return true;
     }
 
-    private getFallbackProviderLabel(state: FallbackProviderState): string {
-        return `fallback-${state.index + 1}`;
+    private getFallbackProviderLabel(state: ProviderState): string {
+        return state.label;
     }
 
     private isProviderCoolingDown(cooldownUntil: number): boolean {
         return cooldownUntil > Date.now();
     }
 
-    private compareFallbackProviders(a: FallbackProviderState, b: FallbackProviderState): number {
+    private compareFallbackProviders(a: ProviderState, b: ProviderState): number {
         const aCooling = this.isProviderCoolingDown(a.cooldownUntil);
         const bCooling = this.isProviderCoolingDown(b.cooldownUntil);
 
@@ -216,6 +523,32 @@ class RetryableProvider {
 
         if (aCooling && bCooling) {
             return a.cooldownUntil - b.cooldownUntil || a.index - b.index;
+        }
+
+        const aRankScore = this.getProviderRankScore(a);
+        const bRankScore = this.getProviderRankScore(b);
+        if (aRankScore !== bRankScore) {
+            return bRankScore - aRankScore;
+        }
+
+        const aSuccessRate = this.getProviderSuccessRate(a);
+        const bSuccessRate = this.getProviderSuccessRate(b);
+        if (aSuccessRate !== bSuccessRate) {
+            return bSuccessRate - aSuccessRate;
+        }
+
+        const aLatency = this.getProviderAverageLatency(a);
+        const bLatency = this.getProviderAverageLatency(b);
+        if (aLatency != null || bLatency != null) {
+            if (aLatency == null) {
+                return 1;
+            }
+            if (bLatency == null) {
+                return -1;
+            }
+            if (aLatency !== bLatency) {
+                return aLatency - bLatency;
+            }
         }
 
         if (a.lastSuccessAt !== b.lastSuccessAt) {
@@ -229,24 +562,26 @@ class RetryableProvider {
         return a.index - b.index;
     }
 
-    private getOrderedFallbackProviders(): FallbackProviderState[] {
+    private getOrderedFallbackProviders(): ProviderState[] {
         return [...this.fallbackProviderStates].sort((a, b) => this.compareFallbackProviders(a, b));
     }
 
-    private markFallbackFailure(state: FallbackProviderState): void {
+    private markFallbackFailure(state: ProviderState): void {
         state.lastFailureAt = Date.now();
         state.cooldownUntil = state.lastFailureAt + this.config.fallbackCooldownMs;
+        this.publishDebugState(state);
     }
 
-    private markFallbackSuccess(state: FallbackProviderState): void {
+    private markFallbackSuccess(state: ProviderState): void {
         state.lastSuccessAt = Date.now();
         state.lastFailureAt = 0;
         state.cooldownUntil = 0;
+        this.publishDebugState(state);
     }
 
     private getOrderedFallbackOps<T>(
-        fallbackOps: Array<{ state: FallbackProviderState; operation: () => Promise<T> }>,
-    ): Array<{ state: FallbackProviderState; operation: () => Promise<T> }> {
+        fallbackOps: Array<{ state: ProviderState; operation: () => Promise<T> }>,
+    ): Array<{ state: ProviderState; operation: () => Promise<T> }> {
         const fallbackOpMap = new Map(
             fallbackOps.map((entry) => [entry.state, entry.operation] as const),
         );
@@ -260,7 +595,7 @@ class RetryableProvider {
 
                 return { state, operation };
             })
-            .filter((entry): entry is { state: FallbackProviderState; operation: () => Promise<T> } => entry != null);
+            .filter((entry): entry is { state: ProviderState; operation: () => Promise<T> } => entry != null);
     }
 
     private async executeWithTimeout<T>(
@@ -298,14 +633,23 @@ class RetryableProvider {
 
     private async executeWithRetry<T>(
         operation: () => Promise<T>,
-        context: string = 'RPC call'
+        context: string = 'RPC call',
+        providerState: ProviderState | null = null,
     ): Promise<T> {
         let lastError: Error;
         
         for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
+            const startedAt = Date.now();
             try {
-                return await operation();
+                const result = await operation();
+                if (providerState) {
+                    this.recordProviderAttempt(providerState, Date.now() - startedAt);
+                }
+                return result;
             } catch (error: any) {
+                if (providerState) {
+                    this.recordProviderAttempt(providerState, Date.now() - startedAt, error);
+                }
                 lastError = error;
                 
                 const isRetryable = this.isRetryableError(error);
@@ -343,7 +687,7 @@ class RetryableProvider {
      * because the fallback providers cannot sign.
      */
     private async executeFallbackChain<T>(
-        fallbackOps: Array<{ state: FallbackProviderState; operation: () => Promise<T> }>,
+        fallbackOps: Array<{ state: ProviderState; operation: () => Promise<T> }>,
         context: string,
         originalError?: Error,
     ): Promise<T> {
@@ -353,9 +697,11 @@ class RetryableProvider {
             const fallbackContext = `${context} [${this.getFallbackProviderLabel(state)}]`;
 
             try {
+                this.recordProviderSelection(state);
                 const result = await this.executeWithRetry(
                     this.withReadTimeout(operation, fallbackContext),
                     fallbackContext,
+                    state,
                 );
                 this.markFallbackSuccess(state);
                 return result;
@@ -378,24 +724,27 @@ class RetryableProvider {
 
     private async executeWithReadFallback<T>(
         primaryOp: () => Promise<T>,
-        fallbackOps: Array<{ state: FallbackProviderState; operation: () => Promise<T> }>,
+        fallbackOps: Array<{ state: ProviderState; operation: () => Promise<T> }>,
         context: string,
+        primaryState: ProviderState,
     ): Promise<T> {
         const timedPrimaryOp = this.withReadTimeout(primaryOp, context);
         const orderedFallbackOps = this.getOrderedFallbackOps(fallbackOps);
 
-        if (this.isReadFallbackActive()) {
+        if (this.isReadFallbackActive(primaryState)) {
             return this.executeFallbackChain(orderedFallbackOps, context);
         }
 
         try {
-            return await this.executeWithRetry(timedPrimaryOp, context);
+            return await this.executeWithRetry(timedPrimaryOp, context, primaryState);
         } catch (primaryError: any) {
             if (!this.isRetryableError(primaryError)) {
                 throw primaryError;
             }
 
             this.primaryReadCooldownUntil = Date.now() + this.config.fallbackCooldownMs;
+            primaryState.cooldownUntil = this.primaryReadCooldownUntil;
+            this.publishDebugState(primaryState);
 
             if (!this._fallbackActivated) {
                 this._fallbackActivated = true;
@@ -416,6 +765,7 @@ class RetryableProvider {
         }
 
         const hasFallback = this.fallbackProviders.length > 0;
+        const primaryState = this.createProviderState(provider, 'primary', 'primary', -1);
 
         const retryableProvider = new Proxy(provider, {
             get: (target, prop, receiver) => {
@@ -436,10 +786,10 @@ class RetryableProvider {
                                 state,
                                 operation: () => state.provider.send(method, params),
                             }));
-                            return this.executeWithReadFallback(primaryOp, fallbackOps, `RPC ${method}`);
+                            return this.executeWithReadFallback(primaryOp, fallbackOps, `RPC ${method}`, primaryState);
                         }
 
-                        return this.executeWithRetry(primaryOp, `RPC ${method}`);
+                        return this.executeWithRetry(primaryOp, `RPC ${method}`, primaryState);
                     };
                 }
 
@@ -454,10 +804,10 @@ class RetryableProvider {
                                 state,
                                 operation: () => (state.provider as any)._send(payload, callback),
                             }));
-                            return this.executeWithReadFallback(primaryOp, fallbackOps, `RPC ${method}`);
+                            return this.executeWithReadFallback(primaryOp, fallbackOps, `RPC ${method}`, primaryState);
                         }
 
-                        return this.executeWithRetry(primaryOp, `RPC ${method}`);
+                        return this.executeWithRetry(primaryOp, `RPC ${method}`, primaryState);
                     };
                 }
 
@@ -479,14 +829,14 @@ class RetryableProvider {
                                         operation: () => fbMethod.apply(state.provider, args),
                                     };
                                 })
-                                .filter((entry): entry is { state: FallbackProviderState; operation: () => Promise<any> } => entry != null);
+                                .filter((entry): entry is { state: ProviderState; operation: () => Promise<any> } => entry != null);
 
                             if (fallbackOps.length > 0) {
-                                return this.executeWithReadFallback(primaryOp, fallbackOps, `Provider method ${String(prop)}`);
+                                return this.executeWithReadFallback(primaryOp, fallbackOps, `Provider method ${String(prop)}`, primaryState);
                             }
                         }
 
-                        return this.executeWithRetry(primaryOp, `Provider method ${String(prop)}`);
+                        return this.executeWithRetry(primaryOp, `Provider method ${String(prop)}`, primaryState);
                     };
                 }
 
