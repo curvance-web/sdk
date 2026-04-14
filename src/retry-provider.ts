@@ -1,5 +1,6 @@
-import { JsonRpcProvider, JsonRpcSigner, Wallet } from "ethers";
+import { JsonRpcProvider } from "ethers";
 import { curvance_provider } from "./types";
+import { DEFAULT_CHAIN_RPC_POLICY } from "./chains/rpc";
 
 /**
  * RPC methods that are pure reads — safe to retry against a fallback provider.
@@ -55,15 +56,19 @@ export interface RetryConfig {
     baseDelay: number; // Base delay in milliseconds
     maxDelay: number; // Maximum delay in milliseconds
     backoffMultiplier: number;
+    timeoutMs: number; // Per-attempt timeout for read operations
+    fallbackCooldownMs: number; // How long to prefer the fallback after primary read failures
     retryableErrors: string[]; // Error messages/codes that should trigger retries
     onRetry?: (attempt: number, error: Error, delay: number) => void;
 }
 
 export const DEFAULT_RETRY_CONFIG: RetryConfig = {
-    maxRetries: 3,
-    baseDelay: 1000, // 1 second
-    maxDelay: 10000, // 10 seconds
+    maxRetries: DEFAULT_CHAIN_RPC_POLICY.retryCount,
+    baseDelay: DEFAULT_CHAIN_RPC_POLICY.retryDelayMs,
+    maxDelay: 1000,
     backoffMultiplier: 2,
+    timeoutMs: DEFAULT_CHAIN_RPC_POLICY.timeoutMs,
+    fallbackCooldownMs: DEFAULT_CHAIN_RPC_POLICY.fallbackCooldownMs,
     retryableErrors: [
         // Rate limiting
         'rate limit',
@@ -116,6 +121,7 @@ class RetryableProvider {
     private config: RetryConfig;
     private fallbackProvider: JsonRpcProvider | null;
     private _fallbackActivated = false;
+    private primaryReadCooldownUntil = 0;
 
     constructor(config: Partial<RetryConfig> = {}, fallbackProvider: JsonRpcProvider | null = null) {
         this.config = { ...DEFAULT_RETRY_CONFIG, ...config };
@@ -185,6 +191,53 @@ class RetryableProvider {
         );
     }
 
+    private isReadFallbackActive(): boolean {
+        if (this.primaryReadCooldownUntil === 0) {
+            return false;
+        }
+
+        if (Date.now() >= this.primaryReadCooldownUntil) {
+            this.primaryReadCooldownUntil = 0;
+            this._fallbackActivated = false;
+            return false;
+        }
+
+        return true;
+    }
+
+    private async executeWithTimeout<T>(
+        operation: () => Promise<T>,
+        timeoutMs: number,
+        context: string,
+    ): Promise<T> {
+        if (timeoutMs <= 0) {
+            return operation();
+        }
+
+        let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+        try {
+            return await Promise.race([
+                operation(),
+                new Promise<T>((_, reject) => {
+                    timeoutHandle = setTimeout(() => {
+                        const error: any = new Error(`[rpc] ${context}: timeout after ${timeoutMs}ms`);
+                        error.code = "timeout";
+                        reject(error);
+                    }, timeoutMs);
+                }),
+            ]);
+        } finally {
+            if (timeoutHandle != null) {
+                clearTimeout(timeoutHandle);
+            }
+        }
+    }
+
+    private withReadTimeout<T>(operation: () => Promise<T>, context: string): () => Promise<T> {
+        return () => this.executeWithTimeout(operation, this.config.timeoutMs, context);
+    }
+
     private async executeWithRetry<T>(
         operation: () => Promise<T>,
         context: string = 'RPC call'
@@ -236,18 +289,32 @@ class RetryableProvider {
         fallbackOp: () => Promise<T>,
         context: string,
     ): Promise<T> {
+        const fallbackContext = `${context} [fallback]`;
+        const timedPrimaryOp = this.withReadTimeout(primaryOp, context);
+        const timedFallbackOp = this.withReadTimeout(fallbackOp, fallbackContext);
+
+        if (this.isReadFallbackActive()) {
+            return this.executeWithRetry(timedFallbackOp, fallbackContext);
+        }
+
         try {
-            return await this.executeWithRetry(primaryOp, context);
+            return await this.executeWithRetry(timedPrimaryOp, context);
         } catch (primaryError: any) {
+            if (!this.isRetryableError(primaryError)) {
+                throw primaryError;
+            }
+
+            this.primaryReadCooldownUntil = Date.now() + this.config.fallbackCooldownMs;
+
             if (!this._fallbackActivated) {
                 this._fallbackActivated = true;
                 console.warn(
                     `[rpc] Primary provider failed for ${context} after ${this.config.maxRetries + 1} attempts. ` +
-                    `Falling back to dedicated RPC for read operations.`
+                    `Falling back to dedicated RPC for read operations for ${this.config.fallbackCooldownMs}ms.`
                 );
             }
-            // The fallback gets its own full retry cycle
-            return this.executeWithRetry(fallbackOp, `${context} [fallback]`);
+
+            return this.executeWithRetry(timedFallbackOp, fallbackContext);
         }
     }
 

@@ -41,7 +41,7 @@ test("read methods fall through to fallback when primary exhausts retries", asyn
         { maxRetries: 1, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, retryableErrors: ["timeout"] },
         fallback,
     );
-    const wrapped = rp.wrapProvider(primary);
+    const wrapped = rp.wrapProvider(primary) as any;
 
     const result = await wrapped.send("eth_call", []);
     assert.equal(result, "fallback:eth_call:ok");
@@ -70,7 +70,7 @@ test("write methods do NOT fall through to fallback", async () => {
         { maxRetries: 0, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, retryableErrors: ["timeout"] },
         fallback,
     );
-    const wrapped = rp.wrapProvider(primary);
+    const wrapped = rp.wrapProvider(primary) as any;
 
     await assert.rejects(() => wrapped.send("eth_sendTransaction", []), /timeout/);
 
@@ -91,7 +91,7 @@ test("without a fallback, read methods fail normally after retries", async () =>
         { maxRetries: 1, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, retryableErrors: ["timeout"] },
         null, // no fallback
     );
-    const wrapped = rp.wrapProvider(primary);
+    const wrapped = rp.wrapProvider(primary) as any;
 
     await assert.rejects(() => wrapped.send("eth_call", []), /timeout/);
 
@@ -115,7 +115,7 @@ test("primary success on read method does not touch fallback", async () => {
         { maxRetries: 1, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, retryableErrors: ["timeout"] },
         fallback,
     );
-    const wrapped = rp.wrapProvider(primary);
+    const wrapped = rp.wrapProvider(primary) as any;
 
     const result = await wrapped.send("eth_call", []);
     assert.equal(result, "primary:eth_call:ok");
@@ -140,7 +140,7 @@ test("non-retryable errors on read methods skip fallback", async () => {
         { maxRetries: 2, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, retryableErrors: ["timeout"] },
         fallback,
     );
-    const wrapped = rp.wrapProvider(primary);
+    const wrapped = rp.wrapProvider(primary) as any;
 
     await assert.rejects(() => wrapped.send("eth_call", []), /execution reverted/);
 
@@ -177,11 +177,90 @@ test("fallback gets its own retry cycle", async () => {
         { maxRetries: 1, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, retryableErrors: ["timeout"] },
         fallback,
     );
-    const wrapped = rp.wrapProvider(primary);
+    const wrapped = rp.wrapProvider(primary) as any;
 
     const result = await wrapped.send("eth_call", []);
     assert.equal(result, "fallback:eth_call:ok");
 
     // Fallback had its own retry: fail once, succeed on retry
     assert.equal(fallbackCallCount, 2, "fallback: 1 failure + 1 success");
+});
+
+test("read timeouts fall through to fallback", async () => {
+    const calls: Array<{ label: string; method: string }> = [];
+
+    const primary = {
+        send: async (method: string) => {
+            calls.push({ label: "primary", method });
+            return await new Promise(() => undefined);
+        },
+    } as any;
+
+    const fallback = createStubProvider({
+        label: "fallback",
+        calls,
+    });
+
+    const rp = new RetryableProvider(
+        { maxRetries: 0, baseDelay: 1, maxDelay: 1, backoffMultiplier: 1, timeoutMs: 5, retryableErrors: ["timeout"] },
+        fallback,
+    );
+    const wrapped = rp.wrapProvider(primary) as any;
+
+    const result = await wrapped.send("eth_call", []);
+    assert.equal(result, "fallback:eth_call:ok");
+
+    const primaryCalls = calls.filter((c) => c.label === "primary");
+    const fallbackCalls = calls.filter((c) => c.label === "fallback");
+    assert.equal(primaryCalls.length, 1, "timed out primary is attempted once");
+    assert.equal(fallbackCalls.length, 1, "fallback handles the timed out read");
+});
+
+test("fallback remains sticky during cooldown, then returns to primary", async () => {
+    const calls: Array<{ label: string; method: string }> = [];
+    let shouldPrimaryFail = true;
+
+    const primary = {
+        send: async (method: string) => {
+            calls.push({ label: "primary", method });
+            if (shouldPrimaryFail) {
+                throw new Error(`timeout: primary ${method}`);
+            }
+            return `primary:${method}:ok`;
+        },
+    } as any;
+
+    const fallback = createStubProvider({
+        label: "fallback",
+        calls,
+    });
+
+    const rp = new RetryableProvider(
+        {
+            maxRetries: 0,
+            baseDelay: 1,
+            maxDelay: 1,
+            backoffMultiplier: 1,
+            fallbackCooldownMs: 50,
+            retryableErrors: ["timeout"],
+        },
+        fallback,
+    );
+    const wrapped = rp.wrapProvider(primary) as any;
+
+    const first = await wrapped.send("eth_call", []);
+    assert.equal(first, "fallback:eth_call:ok");
+
+    shouldPrimaryFail = false;
+    const second = await wrapped.send("eth_call", []);
+    assert.equal(second, "fallback:eth_call:ok");
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const third = await wrapped.send("eth_call", []);
+    assert.equal(third, "primary:eth_call:ok");
+
+    const primaryCalls = calls.filter((c) => c.label === "primary");
+    const fallbackCalls = calls.filter((c) => c.label === "fallback");
+    assert.equal(primaryCalls.length, 2, "primary is bypassed during cooldown, then retried after it expires");
+    assert.equal(fallbackCalls.length, 2, "fallback serves the initial failure and the sticky cooldown window");
 });

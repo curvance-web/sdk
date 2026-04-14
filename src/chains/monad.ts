@@ -1,12 +1,14 @@
-import { JsonRpcProvider } from "ethers";
 import { address } from "../types";
 import { KyberSwap } from "../classes/DexAggregators/KyberSwap";
 import { ChainConfig } from ".";
+import { createChainFallbackProvider, createChainPrimaryProvider, getChainRpcConfig } from "./rpc";
 
 export const mainnet: ChainConfig = {
     chainId: 143,
     dexAgg: new KyberSwap(),
-    provider: new JsonRpcProvider("https://rpc1.monad.xyz"),
+    rpc: getChainRpcConfig("monad-mainnet"),
+    provider: createChainPrimaryProvider("monad-mainnet"),
+    fallbackProvider: createChainFallbackProvider("monad-mainnet"),
     native_symbol: 'MON',
     native_name: 'Monad',
     wrapped_native: "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A" as address,

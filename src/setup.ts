@@ -68,15 +68,15 @@ export async function setupChain(
     // Validate api_url scheme before any network calls
     validateApiUrl(api_url);
 
+    const readProvider = chain_config[chain].provider;
+    const readFallback = chain_config[chain].fallbackProvider;
+
     if(provider == null) {
-        // Already using the dedicated RPC — no fallback needed
-        provider = chain_config[chain].provider!;
-        provider = wrapProviderWithRetries(provider);
+        provider = wrapProviderWithRetries(readProvider, readFallback);
     } else {
         // Caller provided a provider (wallet signer).  Use the chain's
         // dedicated RPC as a read-only fallback so that unreliable wallet
         // RPCs (e.g. Rabby) don't prevent market data from loading.
-        const readFallback = chain_config[chain].provider!;
         provider = wrapProviderWithRetries(provider, readFallback);
     }
 

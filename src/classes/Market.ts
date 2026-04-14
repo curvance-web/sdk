@@ -332,26 +332,43 @@ export class Market {
         return snapshots;
     }
 
-    async reloadMarketData() {
-        const dynamic_data = await this.reader.getDynamicMarketData();
-        this.cache.dynamic = dynamic_data.find(m => m.address == this.address)!;
+    applyState(dynamicData: DynamicMarketData, userData?: UserMarket) {
+        this.cache.dynamic = dynamicData;
+
+        if(userData != undefined) {
+            this.cache.user = userData;
+        }
 
         for(const token of this.tokens) {
-            const new_cache = this.cache.dynamic.tokens.find(t => t.address == token.address)!;
-            token.cache = {...token.cache, ...new_cache};
+            const nextDynamic = dynamicData.tokens.find((t) => t.address == token.address);
+            const nextUser = userData?.tokens.find((t) => t.address == token.address);
+            token.cache = {
+                ...token.cache,
+                ...(nextDynamic ?? {}),
+                ...(nextUser ?? {}),
+            };
         }
     }
 
-    async reloadUserData(account: address) {
-        const data = (await this.reader.getUserData(account))
-            .markets.find(market => market.address == this.address)!;
-
-        this.cache.user = data;
-
-        for(const token of this.tokens) {
-            const new_cache = data.tokens.find(t => t.address == token.address)!;
-            token.cache = {...token.cache, ...new_cache};
+    async reloadMarketData() {
+        const dynamic_data = await this.reader.getDynamicMarketData();
+        const dynamic = dynamic_data.find(m => m.address == this.address);
+        if(dynamic == undefined) {
+            throw new Error(`Could not find dynamic data for market ${this.address}.`);
         }
+        this.applyState(dynamic);
+    }
+
+    async reloadUserData(account: address) {
+        const { dynamicMarkets, userMarkets } = await this.reader.getMarketStates([this.address], account);
+        const dynamic = dynamicMarkets[0];
+        const user = userMarkets[0];
+
+        if(dynamic == undefined || user == undefined) {
+            throw new Error(`Could not reload market state for ${this.address}.`);
+        }
+
+        this.applyState(dynamic, user);
     }
 
     /**
@@ -691,8 +708,8 @@ export class Market {
         incentives: Incentives = {},
         setup: SetupConfigSnapshot = setup_config,
     ) {
-        const user = "address" in provider ? provider.address : EMPTY_ADDRESS;
-        const all_data = await reader.getAllMarketData(user as address);
+        const user = "address" in provider ? provider.address as address : null;
+        const all_data = await reader.getAllMarketData(user);
         const deploy_keys: string[] = Object.keys(setup.contracts.markets) as (keyof typeof setup.contracts.markets)[];
         // Filter out USDC — DeFiLlama incorrectly returns YZM vault yield labeled as USDC
         const [yields, merklLendOpps, merklBorrowOpps] = await Promise.all([
