@@ -69,10 +69,17 @@ export async function setupChain(
     validateApiUrl(api_url);
 
     if(provider == null) {
+        // Already using the dedicated RPC — no fallback needed
         provider = chain_config[chain].provider!;
+        provider = wrapProviderWithRetries(provider);
+    } else {
+        // Caller provided a provider (wallet signer).  Use the chain's
+        // dedicated RPC as a read-only fallback so that unreliable wallet
+        // RPCs (e.g. Rabby) don't prevent market data from loading.
+        const readFallback = chain_config[chain].provider!;
+        provider = wrapProviderWithRetries(provider, readFallback);
     }
 
-    provider = wrapProviderWithRetries(provider);
     const nextSetupConfig = createSetupConfig(chain, provider, approval_protection, api_url, options);
     validateSetupConfig(nextSetupConfig);
 
@@ -98,6 +105,10 @@ export async function setupChain(
     if(setupInvocation === latest_setup_invocation) {
         setup_config = nextSetupConfig;
         all_markets = markets;
+    } else {
+        console.debug(
+            `[setupChain] invocation ${setupInvocation} superseded by ${latest_setup_invocation}, not publishing to globals`
+        );
     }
 
     return {

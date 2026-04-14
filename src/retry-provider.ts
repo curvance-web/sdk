@@ -1,6 +1,55 @@
 import { JsonRpcProvider, JsonRpcSigner, Wallet } from "ethers";
 import { curvance_provider } from "./types";
 
+/**
+ * RPC methods that are pure reads — safe to retry against a fallback provider.
+ * Write/signing methods are excluded because only the wallet provider can sign.
+ */
+const READ_RPC_METHODS = new Set([
+    // State queries
+    'eth_call',
+    'eth_getBalance',
+    'eth_getCode',
+    'eth_getStorageAt',
+    'eth_getTransactionCount',
+    // Block data
+    'eth_blockNumber',
+    'eth_getBlockByNumber',
+    'eth_getBlockByHash',
+    // Gas / fee data
+    'eth_gasPrice',
+    'eth_feeHistory',
+    'eth_estimateGas',
+    'eth_maxPriorityFeePerGas',
+    // Transaction lookups (read-only — not sending)
+    'eth_getTransactionByHash',
+    'eth_getTransactionReceipt',
+    // Logs
+    'eth_getLogs',
+    // Network identity
+    'eth_chainId',
+    'net_version',
+]);
+
+/** Named ethers provider methods that correspond to read RPCs. */
+const READ_PROVIDER_METHODS = new Set([
+    'getBalance',
+    'getCode',
+    'getStorageAt',
+    'getTransactionCount',
+    'getBlock',
+    'getBlockNumber',
+    'getGasPrice',
+    'getFeeData',
+    'getTransaction',
+    'getTransactionReceipt',
+    'getLogs',
+    'getNetwork',
+    'detectNetwork',
+    'call',
+    'estimateGas',
+]);
+
 export interface RetryConfig {
     maxRetries: number;
     baseDelay: number; // Base delay in milliseconds
@@ -65,9 +114,12 @@ export const DEFAULT_RETRY_CONFIG: RetryConfig = {
 
 class RetryableProvider {
     private config: RetryConfig;
+    private fallbackProvider: JsonRpcProvider | null;
+    private _fallbackActivated = false;
 
-    constructor(config: Partial<RetryConfig> = {}) {
+    constructor(config: Partial<RetryConfig> = {}, fallbackProvider: JsonRpcProvider | null = null) {
         this.config = { ...DEFAULT_RETRY_CONFIG, ...config };
+        this.fallbackProvider = fallbackProvider;
     }
 
     private async sleep(ms: number): Promise<void> {
@@ -172,11 +224,40 @@ class RetryableProvider {
         throw lastError!;
     }
 
+    /**
+     * Execute a read operation against the primary provider, falling back to
+     * the dedicated RPC provider if the primary exhausts all retries.
+     *
+     * Write operations (signing, sending transactions) never use the fallback
+     * because the fallback provider cannot sign.
+     */
+    private async executeWithReadFallback<T>(
+        primaryOp: () => Promise<T>,
+        fallbackOp: () => Promise<T>,
+        context: string,
+    ): Promise<T> {
+        try {
+            return await this.executeWithRetry(primaryOp, context);
+        } catch (primaryError: any) {
+            if (!this._fallbackActivated) {
+                this._fallbackActivated = true;
+                console.warn(
+                    `[rpc] Primary provider failed for ${context} after ${this.config.maxRetries + 1} attempts. ` +
+                    `Falling back to dedicated RPC for read operations.`
+                );
+            }
+            // The fallback gets its own full retry cycle
+            return this.executeWithRetry(fallbackOp, `${context} [fallback]`);
+        }
+    }
+
     wrapProvider(provider: curvance_provider): curvance_provider {
         // If it's already wrapped, return as-is
         if ((provider as any)._isRetryable) {
             return provider;
         }
+
+        const hasFallback = this.fallbackProvider != null;
 
         const retryableProvider = new Proxy(provider, {
             get: (target, prop, receiver) => {
@@ -190,30 +271,49 @@ class RetryableProvider {
                 // Wrap the main RPC send method
                 if (prop === 'send' && typeof original === 'function') {
                     return async (method: string, params: any[]) => {
-                        return this.executeWithRetry(
-                            () => original.apply(target, [method, params]),
-                            `RPC ${method}`
-                        );
+                        const primaryOp = () => original.apply(target, [method, params]);
+
+                        if (hasFallback && READ_RPC_METHODS.has(method)) {
+                            const fb = this.fallbackProvider!;
+                            const fallbackOp = () => fb.send(method, params);
+                            return this.executeWithReadFallback(primaryOp, fallbackOp, `RPC ${method}`);
+                        }
+
+                        return this.executeWithRetry(primaryOp, `RPC ${method}`);
                     };
                 }
 
                 // For JsonRpcProvider, also wrap _send if it exists
                 if (prop === '_send' && typeof original === 'function') {
                     return async (payload: any, callback?: any) => {
-                        return this.executeWithRetry(
-                            () => original.apply(target, [payload, callback]),
-                            `RPC ${payload.method || 'unknown'}`
-                        );
+                        const method = payload.method || 'unknown';
+                        const primaryOp = () => original.apply(target, [payload, callback]);
+
+                        if (hasFallback && READ_RPC_METHODS.has(method)) {
+                            const fb = this.fallbackProvider!;
+                            const fallbackOp = () => (fb as any)._send(payload, callback);
+                            return this.executeWithReadFallback(primaryOp, fallbackOp, `RPC ${method}`);
+                        }
+
+                        return this.executeWithRetry(primaryOp, `RPC ${method}`);
                     };
                 }
 
                 // Wrap other async methods that might make RPC calls
                 if (typeof original === 'function' && this.isRpcMethod(prop)) {
                     return async (...args: any[]) => {
-                        return this.executeWithRetry(
-                            () => original.apply(target, args),
-                            `Provider method ${String(prop)}`
-                        );
+                        const primaryOp = () => original.apply(target, args);
+
+                        if (hasFallback && READ_PROVIDER_METHODS.has(prop as string)) {
+                            const fb = this.fallbackProvider!;
+                            const fbMethod = (fb as any)[prop as string];
+                            if (typeof fbMethod === 'function') {
+                                const fallbackOp = () => fbMethod.apply(fb, args);
+                                return this.executeWithReadFallback(primaryOp, fallbackOp, `Provider method ${String(prop)}`);
+                            }
+                        }
+
+                        return this.executeWithRetry(primaryOp, `Provider method ${String(prop)}`);
                     };
                 }
 
@@ -284,9 +384,10 @@ export function configureRetries(config: Partial<RetryConfig> = {}): void {
  */
 export function createRetryableProvider(
     provider: curvance_provider, 
-    config: Partial<RetryConfig> = {}
+    config: Partial<RetryConfig> = {},
+    readFallback: JsonRpcProvider | null = null,
 ): curvance_provider {
-    const retryProvider = new RetryableProvider(config);
+    const retryProvider = new RetryableProvider(config, readFallback);
     return retryProvider.wrapProvider(provider);
 }
 
@@ -301,11 +402,27 @@ function getGlobalRetryProvider(): RetryableProvider {
 }
 
 /**
- * Wrap a provider with the global retry configuration
+ * Wrap a provider with the global retry configuration.
+ *
+ * When `readFallback` is supplied, read-only RPC methods (eth_call,
+ * eth_getBalance, etc.) will fall through to the fallback provider after
+ * exhausting retries on the primary.  Write/signing methods never use
+ * the fallback because only the primary (wallet) provider can sign.
  */
-export function wrapProviderWithRetries(provider: curvance_provider): curvance_provider {
-    const retryProvider = getGlobalRetryProvider();
-    return retryProvider.wrapProvider(provider);
+export function wrapProviderWithRetries(
+    provider: curvance_provider,
+    readFallback: JsonRpcProvider | null = null,
+): curvance_provider {
+    if (readFallback) {
+        // Fallback is per-invocation — create a dedicated instance so the
+        // fallback provider isn't shared across setupChain calls.
+        const retryProvider = new RetryableProvider(
+            getGlobalRetryProvider().getConfig(),
+            readFallback,
+        );
+        return retryProvider.wrapProvider(provider);
+    }
+    return getGlobalRetryProvider().wrapProvider(provider);
 }
 
 /**
