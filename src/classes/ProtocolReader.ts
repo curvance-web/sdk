@@ -257,6 +257,10 @@ export class ProtocolReader {
     }
 
     private async getMarketStatesFallback(markets: address[], account: address) {
+        // Compatibility fallback: keep this path until every environment that
+        // runs the SDK (main deployment, staging, forks, local Anvil) has a
+        // ProtocolReader with getMarketStates deployed. Removing it right after
+        // a single deployment upgrade will break older forks and stale test envs.
         if (!this.hasWarnedAboutMarketStatesFallback) {
             this.hasWarnedAboutMarketStatesFallback = true;
             console.warn(
