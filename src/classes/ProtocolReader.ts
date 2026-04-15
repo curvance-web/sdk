@@ -53,6 +53,10 @@ export interface StaticMarketToken {
     closeFactorCurve: TypeBPS;
     closeFactorMin: TypeBPS;
     closeFactorMax: TypeBPS;
+    irmTargetRate: bigint;
+    irmMaxRate: bigint;
+    irmTargetUtilization: bigint;
+    interestFee: TypeBPS;
 }
 
 export interface StaticMarketData {
@@ -129,6 +133,8 @@ export interface IProtocolReader {
     hypotheticalBorrowOf(account: address, borrowableCToken: address, borrowAssets: bigint, bufferTime: bigint): Promise<[bigint, bigint, boolean, boolean]>;
     maxRedemptionOf(account: address, ctoken: address, bufferTime: bigint): Promise<[bigint, bigint, boolean]>;
     debtBalanceAtTimestamp(account: address, borrowableCtoken: address, timestamp: bigint): Promise<bigint>;
+    getBalancesOf(tokens: address[], account: address): Promise<bigint[]>;
+    getLeverageSnapshot(account: address, cToken: address, borrowableCToken: address, bufferTime: bigint): Promise<[bigint, bigint, bigint, bigint, bigint, bigint, boolean]>;
 }
 
 export class ProtocolReader {
@@ -296,6 +302,16 @@ export class ProtocolReader {
         return await this.contract.debtBalanceAtTimestamp(account, borrowableCtoken, timestamp);
     }
 
+    async getBalancesOf(tokens: address[], account: address) {
+        return await this.contract.getBalancesOf(tokens, account);
+    }
+
+    async getLeverageSnapshot(account: address, cToken: address, borrowableCToken: address, bufferTime: bigint = 120n) {
+        const [collateralUsd, debtUsd, collateralAssetPrice, sharePrice, debtAssetPrice, debtTokenBalance, oracleError] =
+            await this.contract.getLeverageSnapshot(account, cToken, borrowableCToken, bufferTime) as [bigint, bigint, bigint, bigint, bigint, bigint, boolean];
+        return { collateralUsd, debtUsd, collateralAssetPrice, sharePrice, debtAssetPrice, debtTokenBalance, oracleError };
+    }
+
     async getStaticMarketData(use_api = true) {
         // TODO: Implement API call
         const data = await this.contract.getStaticMarketData();
@@ -335,7 +351,11 @@ export class ProtocolReader {
                 closeFactorBase: BigInt(token.closeFactorBase),
                 closeFactorCurve: BigInt(token.closeFactorCurve),
                 closeFactorMin: BigInt(token.closeFactorMin),
-                closeFactorMax: BigInt(token.closeFactorMax)
+                closeFactorMax: BigInt(token.closeFactorMax),
+                irmTargetRate: BigInt(token.irmTargetRate),
+                irmMaxRate: BigInt(token.irmMaxRate),
+                irmTargetUtilization: BigInt(token.irmTargetUtilization),
+                interestFee: BigInt(token.interestFee)
             }))
         }));
         return typedData;

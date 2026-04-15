@@ -1,6 +1,6 @@
 {
   "name": "curvance",
-  "version": "3.5.9",
+  "version": "4.0.3",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -25,7 +25,7 @@
   "scripts": {
     "up": "npm run build && npm publish",
     "fetch": "ts-node fetch-deployment.ts",
-    "build": "tsc",
+    "build": "node node_modules/typescript/bin/tsc",
     "test": "node --test --test-concurrency=1 --require ts-node/register tests/*.test.ts",
     "test:replay": "ts-node tests/replay.test.ts",
     "test:leverage": "ts-node tests/leverage.test.ts",
@@ -36,14 +36,14 @@
     "test:optimizer": "ts-node tests/optimizer.test.ts"
   },
   "dependencies": {
-    "@redstone-finance/sdk": "^0.9.0",
-    "decimal.js": "^10.6.0",
-    "ethers": "^6.15.0"
+    "@redstone-finance/sdk": "0.9.0",
+    "decimal.js": "10.6.0",
+    "ethers": "6.16.0"
   },
   "devDependencies": {
-    "@types/node": "^24.3.0",
-    "dotenv": "^17.2.1",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.9.2"
+    "@types/node": "24.12.2",
+    "dotenv": "17.4.1",
+    "ts-node": "10.9.2",
+    "typescript": "5.9.3"
   }
 }

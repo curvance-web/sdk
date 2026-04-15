@@ -5,6 +5,7 @@ import { CToken } from "./CToken";
 import { Calldata } from "./Calldata";
 import abi from '../abis/SimpleZapper.json';
 import { Zappers } from "./Market";
+import { setup_config } from "../setup";
 
 export interface Swap {
     inputToken: address,
@@ -59,18 +60,62 @@ export class Zapper extends Calldata<IZapper> {
     }
 
     async getSimpleZapCalldata(ctoken: CToken, inputToken: address, outputToken: address, amount: bigint, collateralize: boolean, slippage: bigint) {
-        if(inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
+        const isNative = inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
+        const config = getChainConfig();
+
+        // For native MON: if the deposit token IS wrapped native, just wrap (no swap needed)
+        if (isNative && outputToken.toLowerCase() === config.wrapped_native.toLowerCase()) {
             return this.getNativeZapCalldata(ctoken, amount, collateralize, true);
         }
 
-        const config = getChainConfig();
-        const quote = await config.dexAgg.quote(this.address, inputToken, outputToken, amount, slippage);
+        // For native MON into non-WMON tokens: wrap first, then swap WMON → target
+        // The contract handles wrapping when depositAsWrappedNative=true
+        const swapInputToken = isNative ? config.wrapped_native as address : inputToken;
+
+        // No-op short-circuit: same-token zap (e.g., USDC → USDC market). The
+        // SimpleZapper.swapAndDeposit contract handles this on-chain via
+        // _isMatchingToken (line 80-85). Mirror that here so we don't waste a
+        // DEX RPC call and don't accidentally charge a fee on a no-op.
+        if (swapInputToken.toLowerCase() === outputToken.toLowerCase()) {
+            const swap: Swap = {
+                inputToken: isNative ? NATIVE_ADDRESS : inputToken,
+                inputAmount: amount,
+                outputToken: outputToken,
+                target: EMPTY_ADDRESS,
+                slippage: 0n,
+                call: EMPTY_BYTES,
+            };
+            const expected_shares = await ctoken.convertToShares(amount);
+            return this.getCallData("swapAndDeposit", [
+                ctoken.address,
+                isNative,
+                swap,
+                expected_shares,
+                collateralize,
+                this.provider.address as address
+            ]);
+        }
+
+        // Resolve fee from policy. The policy already exempts no-ops via
+        // same-token + native↔wrapped checks, so the only way feeBps > 0 here
+        // is for a real swap.
+        const feeBps = setup_config.feePolicy.getFeeBps({
+            operation: 'zap',
+            inputToken: isNative ? NATIVE_ADDRESS as address : inputToken,
+            outputToken: outputToken,
+            inputAmount: amount,
+            currentLeverage: null,
+            targetLeverage: null,
+        });
+        const feeReceiver = feeBps > 0n ? setup_config.feePolicy.feeReceiver : undefined;
+
+        const quote = await config.dexAgg.quote(this.address, swapInputToken, outputToken, amount, slippage, feeBps, feeReceiver);
 
         const swap: Swap = {
-            inputToken: inputToken,
+            inputToken: isNative ? NATIVE_ADDRESS : inputToken,
             inputAmount: amount,
             outputToken: outputToken,
-            target: config.dexAgg.router,
+            target: quote.to,
             slippage: slippage,
             call: quote.calldata
         };
@@ -79,7 +124,7 @@ export class Zapper extends Calldata<IZapper> {
 
         return this.getCallData("swapAndDeposit", [
             ctoken.address,
-            false,
+            isNative,
             swap,
             expected_shares,
             collateralize,

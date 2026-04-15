@@ -28,7 +28,13 @@ export interface OptimizerUserData {
 
 export interface ReallocationAction {
     cToken: address;
-    assets: bigint;
+    assetsOrBps: bigint;
+}
+
+export interface AllocationBound {
+    cToken: address;
+    minBps: bigint;
+    maxBps: bigint;
 }
 
 export interface IOptimizerReader {
@@ -36,7 +42,7 @@ export interface IOptimizerReader {
     getOptimizerUserData(optimizers: address[], account: address): Promise<any[]>;
     optimalDeposit(optimizer: address, assets: bigint): Promise<address>;
     optimalWithdrawal(optimizer: address, assets: bigint): Promise<address>;
-    optimalRebalance(optimizer: address): Promise<any[]>;
+    optimalRebalance(optimizer: address, slippageBps: bigint): Promise<[ReallocationAction[], AllocationBound[]]>;
 }
 
 export class OptimizerReader {
@@ -84,11 +90,21 @@ export class OptimizerReader {
         return await this.contract.optimalWithdrawal(optimizer, assets);
     }
 
-    async optimalRebalance(optimizer: address): Promise<ReallocationAction[]> {
-        const data = await this.contract.optimalRebalance(optimizer);
-        return data.map((action: any) => ({
-            cToken: action.cToken,
-            assets: BigInt(action.assets)
-        }));
+    async optimalRebalance(optimizer: address, slippageBps: bigint): Promise<{
+        actions: ReallocationAction[];
+        bounds: AllocationBound[];
+    }> {
+        const data = await this.contract.optimalRebalance(optimizer, slippageBps);
+        return {
+            actions: data[0].map((action: any) => ({
+                cToken: action.cToken,
+                assetsOrBps: BigInt(action.assetsOrBps)
+            })),
+            bounds:  data[1].map((bound: any) => ({
+                cToken: bound.cToken,
+                minBps: BigInt(bound.minBps),
+                maxBps: BigInt(bound.maxBps)
+            }))
+        };
     }
 }

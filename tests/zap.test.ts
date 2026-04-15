@@ -30,13 +30,22 @@ describe('Zapping', () => {
         await framework.reset();
     });
 
-    test('Naitve Zap', async function() {
+    test('Naitve Vault Zap', async function() {
         const [ market, shMON, WMON ] = await framework.getMarket('shMON | WMON');
         const depositAmount = Decimal(1_000);
 
         await shMON.approvePlugin('native-vault', 'zapper');
         await shMON.approveUnderlying(depositAmount);
         await shMON.depositAsCollateral(depositAmount, 'native-vault');
+    });
+
+    test('Naitve Simple Zap', async function() {
+        const [ market, shMON, WMON ] = await framework.getMarket('shMON | WMON');
+        const depositAmount = Decimal(1_000);
+
+        await WMON.approvePlugin('native-simple', 'zapper');
+        await WMON.approveUnderlying(depositAmount);
+        await WMON.depositAsCollateral(depositAmount, 'native-simple');
     });
 
     test('Vault Zap', async function() {
@@ -87,7 +96,7 @@ describe('Zapping', () => {
         console.log(`WMON decimals: ${wmonDecimals}, USDC decimals: ${usdcDecimals}`);
         assert.notEqual(wmonDecimals, usdcDecimals, 'Test requires tokens with different decimals');
 
-        const zapTokens = await framework.curvance.dexAgg.getAvailableTokens(framework.signer);
+        const zapTokens = await framework.curvance.dexAgg.getAvailableTokens(framework.signer, null);
         const wmonZap = zapTokens.find(z => z.interface.address.toLowerCase() === wmonAddress.toLowerCase());
         assert(wmonZap, `Could not find zap token for WMON (${wmonAddress})`);
         assert(wmonZap!.quote, `Zap token for WMON has no quote function`);

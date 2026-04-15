@@ -1,391 +1,210 @@
 ---
 name: curvance-sdk
-description: "Use when reading, calling, extending, or debugging the Curvance contract-sdk (curvance-web/contract-sdk v3.5.7). Triggers: writing SDK functions, calling SDK methods from v1 app, understanding data flow from chain to UI, working with Market/CToken/BorrowableCToken classes, formatting on-chain values, building new query hooks, debugging SDK errors. Compose with Skill_CurvanceApp.md for app integration. Do NOT use for Solidity/protocol contract work or Aerarium v2 clean-slate frontend."
+description: "Use when reading, calling, extending, or debugging the Curvance contract-sdk (curvance npm package). Triggers: writing SDK functions, calling SDK methods from v1 app, understanding data flow from chain to UI, working with Market/CToken/BorrowableCToken classes, formatting on-chain values, building new query hooks, debugging SDK errors. Compose with Skill_CurvanceApp.md for app integration. Do NOT use for Solidity/protocol contract work."
 ---
 
-# Curvance SDK (contract-sdk v3.5.7)
+# Curvance SDK (contract-sdk)
 
 Rules for working with the SDK. Read before calling any SDK method, writing query hooks, or extending SDK classes.
 
+## Routing Table
+
+| Task type | Context sections to read |
+|---|---|
+| Calling SDK methods (quick ref) | #CTOKEN_API, #BORROWABLE_CTOKEN_API, #MARKET_API |
+| Calling SDK methods (detailed) | #CTOKEN_SYNC_GETTERS, #BORROWABLE_EXTENDED_API, #MARKET_COMPUTED_PROPERTIES |
+| Writing a new query hook | #V1_CONSUMPTION_LAYER, #DASHBOARD_QUERIES |
+| Building a mutation | #V1_ACTION_PATTERNS, #TRANSACTION_EXECUTION |
+| Building deposit flow | #DEPOSIT_MUTATION |
+| Building borrow/repay flow | #BORROW_UTILITIES, #REPAY_MECHANICS |
+| Building collateral flow | #COLLATERAL_UTILITIES |
+| Building leverage flow | #LEVERAGE_UTILITIES, #STANDALONE_LEVERAGE_MUTATIONS, #LEVERAGE_FLOW |
+| Formatting values | #FORMAT_CONVERTER_API, #FORMAT_MODULE |
+| Understanding data flow | #SETUP_FLOW, #DATA_SHAPES |
+| Approval logic | #APPROVAL_ARCHITECTURE |
+| Shares ↔ assets conversion | #SHARES_ASSETS_PIPELINE, #DECIMAL_SYSTEM |
+| Slippage handling | #SLIPPAGE_HANDLING |
+| Zap/swap flow | #ZAPPER_ARCHITECTURE, #ZAP_FLOW |
+| Type system / constants | #TYPE_SYSTEM_CONSTANTS |
+| Store patterns | #STORE_ARCHITECTURE |
+| Yield/APY calculation | #YIELD_CALCULATION_HELPERS, #REWARDS_INCENTIVES |
+| Position previews | #POSITION_PREVIEW_METHODS, #POSITION_PREVIEW_HOOKS |
+| Validation / form errors | #VALIDATION_HOOKS |
+| Cooldown / hold period | #COOLDOWN_SYSTEM |
+| ERC4626 vault layer | #ERC4626_VAULT_LAYER |
+| DEX aggregators | #DEX_AGGREGATORS_API |
+| RPC retry / error debugging | #RETRY_PROVIDER |
+| Supporting classes | #PROTOCOL_READER_API, #ERC20_API, #ORACLE_MANAGER_API, #POSITION_MANAGER_API, #ZAPPER_API, #NATIVE_TOKEN_API, #CALLDATA_API |
+| Optimizer / vault routing | #OPTIMIZER_READER |
+| Snapshot / portfolio export | #SNAPSHOT_INTEGRATION |
+| Market categorization types | #MARKET_METADATA_TYPES |
+| ERC4626 / vault token layer | #ERC4626_VAULT_LAYER, #ERC4626_API |
+| Redstone oracle / price updates | #REDSTONE_API, #REDSTONE_ORACLE |
+| Max redemption / withdraw limits | #MAX_REDEMPTION, #ENSURE_UNDERLYING_AMOUNT |
+| FormatConverter (complete ref) | #FORMAT_CONVERTER_COMPLETE |
+| ERC20 usage patterns | #ERC20_API_PATTERNS |
+| API class (backend calls) | #API_CLASS |
+| SDK helper functions | #HELPERS |
+| Write pattern (oracleRoute internals) | #WRITE_PATTERN |
+| Task group mapping (bytes tasks) | #TOKEN_TASK_GROUP_MAP |
+| Security audit / trust boundaries | #SECURITY_TRUST_BOUNDARIES |
+
 ## Hard Constraints
 
-- **ethers v6 only.** SDK uses `ethers` v6 (`Contract`, `JsonRpcProvider`, `JsonRpcSigner`). Do not mix v5 patterns.
-- **Decimal.js for all user-facing math.** Precision set to 50. Never use native JS `Number` for token amounts or prices. `Decimal.ROUND_DOWN` is the convention everywhere.
-- **bigint for all on-chain values.** Raw contract returns are `bigint`. Conversion to `Decimal` happens at the boundary via `FormatConverter`.
-- **Global mutable state.** `setup_config` and `all_markets` are module-level mutables in `setup.ts`. `setupChain()` writes them. Every class reads them. This means SDK has implicit initialization order — `setupChain()` must run before anything else.
-- **Bulk-loaded data model.** `setupChain()` → `Market.getAll()` loads ALL market, token, and user data from ProtocolReader in a single batch of RPC calls. This populates `.cache` on every `CToken` and `Market`. Getters read this bulk-loaded data synchronously — no per-read RPC calls. On mutations (deposit, borrow, etc.), `oracleRoute` calls `market.reloadUserData()` to refresh user-specific fields. Methods prefixed `fetch*` make targeted RPC calls and update specific `.cache` fields. Future evolution: static market data will move to an API layer for multi-chain support.
-- **All writes go through `oracleRoute()`.** Every state-changing CToken method encodes calldata → checks for Redstone price updates → wraps in multicall if needed → sends transaction → reloads user data. Never call `contract.*` directly for writes.
-- **`contractWithGasBuffer` Proxy wraps all contracts.** Every contract instantiated via `contractSetup()` gets a Proxy that auto-estimates gas and adds a 10% buffer. This is invisible but means all contract calls are async even if they don't look it.
+- **ethers v6 only.** No v5 patterns.
+- **Decimal.js for all user-facing math.** Precision 50, `ROUND_DOWN`. Never native JS `Number` for amounts/prices.
+- **bigint for all on-chain values.** Conversion via `FormatConverter` at boundary.
+- **Global mutable state.** `setupChain()` writes module-level `setup_config` and `all_markets`. Must run first.
+- **Bulk-loaded data.** `setupChain()` → `Market.getAll()` → single batch RPC. Populates `.cache`. Getters read sync. Mutations call `reloadUserData()`.
+- **All writes through `oracleRoute()`.** Encodes calldata → Redstone prices → multicall if needed → sends tx → reloads.
+- **`contractWithGasBuffer` Proxy.** Auto gas estimate + 10% buffer. All calls async.
 
-## Type System
+## Class Hierarchy (brief)
 
-Six semantic type aliases — all defined in `types.ts`. Understanding these is critical for knowing when conversion is needed:
+```
+Calldata<T> (abstract) → CToken → BorrowableCToken
+ERC20 → ERC4626
+Market, ProtocolReader, OracleManager, PositionManager, Zapper, Redstone
+FormatConverter (static), NativeToken, Api, OptimizerReader
+IDexAgg → KyberSwap, Kuru, MultiDexAgg
+```
 
-| Type | Underlying | Meaning | Example |
-|---|---|---|---|
-| `address` | `` `0x${string}` `` | Ethereum address | `0x3bd3...` |
-| `bytes` | `` `0x${string}` `` | Raw calldata | `0xabcd...` |
-| `TokenInput` | `Decimal` | Human-readable token amount (e.g., `1.5 WBTC`) — needs `decimalToBigInt(value, decimals)` before on-chain use | `Decimal(1.5)` |
-| `USD` | `Decimal` | USD value at human scale (value / 1e18) | `Decimal(100.50)` |
-| `USD_WAD` | `bigint` | USD in WAD format (1e18) — raw on-chain | `100500000000000000000n` |
-| `Percentage` | `Decimal` | Fractional (0.75 = 75%). Multiply by 100 for display. | `Decimal(0.75)` |
+Full APIs: Context → class-specific sections.
 
-**Conversion rule of thumb:** If you're passing to a contract → convert to `bigint`. If you're displaying to a user → convert to `Decimal`/`USD`/`Percentage`.
+## Data Flow (brief)
 
-## BPS Convention
+```
+setupChain(chain, provider, approval_protection, api_url)
+  → ProtocolReader + OracleManager + Api.getRewards()
+  → Market.getAll():
+      1. reader.getAllMarketData(user) — 3 parallel RPC calls
+      2. In parallel: Api.fetchNativeYields(), Merkl LEND opps, Merkl BORROW opps
+      3. Construct Market/CToken instances, skip markets without deploy data
+      4. Per-token: incentiveSupplyApy/incentiveBorrowApy from Merkl, nativeApy from API
+  → return { markets, reader, dexAgg, global_milestone }
+```
 
-On-chain values use basis points (1 BPS = 0.01% = 1e-4). Constants:
+**Available chains (SDK `src/chains/index.ts`):** `'monad-mainnet'`, `'arb-sepolia'` (testnet only — no `'arb-mainnet'` yet). Chain string must match exactly.
 
-| Constant | Value | Use |
+V1 app wraps in `useSetupChainQuery()`. All hooks use `select`.
+
+## Type System (brief)
+
+| Type | Underlying | Meaning |
 |---|---|---|
-| `BPS` | `10000n` | Divide raw BPS value to get Percentage |
-| `WAD` | `1e18n` | Divide raw WAD value to get human-readable |
-| `SECONDS_PER_YEAR` | `31536000n` | Convert per-second rates to APY |
+| `address` | `` `0x${string}` `` | Ethereum address |
+| `TokenInput` | `Decimal` | Human-readable token amount |
+| `USD` | `Decimal` | USD at human scale |
+| `USD_WAD` | `bigint` | USD in WAD (1e18) |
+| `Percentage` | `Decimal` | Fractional (0.75 = 75%) |
 
-**Pattern for BPS getters:** `Decimal(cache.collRatio).div(BPS)` → `Percentage`
-**Pattern for rate→APY:** `Decimal(cache.supplyRate).div(WAD).mul(SECONDS_PER_YEAR)` → `Percentage`
-
-## Data Flow: Chain → UI
-
-```
-setupChain(chain, provider)
-  ├── getContractAddresses(chain)          // from chains/*.json
-  ├── new ProtocolReader(addr)
-  ├── new OracleManager(addr)
-  ├── fetch rewards API                    // milestones + incentives
-  ├── Market.getAll(reader, oracle, ...)
-  │     ├── reader.getAllMarketData(user)   // 3 parallel RPC calls
-  │     │     ├── getStaticMarketData()    // token config, risk params
-  │     │     ├── getDynamicMarketData()   // prices, rates, liquidity
-  │     │     └── getUserData(account)     // balances, debt, health
-  │     ├── for each market:
-  │     │     ├── merge static + dynamic + user per-token
-  │     │     ├── new CToken() or new BorrowableCToken() based on isBorrowable
-  │     │     └── attach milestones/incentives
-  │     └── fetch native yields API
-  └── return { markets, reader, dexAgg, global_milestone }
-```
-
-**The v1 app wraps this in a single React Query hook:**
-```ts
-useSetupChainQuery() → queryFn: setupChain() → sanitizeMarketNames() → prioritizeDefaultMarket()
-```
-All other hooks use `select` on this query — no separate RPC calls for basic data.
-
-## Class Hierarchy
-
-```
-Calldata<T>           (abstract — getCallData, executeCallData)
-  └── CToken          (collateral tokens — deposit, redeem, leverage, zap)
-        └── BorrowableCToken   (adds borrow, repay, IRM access, liquidity)
-
-ERC20                 (basic token — balanceOf, approve, transfer)
-  └── ERC4626         (vault extension — convertToShares, previewDeposit)
-
-Market                (orchestrator — holds CToken[], position health, snapshots)
-ProtocolReader        (multicall reader — batches on-chain reads)
-OracleManager         (price fetching — getPrice with error codes)
-FormatConverter       (static — bigint↔Decimal, USD↔tokens, BPS↔WAD)
-PositionManager       (leverage/deleverage calldata building)
-Zapper                (swap+deposit calldata for zap flows)
-Redstone              (price update multicall actions)
-NativeToken           (native chain token — MON/ETH, no contract)
-```
-
-## Bulk-Loaded Data Structure
-
-`CToken.cache` is a spread-merge of 3 ProtocolReader types (all populated at setup via bulk RPC load):
-
-```
-StaticMarketToken:  address, name, symbol, decimals, asset, adapters, isBorrowable,
-                    borrowPaused, collateralizationPaused, mintPaused,
-                    collateralCap, debtCap, isListed,
-                    collRatio, maxLeverage, collReqSoft, collReqHard,
-                    liqInc{Base,Curve,Min,Max}, closeFactor{Base,Curve,Min,Max}
-
-DynamicMarketToken: exchangeRate, totalSupply, totalAssets, collateral, debt,
-                    sharePrice, assetPrice, sharePriceLower, assetPriceLower,
-                    borrowRate, predictedBorrowRate, utilizationRate, supplyRate, liquidity
-
-UserMarketToken:    userAssetBalance, userShareBalance, userUnderlyingBalance,
-                    userCollateral, userDebt, liquidationPrice
-```
-
-**Collision warning (source comment L84 of Market.ts):** These are spread-merged. Field name collisions = silent data loss.
-
-## Writing New Query Hooks
-
-Pattern from the v1 consumption layer (`modules/marketv2/queries/index.ts`):
-
-```ts
-// 1. ALWAYS derive from useSetupChainQuery with a select function
-function getMyData(data: SetupChainData) {
-  return data.markets.map(m => /* transform */);
-}
-
-export function useMyDataQuery() {
-  return useSetupChainQuery({ select: getMyData });
-}
-
-// 2. For data needing async SDK calls, use a separate useQuery
-export function useMyAsyncQuery(token: CToken | null) {
-  const account = useAccount();
-  return useQuery({
-    queryKey: ['myQuery', token?.address, account.address],
-    queryFn: async () => {
-      if (!token) return null;
-      return token.someAsyncMethod();
-    },
-    enabled: !!token && !!account.address,
-  });
-}
-```
-
-**Rules:**
-- Synchronous data (prices, rates, balances from bulk-loaded `.cache`) → `select` on `useSetupChainQuery`
-- Async SDK calls (maxRedemption, hypotheticalBorrow, position previews) → separate `useQuery` with `enabled` guard
-- Always include `token?.address` and `account.address` in queryKey
-- Never call `setupChain()` outside of `useSetupChainQuery`
-
-## Writing New SDK Methods
-
-If extending CToken or BorrowableCToken:
-
-1. **Read method (from bulk-loaded data):** Add a getter that reads from `this.cache`. Follow the overload pattern: `(inUSD: true): USD` / `(inUSD: false): bigint`.
-2. **Read method (fresh RPC):** Prefix with `fetch`. Call `this.contract.*`, update `.cache` field, return.
-3. **Write method:** Encode calldata via `this.getCallData("methodName", [args])`, then `return this.oracleRoute(calldata)`. Never call `this.contract.methodName()` directly for writes.
-4. **Preview method:** Use `this.market.reader.getPositionHealth(...)` or similar ProtocolReader methods. These are view calls, no state change.
-
-## V1 Action Patterns
-
-Every write action follows this architecture:
-```
-Zustand store (state + validation hooks) → useMutation (mutationFn calls SDK) → invalidateUserStateQueries
-```
-
-**Invalidation after writes:**
-```ts
-invalidateUserStateQueries(queryClient) → invalidates: ['setupchain'], ['positionHealth'], ['balance'], ['zap-tokens','balance'], ['user-debt']
-```
-
-### Borrow
-```
-store: useBorrowStore — holds token (BorrowableCToken), amount, market
-validation: useMaxBorrowAmount() → min(userRemainingCredit, remainingDebt, liquidity)
-mutation: token.borrow(Decimal(amount), walletAddress)
-```
-
-### Repay
-```
-mutation flow:
-  1. fetchDebtBalanceAtTimestamp() → get current debt
-  2. If paying ≥99.9% → isPayingAll=true → token.repay(Decimal(0))  ← sends 0 to repay full
-  3. Check allowance on underlying asset → approve if needed (unlimited vs exact)
-  4. token.repay(Decimal(amount))
-```
-
-### Withdraw
-```
-mutation flow:
-  1. token.maxRedemption() → get max
-  2. token.redeem(min(amount, maxRedemption))  ← clamps to max
-```
-
-### Deposit with Leverage
-```
-store: useDepositStore — holds depositToken, borrowToken, leverage, slippage
-mutation flow:
-  1. Find debtToken: first token with getUserDebt(true) > 0, fallback to borrowToken
-  2. Get leverageTypes via getHighestPriority(token.leverageTypes)
-  3. Get positionManager = token.getPositionManager(leverageTypes)
-  4. Check asset allowance → asset.approve(positionManager.address) if needed
-  5. Check plugin approval → token.approvePlugin(leverageTypes, 'positionManager') if needed
-  6. token.depositAndLeverage(amount, debtToken, Decimal(leverage), leverageTypes, slippage)
-```
-
-### Deposit (with optional zap)
-```
-store: useDepositStore — holds depositToken, borrowToken, zapToken, zapperType, slippage, isCollateralized
-mutation flow (useDepositV2Mutation):
-  1. If zapping (zap !== 'none') → check plugin approval → token.approvePlugin(zap, 'zapper')
-  2. Build ZapperInstructions: { type, inputToken, slippage }
-     ⚠️ inputToken: if zapping → zapToken.interface.address, else → asset.address
-     (see WIGGW: ensureUnderlyingAmount input token, Approval types)
-  3. Approval:
-     - If zapping → token.isZapAssetApproved(instructions, amount) / token.approveZapAsset(...)
-     - Else → asset.allowance(account, token.address) / asset.approve(token.address, ...)
-  4. If isCollateralized → token.depositAsCollateral(Decimal(amount), instructions, account)
-     Else → token.deposit(Decimal(amount), instructions, account)
-```
-
-### Standalone Leverage Up (existing position, no new deposit)
-```
-mutation: useLeverageUpMutation({ depositToken, borrowToken })
-flow:
-  1. Find debtToken: first token with getUserDebt(true) > 0, fallback to borrowToken
-  2. leverageTypes = getHighestPriority(depositToken.leverageTypes)
-  3. depositToken.approvePlugin(leverageTypes, 'positionManager')
-  4. depositToken.leverageUp(debtToken, newLeverage, leverageTypes, slippage)
-```
-
-### Standalone Leverage Down (reduce existing leverage)
-```
-mutation: useLeverageDownMutation(token)
-flow:
-  1. Find debtToken (same pattern)
-  2. token.approvePlugin('simple', 'positionManager')
-  3. token.leverageDown(borrowToken, currentLeverage, newLeverage, 'simple', slippage)
-note: leverage-down always uses 'simple' type
-```
-
-### Collateral Add/Remove
-```
-add:  token.postCollateral(Decimal(amount))
-remove: token.removeCollateral(Decimal(amount))
-validation: useManageCollateralError() — checks exceeds_max, exceeds_max_redemption
-SAFETY: BorrowableCToken.postCollateral() THROWS if user has outstanding debt
-```
-
-### Dashboard Data Access
-```
-useDashboardOverview() → select on setupChain → sums market.userDeposits, userDebt, userNet
-  + change rates: market.getUserDepositsChange('day'), getUserDebtChange('day'), getUserNetChange('day')
-useDepositDashboardQuery() → tokens where getUserAssetBalance(true) > 0
-useLoanDashboardQuery() → borrowable tokens where getUserDebt(false) > 0
-useBalanceQuery(token) → token.getAsset(true).balanceOf(account) → FormatConverter.bigIntToDecimal
-```
-
-### Protocol Constants
-```
-MIN_DEPOSIT_USD = 10         (frontend)
-MIN_BORROW_USD = 10.1        (frontend)
-MIN_ACTIVE_LOAN_SIZE = 10e18 (on-chain, ProtocolReader)
-MARKET_COOLDOWN_LENGTH = 20 minutes (on-chain)
-```
-
-## Where I Go Wrong
-
-| Trigger | Wrong | Right |
-|---|---|---|
-| Display a token amount | Use `Number()` or raw bigint division | `FormatConverter.bigIntToDecimal(value, decimals)` |
-| Pass amount to contract | Pass `Decimal` directly | `FormatConverter.decimalToBigInt(amount, token.asset.decimals)` |
-| Get asset price | `token.getPrice()` (returns share price by default) | `token.getPrice(true)` for asset price, `token.getPrice(false)` for share price |
-| Write to contract | `this.contract.deposit(assets, receiver)` | `this.getCallData("deposit", [...])` → `this.oracleRoute(calldata)` |
-| Check if token is borrowable | `token.isBorrowable` then cast | Type is already `BorrowableCToken` if `isBorrowable` — Market constructor handles this |
-| New query hook | Create new `setupChain()` call | Use `useSetupChainQuery({ select: ... })` |
-| Get USD value of tokens | Manually multiply price × amount | `token.convertTokensToUsd(bigintAmount)` or `FormatConverter.bigIntTokensToUsd(...)` |
-| Rate to APY | Divide by WAD | Divide by WAD **then multiply by SECONDS_PER_YEAR** |
-| Utilization rate to percentage | Divide by WAD then multiply by SECONDS_PER_YEAR | Divide by WAD **only** — utilization is NOT annualized |
-| User's remaining borrow capacity | Calculate from collateral/debt manually | `market.userRemainingCredit` (already has 0.1% buffer) |
-| Position health display | Use raw bigint | `market.formatPositionHealth(bigint)` → returns `Decimal` (0 = liquidation threshold, null = ∞) |
-| getLiquidity(false) | Expect Decimal | Returns `bigint` — must wrap: `toDecimal(token.getLiquidity(false), token.asset.decimals)` |
-| Deposit approval target | Approve to position manager | Approve to `token.address` (the cToken contract itself) |
-| Dashboard change rates | Call `getUserDepositsChange()` without arg | Must pass rate: `getUserDepositsChange('day')` |
-| Which decimals for conversion | Use `token.decimals` for everything | `token.decimals` and `asset.decimals` are **always equal** (ICToken.sol: cToken decimals "matching the underlying token"). SDK uses both for semantic clarity. Convention: `asset.decimals` for user amounts, `token.decimals` for share amounts — either works numerically |
-| FormatConverter rounding | Expect standard rounding | ALWAYS truncates (ROUND_DOWN + floor). `Decimal(1.999)` with 8 decimals → `199999999n`, NOT `200000000n` |
-| CToken.getPrice() vs ERC20.getPrice() | Same behavior | CToken.getPrice() is **synchronous** (reads bulk-loaded `.cache`). ERC20.getPrice() is **async** (on-chain oracle call). Different code paths |
-| Slippage for dex vs position manager | Same scale | Dex aggregator takes raw BPS (`500n` = 5%). Position manager contract takes slippage in WAD directly (`5e16n` = 5%). SDK converts via `FormatConverter.bpsToBpsWad(bps)`. Contract has FOUR layers: (1) dex minimum output, (2) `_swapSafe` oracle-price check in SwapperLib, (3) `checkSlippage` modifier (portfolio value), (4) per-operation min checks (expectedShares, repayAssets). Layers 1-2 are primary protection, 3-4 are safety nets |
-| Protocol fee on leverage/deleverage | No fee | Contract applies `centralRegistry.protocolLeverageFee()` (in BPS) to every leverage/deleverage action. Fee deducted from effective borrow/collateral amount, sent to DAO. SDK expectedShares calculations don't account for this — checkSlippage catches value loss |
-| repayAssets in DeleverageAction | Exact amount to repay | **Minimum floor only.** Contract repays `min(assetsHeld, totalDebt)` — always repays as much as possible, capped at total debt. Remaining tokens returned to user |
-| expectedShares in leverageUp (simple) | Converted via convertToShares | **SDK BUG:** `BigInt(quote.min_out)` — raw dex output in ASSET terms, NOT converted to shares. Causes `InvalidSlippage` revert as exchange rate grows. `depositAndLeverage` does it correctly via `getExpectedShares()`. Fix: use same `getExpectedShares` pattern |
-| Partial deleverage minRepay tolerance | Uses user-configured slippage | **Not a bug.** Hardcoded 5% is intentional defense-in-depth floor. User slippage enforced by dex quote + `_swapSafe` oracle check + `checkSlippage` modifier. The 5% `minRepay` is a sanity floor against oracle/dex price divergence |
-| Deposit vs Collateral dashboard values | Show same number when fully collateralized | **V2 DISPLAY BUG:** Two conversion paths — deposits use `userAssetBalance × assetPrice` (on-chain convertToAssets), collateral uses `collateralPosted(shares) × sharePrice`. Rounding diverges. Fix: single conversion path |
-| Repay preview "after" amount | Matches displayed current debt | **V2 DISPLAY BUG:** Display uses `debtBalanceQuery` (real-time on-chain), preview uses `market.userDebt` (stale snapshot). Diverge by unaccrued interest since page load |
-| Remove-collateral available balance | Shows asset amount | **V2 DISPLAY BUG:** `manage-collateral.content.tsx` L496 uses `getUserCollateral(false)` which returns shares, not assets. Compare `withdraw.content.tsx` which correctly applies exchangeRate |
-| previewLeverageDown collateral reduction | Computes how much collateral to withdraw | **SDK BUG:** `notional.mul(newLeverage)` computes TARGET collateral level, passes it as withdrawal amount. Over-withdraws, contract's `checkSlippage` catches and reverts. Fix: `collateralInUsd.sub(notional.mul(newLeverage))` |
-| useLeverageDownMutation borrow token | Passes user's actual debt token | **V2 BUG (dormant):** Finds `debtToken` then passes `borrowToken` from store. Dormant with 2-asset markets, breaks with multi-asset |
-| ensureUnderlyingAmount behavior | Expect it to throw on insufficient balance | **Silently caps** deposit amount to user's balance and logs a console warning. No throw, no error. Deposit proceeds with reduced amount |
-| Approval types | One approval flow | Three distinct types: (1) ERC20 allowance (spender+amount), (2) plugin delegate (setDelegateApproval), (3) zap asset approval (input token to plugin). Each checked separately |
-| Token contract writes | Call contract methods directly | NEVER. Encode via `getCallData()` → `oracleRoute()`. Direct calls skip price updates, gas buffer, and post-tx user data reload |
-| Redstone price updates | Manual price feed | Automatic. `oracleRoute()` checks token adapters → if REDSTONE_CORE, prepends price update via multicall. Transparent to consumers |
-| Gas estimation | Set gasLimit manually | Automatic 10% buffer via `contractWithGasBuffer` Proxy on all contract instances. Silent fallback if estimation fails |
-| maxRedemption result units | Always share count | Default (`maxRedemption()` or `in_shares=false`) returns **TokenInput** (Decimal in asset terms). Only `in_shares=true` returns bigint shares |
-| Vault-backed token shares | Asset amount = cToken shares | Extra conversion layer: asset → vault.previewDeposit → vault shares → ctoken.convertToShares → cToken shares. cTokens ARE ERC4626 vaults; "vault-backed" means the cToken's underlying is itself a vault token (e.g., stETH) |
-| Leverage-down position manager type | Use `getHighestPriority(leverageTypes)` like leverage-up | **Always** use `'simple'` — only simple position manager implements deleverage swap routing. Vault/native-vault types throw |
-| Full deleverage (newLeverage=1) | Same path as partial deleverage | Different path: uses `fetchDebtBalanceAtTimestamp(100n, false)` for projected debt, adds 5 BPS buffer to collateral amount, uses exact debt as min repay |
-| LeverageAction vs DeleverageAction | Same struct shape | `LeverageAction.swapAction` is singular `Swap`. `DeleverageAction.swapActions` is `Swap[]` array. Wrong shape causes encoding error |
-| Expected shares calculation | Use `virtualConvertToShares` everywhere | Three different paths: (1) Zappers and `depositAndLeverage` use on-chain `convertToShares` (async). (2) `leverageUp` simple type uses raw `quote.min_out` directly (NOT converted). (3) Internal operations (redeem, postCollateral) use virtual (sync, from `.cache`). Vault types always use full `getVaultExpectedShares` two-hop conversion |
-| BorrowableCToken deposit as collateral | Call depositAsCollateral like any CToken | **THROWS** if `cache.userDebt > 0` before any approval step runs. Must check debt in UI first. Same for `postCollateral()` |
-| ensureUnderlyingAmount input token | Always checks underlying balance | Checks **zap input token** balance via `getZapBalance(zap)` — underlying for 'none', vault's raw asset for 'vault', native balance for 'native-*', custom inputToken for 'simple' zap objects |
-| depositAndLeverage approval target | Same as regular deposit (approve to cToken) | Approve underlying to **position manager address**, NOT cToken. `_checkErc20Approval(asset, amount, manager.address)` |
+BPS: `Decimal(cache.value).div(10000)` → `Percentage`. Rate→APY: `.div(WAD).mul(SECONDS_PER_YEAR)`. Full constants: Context → #TYPE_SYSTEM_CONSTANTS
 
 ## Conversion Decision Tree
 
-When working with amounts in v1 code, follow this path:
+1. User types number → `TokenInput` (Decimal)
+2. Sending to SDK method → pass Decimal directly
+3. Sending to contract directly → `FormatConverter.decimalToBigInt(amount, decimals)`
+4. Displaying → `FormatConverter.bigIntToDecimal(value, decimals)` or getter with `(true)`
+5. USD display → `bigIntToUsd(wadValue)` or `token.getX(true)`
+6. Cross-token → `token.convertTokenToToken(from, to, amount, true/false)`
 
-1. **User types a number** → it's a `TokenInput` (Decimal). Store as-is.
-2. **Sending to SDK method** (deposit, borrow, repay) → pass the Decimal directly. SDK handles conversion internally.
-3. **Sending to contract directly** (rare, avoid) → `FormatConverter.decimalToBigInt(amount, token.asset.decimals)` for assets, `token.convertTokenInputToShares(amount)` for share-denominated calls.
-4. **Displaying contract data** → `FormatConverter.bigIntToDecimal(value, decimals)`. Use `asset.decimals` for asset amounts, `token.decimals` for share amounts.
-5. **Displaying USD** → `FormatConverter.bigIntToUsd(wadValue)` or use getter with `(true)`: `token.getUserAssetBalance(true)`.
-6. **Cross-token math** → `token.convertTokenToToken(from, to, amount, true)` for display, `false` for on-chain.
+## V1 Mutation Rules (brief)
+
+**Every mutation** calls `resolveFreshToken(token)` before SDK writes (avoids stale provider from store) and wraps SDK calls in `safeWaitForTx()` (handles Monad `nonce: null` parsing error).
+
+| Operation | Critical Rule |
+|---|---|
+| Borrow | Amount is Decimal, not bigint |
+| Repay | ≥99.9% → `isPayingAll=true` → `token.repay(Decimal(0))` |
+| Withdraw | Clamp to `token.maxRedemption()`. Returns `{ receipt, wasCapped, effectiveAmount }` |
+| Deposit+Leverage | Approve to **position manager**, not cToken |
+| Leverage Up | `getHighestPriority(leverageTypes)` → `approvePlugin` |
+| Leverage Down | Resolve type via `getHighestPriority`, fall back to `'simple'` if vault/native-vault |
+| Zap deposit | Three branches: native (no ERC20), zap (`approveZapAsset`), direct (`allowance`). `inputToken`: zapping → `zapToken.interface.address` |
+| Collateral Add | `BorrowableCToken.postCollateral()` throws if `cache.userDebt > 0`. `isMax` → pass full asset balance |
+| Collateral Remove | Passes `isMax` as second arg to `removeCollateral()` |
+
+Invalidation: `invalidateUserStateQueries` → 13 query keys including `['setupchain']`, `['positionHealth']`, `['balance']`, `['zap-tokens','balance']`, `['user-debt']`, `['maxLeverage']`, 6× `['previewPositionHealth*']`, `['previewAssetImpact']`
+
+**Protocol constants:** `MIN_DEPOSIT_USD = 10`, `MIN_BORROW_USD = 10.1`, `MARKET_COOLDOWN_LENGTH = 20 min`
 
 ## Transaction Flow Checklist
 
-For any write operation in v1:
+1. `resolveFreshToken(token)` — get current-provider CToken from `all_markets`
+2. Allowance check → prompt approval → `await safeWaitForTx(approve(...), asset)`
+3. Plugin approval (if zap/leverage) → `isPluginApproved()` → `approvePlugin()`
+4. Call SDK method with Decimal amounts
+5. `await safeWaitForTx(sdkCall, token)` → handles Monad nonce parsing error
+6. Invalidate queries (13 keys via `invalidateUserStateQueries`)
+7. Error handling — `txStatusForError(error)` marks BAD_DATA nonce errors as 'success'
 
-1. **Approval check** — call appropriate allowance check, prompt user for approval if needed, **wait for tx confirmation** (`await tx.wait()`) before proceeding
-2. **Plugin approval** (if zap/leverage) — `isPluginApproved()` → `approvePlugin()` if needed, wait for confirmation
-3. **Call SDK method** — pass Decimal amounts, SDK handles calldata encoding + oracleRoute
-4. **Handle TransactionResponse** — `await tx.wait()` for confirmation, then invalidate queries
-5. **Error handling** — SDK throws strings for: insufficient approval, collateral cap exceeded, stale oracle price, no signer, wrong leverage direction
+## WGW (What Goes Wrong)
 
-## References
+| Trigger | Wrong | Right | Conf |
+|---|---|---|---|
+| Display token amount | `Number()` or raw bigint | `FormatConverter.bigIntToDecimal(value, decimals)` | [H] |
+| Pass amount to contract | Pass Decimal directly | `FormatConverter.decimalToBigInt(amount, decimals)` | [H] |
+| Get asset price | `token.getPrice()` (share price) | `token.getPrice(true)` for asset, `(false)` for share | [H] |
+| Write to contract | `this.contract.deposit(...)` | `getCallData()` → `oracleRoute()` | [H] |
+| New query hook | Create new `setupChain()` call | `useSetupChainQuery({ select: ... })` | [H] |
+| Rate to APY | Divide by WAD | Divide by WAD **then** × SECONDS_PER_YEAR | [H] |
+| Utilization to percentage | Divide by WAD × SECONDS_PER_YEAR | Divide by WAD **only** — not annualized | [H] |
+| Displaying deposit APY | `getApy()` (base only) | `getDepositApy(token, opportunities, apyOverrides)` for deposits. `getBorrowCost()` for borrow. These use Merkl data | [H] |
+| Merkl `rewardsRecord.breakdowns[].value` | Treat as APR percentage points | Dollar value of daily rewards — use only for proportional splitting between reward tokens, never as a rate | [H] |
+| Merkl `opportunity.apr` for display | Use directly — it's the API's APR | Can diverge from campaign APRs (uncapped, stale). All rates through `getOpportunityRate()` / `computeMerklRates()` in `shared/api/merkl.ts` | [H] |
+| Importing SDK `getMerklDepositIncentives` / `getMerklBorrowIncentives` | Quick Merkl rate lookup | SDK reads `opp.apr` directly, bypassing shared rate logic. Use `getOpportunityRate` from `@/shared/api/merkl` or hooks (`useMerklNativeApy`, `useMerklBorrowApy`) | [H] |
+| Store-held CToken used for writes after wallet connect | Assume provider is current | `resolveFreshToken(token)` before every SDK write. CToken.provider is set at construction — if stored during signerless setupChain, provider is read-only. Resolves from module-level `all_markets` | [H] |
+| Leverage down type | Hardcode `'simple'` | Resolve via `getHighestPriority(leverageTypes)`, then fall back to `'simple'` only if vault/native-vault. SDK's `leverageDown` only handles `case 'simple'` but plugin approval must match the position's actual type | [H] |
+| App mutation wrapping SDK calls | `await sdk.method().then(tx => tx.wait())` | `await safeWaitForTx(sdk.method(), token)`. Handles Monad `nonce: null` BAD_DATA error where tx IS broadcast. Direct `tx.wait()` throws, losing the receipt | [H] |
+| Expected shares on zap/leverage | `virtualConvertToShares` everywhere | Vault types use `getVaultExpectedShares` two-hop. Exchange-rate drift → `BaseZapper__ExecutionError` | [M] |
+| SDK `is*` check method | Assume returns boolean | Some threw on failure pre-v3.7. Verify in source | [M] |
+| DEX rejection in leverage flow | Assume amounts correct | Verify `amountIn` denomination matches token being sold. `leverageDown` was passing borrow-token amount as collateral swap input | [M] |
+| SDK write reloading cache | Assume `oracleRoute` awaited | Check for missing `await` before `fetch*` calls. Without it, reads pre-tx state | [M] |
+| Get USD value of tokens | Manually multiply | `token.convertTokensToUsd(bigintAmount)` or `FormatConverter.bigIntTokensToUsd()` | [M] |
+| User remaining borrow capacity | Calculate manually | `market.userRemainingCredit` (has 0.1% buffer) | [M] |
+| Position health display | Raw bigint | `market.formatPositionHealth(bigint)` → Decimal (0=liquidation, null=∞) | [M] |
+| Safe multisig `tx.wait()` hangs via WalletConnect | Add generic timeout to `safeWaitForTx` | Timeout can't distinguish "Safe hung" from "low gas, slow confirm." Detect wallet type before the call and branch behavior — don't timeout after | [M] |
+| Determining if a token is actually borrowable | Check `token.isBorrowable` | Always true on all Curvance tokens — architectural, not a bug. Use `isBorrowableTokenWithDebtCap(token)` from `market/v2/utils` (checks `isBorrowable && getDebtCap(true) > 0`). Collateral-only token = `getDebtCap(true).eq(0)`. Bidirectional market = all tokens pass this check | [H] |
+| Check if borrowable | `token.isBorrowable` then cast | Type is already `BorrowableCToken` if `isBorrowable` | [L] |
+| getLiquidity(false) | Expect Decimal | Returns bigint → `toDecimal(token.getLiquidity(false), decimals)` | [L] |
+| Deposit approval target | Approve to position manager | Approve to `token.address` (cToken). `depositAndLeverage` → position manager | [L] |
+| Dashboard change rates | `getUserDepositsChange()` no arg | Must pass rate: `getUserDepositsChange('day')` | [L] |
+| FormatConverter rounding | Standard rounding | Always truncates (ROUND_DOWN + floor) | [L] |
+| CToken.getPrice() vs ERC20.getPrice() | Same behavior | CToken sync (bulk-loaded), ERC20 async (on-chain call) | [L] |
+| Slippage scale | Same for dex and position manager | Dex: raw BPS. Position manager: WAD. SDK converts via `bpsToBpsWad()` | [L] |
+| Approval types | One flow | Three: ERC20 allowance, plugin delegate, zap asset approval | [L] |
+| `approval_protection` flag | SDK guards are safety net | Defaults `false`. App-side checks are the only gate | [L] |
+| Consuming external API response as `BigInt()` | `BigInt(response.field)` — crashes on non-numeric | `safeBigInt()` from `validation.ts`. KyberSwap/Kuru responses are untrusted — `"null"`, `""`, floats all throw `SyntaxError` | [H] |
+| Using DEX quote `to` address for on-chain execution | Trust API response (Kuru had no check) | `validateRouterAddress()` against expected. KyberSwap validates; Kuru didn't AND no on-chain `KuruChecker` — double gap | [H] |
+| Casting external API string to `address` type | `value as address` — compile-time only | `validateAddress()` via ethers `getAddress()` at trust boundaries. The type alias has no runtime enforcement | [H] |
+| Adding or modifying a `fetch()` call in the SDK | Bare `fetch()` — no timeout, no size limit | `fetchWithTimeout()` from `validation.ts`. 15s default, composes with caller `AbortSignal` | [M] |
+| Adding or updating an npm dependency | Caret range (`^x.y.z`) | Exact pin for production deps. `@redstone-finance/sdk` controls axios via transitive deps. `.npmrc` `save-exact=true`. Always `npm ci` in CI | [H] |
 
-**File:** `Reference_CurvanceSDK.md` (2595 lines)
+## WWW (What Worked Well)
 
-| Section | Lines | Description |
+| Task type | Approach | Outcome |
 |---|---|---|
-| V1 Action Patterns | 646-797 | Mutation architecture, full-repay detection (≥99.9% → send 0), allowance buffering (151 lines, all behavioral) |
-| ProtocolReader API | 307-394 | On-chain reads, position health formula, max leverage calc, price asymmetry rule |
-| Setup Flow | 8-84 | Bootstrap sequence, sanitization, priority market selection |
-| Market API | 113-183 | Properties, user data, preview methods |
-| Market Computed Properties | 1049-1106 | Aggregate and user properties, change rate methods, borrow eligibility, position health formatting |
-| CToken API | 184-251 | Overload pattern, write caveats, leverage previews, oracleRoute internals — full signatures in `src/CToken.ts` |
-| CToken Synchronous Getters | 1107-1204 | Balance getters, price overloads, risk params, leverage state, token conversion, APY |
-| BorrowableCToken API | 252-306 | Debt, rates, IRM, liquidation |
-| BorrowableCToken Extended API | 1205-1289 | Rate getters, liquidity, safety overrides, async borrow methods, IRM access |
-| Data Shapes | 85-112 | Field semantics, WAD scaling, enums — full types in `src/types/protocolReader.ts` |
-| Helpers | 562-602 | Constants + utility functions |
-| V1 Consumption Layer | 613-645 | useSetupChainQuery + derived hooks |
-| Deposit Mutation | 1290-1338 | useDepositV2Mutation: zap + plugin approval + deposit/depositAsCollateral flow ⚠️ ZAP-001 annotation pending fix |
-| Standalone Leverage Mutations | 1339-1566 | Leverage up/down flows, action struct shapes, contract callbacks, **all known bugs** (SDK: expectedShares, previewLeverageDown; V2: display mismatches, dormant borrowToken). Load when debugging any leverage or display issue (227 lines, all behavioral — high ROI) |
-| Dashboard Queries | 1567-1628 | Overview, deposit list, loan list, balance, position health, rewards aggregation |
-| Cooldown System | 1629-1650 | cooldown getter, cooldownLength, expiresAt(), multiHoldExpiresAt() |
-| Position Preview Methods | 1651-1697 | previewPositionHealth family, previewLeverageUp return shape |
-| Token Task Group Map | 1698-1714 | Gamification task matching pattern |
-| FormatConverter Complete API | 1715-1796 | All 11 static methods, precision behavior, rounding, BPS/WAD utilities |
-| Type System & Constants | 1797-1847 | Semantic types (TokenInput, USD, USD_WAD, Percentage), all constants, helper function aliases |
-| Decimal System | 1848-1876 | token.decimals == asset.decimals always (by contract design), on-chain proof from ProtocolReader.sol, SDK convention for semantic clarity |
-| Shares ↔ Assets Conversion | 1877-1933 | Three layers (virtual/on-chain/user-input), which methods take assets vs shares, cToken ERC4626 insight |
-| Transaction Execution Architecture | 1934-2025 | Full pipeline: input → calldata → zap → approvals → oracleRoute → gas buffer → send |
-| Approval Architecture | 2026-2157 | Three approval types, approval_protection flag, v2 patterns, approval sequence per operation, convertToShares on-chain vs virtual vs raw |
-| maxRedemption Deep-Dive | 2158-2206 | 7 overloads, buffer/breakdown, dust sweep in redeem(), v2 withdraw pattern |
-| Repay Mechanics | 2207-2256 | fetchDebtBalanceAtTimestamp, full-repay detection (99.9%), 1% allowance buffer, amount=0 semantics |
-| Slippage Handling | 2257-2378 | Four-layer contract protection (dex minimum + SwapperLib `_swapSafe` oracle check + `checkSlippage` portfolio modifier + per-op checks), WAD format, protocol fee, expectedShares inconsistency, leverage-down specials |
-| ERC4626 Vault Layer | 2379-2448 | cTokens ARE ERC4626, vault-backed two-layer chain, expected shares calc, vault access methods |
-| Redstone Oracle Integration | 2449-2493 | Automatic price update prepend, 3/4 signer payload, multicall wrapping |
-| Zapper Architecture | 2494-2533 | Type mapping, calldata by type, deposit token discovery |
-| ERC20 API Patterns | 2534-2568 | balanceOf overloads, approve (null=unlimited), sync vs async price, data model |
-| ensureUnderlyingAmount | 2569-2595 | Silent balance cap on deposit — getZapBalance resolves input token by zap type, not always underlying |
-| Leverage Flow | 967-1006 | Leverage/deleverage mutation sequence |
-| Store Architecture | 798-833 | Zustand stores (deposit, borrow, manage-collateral) |
-| Validation Hooks | 834-867 | Borrow, repay, deposit, collateral |
-| Write Pattern | 1007-1029 | Oracle route / multicall pattern |
-| Leverage Utilities | 868-893 | Max leverage calc |
-| Position Preview Hooks | 894-919 | Size, debt, health previews |
-| Zap Flow | 946-966 | Deposit with token swap |
-| Borrow Utilities | 920-933 | Available borrow, debt balance |
-| Collateral Utilities | 934-945 | Remaining cap, balance calc |
-| Rewards / Incentives | 1030-1048 | Merkl rewards, milestones, native yields |
-| FormatConverter API | 395-415 | Method catalog |
-| ERC20 API | 416-428 | Data model, overload notes — standard methods in `src/ERC20.ts` |
-| ERC4626 API | 429-434 | Vault extension — full methods in `src/ERC4626.ts` |
-| OracleManager API | 435-444 | Oracle management |
-| NativeToken API | 445-462 | Native token wrapping |
-| PositionManager API | 463-490 | Position management |
-| Zapper API | 491-515 | Zap routing |
-| Calldata API | 516-526 | Calldata builder |
-| Redstone API | 527-539 | Oracle wrapper |
-| DexAggregators API | 540-561 | Quote flow (KyberSwap, Kuru) |
-| Retry Provider | 603-612 | Config |
+| SDK BAD_DATA diagnosis | Trace from error to sentinel address — native MON arrives typed as `'simple'` bypassing native guards | Found `zapTypes.push('native-simple')` was missing in CToken.ts constructor. Fix applied — now pushes 'native-simple' for wrapped native tokens |
+| Conversion confusion debugging | Follow the Conversion Decision Tree step by step | Eliminates guesswork about which format at which boundary |
+| New query hook | `useSetupChainQuery({ select })` pattern — never separate `setupChain()` | Zero unnecessary RPC calls, cache consistency |
+| SDK security audit | Map every `fetch()` → trace URL source, response validation, calldata flow to on-chain execution. Cross-ref on-chain calldata checkers against SDK-level assumptions | Found 5 unguarded trust boundaries in one pass. Kuru: no router validation + no on-chain checker = double gap. KyberSwap has both layers |
+
+## WWK (What We Know)
+
+| Principle | Evidence |
+|---|---|
+| SDK has two price scales that look similar but aren't — share price (`getPrice(false)`) vs asset price (`getPrice(true)`), BPS vs WAD slippage, sync CToken.getPrice vs async ERC20.getPrice. At every SDK boundary, verify which scale you're operating in | WGW: getPrice, slippage scale, FormatConverter rounding, rate vs utilization |
+| Every SDK write must go through `oracleRoute()` and every `oracleRoute()` must be `await`ed before any cache read. Direct contract calls bypass Redstone price updates; missing `await` reads pre-tx state | WGW: write to contract, cache reload. Transaction Flow Checklist |
+| The three approval types (ERC20 allowance, plugin delegate, zap asset) are independently checked and independently gated. `approval_protection` defaults false so app-side checks are the only gate. Each operation needs its specific approval sequence | WGW: approval types, approval_protection. V1 Mutation Rules |
+| Merkl API has three rate-adjacent fields that look similar but aren't — `opportunity.apr` (total APR, possibly uncapped), `rewardsRecord.total` (can differ from apr), `rewardsRecord.breakdowns[].value` (dollar amounts, not APR). Every Merkl rate must flow through `getOpportunityRate()` / `computeMerklRates()` in `shared/api/merkl.ts` — never read these fields directly | WGW: breakdown.value as APR, opportunity.apr divergence, SDK getMerkl* bypass |
+| Every app mutation has two infrastructure layers between store and SDK: `resolveFreshToken` (stale provider) and `safeWaitForTx` (Monad nonce parsing). These aren't optional wrappers — without them, mutations silently fail on wallet connect or throw on successful broadcasts. Documentation that shows bare `token.method()` or `tx.wait()` in mutation context is outdated | WGW: store-held CToken, mutation wrapping. Transaction Flow Checklist |
+| The SDK has three external trust boundaries with different security postures: RPC (retried via proxy, deterministic errors filtered), Curvance API (URL-injectable, graceful degradation), DEX APIs (response calldata forwarded to on-chain — highest risk). Each needs its own validation layer (`validation.ts`). DEX calldata is validated on-chain by calldata checkers where they exist — but Kuru has no checker, only KyberSwap does. `@redstone-finance/sdk` pulls axios into the oracle price path via `requestDataPackages` | WGW: BigInt on API, router validation, address casting, fetch timeout, npm pinning. Chain config: `KyberSwapChecker` exists, no `KuruChecker` |
+
+## Cross-References
+
+| Topic | Skill |
+|---|---|
+| App codebase, module map, queries | Skill_CurvanceApp.md |
+| UI conventions, color tokens | Skill_CurvanceUI.md |
+| Display bug patterns, QA | Skill_CurvanceQA.md |

@@ -48,12 +48,6 @@ export class BorrowableCToken extends CToken {
         return inUSD ? this.convertTokensToUsd(this.cache.liquidity) : this.cache.liquidity;
     }
 
-    getBorrowRate(inPercentage: true): Percentage;
-    getBorrowRate(inPercentage: false): bigint;
-    getBorrowRate(inPercentage: boolean) {
-        return inPercentage ? Decimal(this.cache.borrowRate).div(WAD).mul(SECONDS_PER_YEAR) : this.cache.borrowRate;
-    }
-
     getPredictedBorrowRate(inPercentage: true): Percentage;
     getPredictedBorrowRate(inPercentage: false): bigint;
     getPredictedBorrowRate(inPercentage: boolean) {
@@ -64,12 +58,6 @@ export class BorrowableCToken extends CToken {
     getUtilizationRate(inPercentage: false): bigint;
     getUtilizationRate(inPercentage: boolean) {
         return inPercentage ? Decimal(this.cache.utilizationRate).div(WAD) : this.cache.utilizationRate;
-    }
-
-    getSupplyRate(inPercentage: true): Percentage;
-    getSupplyRate(inPercentage: false): bigint;
-    getSupplyRate(inPercentage: boolean) {
-        return inPercentage ? Decimal(this.cache.supplyRate).div(WAD).mul(SECONDS_PER_YEAR) : this.cache.supplyRate;
     }
 
     borrowChange(amount: USD, rateType: ChangeRate) {
@@ -187,7 +175,7 @@ export class BorrowableCToken extends CToken {
         const irm = await this.dynamicIRM();
         const assetsHeld = this.totalAssets
         const debt = await this.contract.marketOutstandingDebt();
-        const fee = await this.contract.interestFee();
+        const fee = await this.fetchInterestFee();
         const supplyRate = (await irm.supplyRate(assetsHeld, debt, fee));
         this.cache.supplyRate = supplyRate;
         return supplyRate;
@@ -207,7 +195,7 @@ export class BorrowableCToken extends CToken {
         return this.oracleRoute(calldata);
     }
 
-    async interestFee() {
+    async fetchInterestFee() {
         return this.contract.interestFee();
     }
 

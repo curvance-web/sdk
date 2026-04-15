@@ -4,11 +4,13 @@ import { DynamicMarketData, ProtocolReader, StaticMarketData, UserMarket } from 
 import { AccountSnapshot, CToken } from "./CToken";
 import abi from '../abis/MarketManagerIsolated.json';
 import { Decimal } from "decimal.js";
-import { address, curvance_provider, Percentage, TokenInput, USD, USD_WAD } from "../types";
+import { address, curvance_provider, Percentage, TokenInput, USD } from "../types";
 import { OracleManager } from "./OracleManager";
-import { IncentiveResponse, Incentives, MilestoneResponse, Milestones, setup_config } from "../setup";
+import { setup_config } from "../setup";
+import { fetchMerklOpportunities, MerklOpportunity } from "../integrations/merkl";
 import { BorrowableCToken } from "./BorrowableCToken";
 import FormatConverter from "./FormatConverter";
+import { Api, IncentiveResponse, Incentives, MilestoneResponse, Milestones } from "./Api";
 
 export type MarketToken = CToken | BorrowableCToken;
 export type PluginTypes = 'zapper' | 'positionManager';
@@ -409,9 +411,14 @@ export class Market {
         newLeverage: Decimal,
         currentLeverage: Decimal
     ) {
+        // Full deleverage always closes to zero debt → infinite position health aka null.
+        if (newLeverage.equals(1)) {
+            return null;
+        }
+
         const { collateralAssetReduction } = deposit_ctoken.previewLeverageDown(newLeverage, currentLeverage);
         const repayUsd = deposit_ctoken.convertTokensToUsd(collateralAssetReduction, true);
-        const repayTokens = borrow_ctoken.convertUsdToTokens(repayUsd, false);
+        const repayTokens = borrow_ctoken.convertUsdToTokens(repayUsd, true);
 
         return this.previewPositionHealth(
             deposit_ctoken,
@@ -426,14 +433,30 @@ export class Market {
     async previewPositionHealthLeverageUp(
         deposit_ctoken: CToken,
         borrow_ctoken: BorrowableCToken,
-        newLeverage: Decimal
+        newLeverage: Decimal,
+        depositAssets?: bigint
     ) {
-        const { borrowAmount } = deposit_ctoken.previewLeverageUp(newLeverage, borrow_ctoken);
+        const { borrowAmount } = deposit_ctoken.previewLeverageUp(newLeverage, borrow_ctoken, depositAssets);
+        // borrowAmount is the reduced amount sent to the contract — this is both
+        // what enters the vault/swap (becomes collateral) and what the user owes (debt).
+        // Use price-based conversion for collateral increase — this matches how the
+        // on-chain health reader values positions (via oracle prices, not vault rates).
+        const borrowUsd = borrowAmount.mul(borrow_ctoken.getPrice(true));
+        const collateralFromBorrow = borrowUsd.div(deposit_ctoken.getPrice(true));
+
+        // Total collateral increase = initial deposit + borrowed amount swapped to collateral.
+        // The on-chain reader starts from the user's current position, so the deposit
+        // must be included or the preview will undercount collateral (showing ~0% health).
+        const depositInTokens = depositAssets
+            ? FormatConverter.bigIntToDecimal(depositAssets, deposit_ctoken.asset.decimals)
+            : Decimal(0);
+        const collateralIncrease = collateralFromBorrow.add(depositInTokens);
+
         return this.previewPositionHealth(
             deposit_ctoken,
             borrow_ctoken,
-            false,
-            Decimal(0),
+            true,
+            collateralIncrease,
             false,
             borrowAmount
         );
@@ -462,8 +485,12 @@ export class Market {
         const provider = validateProviderAsSigner(this.provider);
         const user = provider.address as address;
 
-        const onchain_collateral_amount = deposit_ctoken ? deposit_ctoken.convertTokenInputToShares(collateral_amount) : 0n;
-        const onchain_debt_amount = borrow_ctoken ? borrow_ctoken.convertTokenInputToShares(debt_amount) : 0n;
+        // Pass underlying asset amounts — NOT shares.
+        // The on-chain reader's _collateralValue calls previewDeposit(assets) internally,
+        // and _debtValue prices assets with the underlying token's oracle price.
+        // Passing shares here would cause double-conversion (shares treated as assets).
+        const onchain_collateral_amount = deposit_ctoken ? FormatConverter.decimalToBigInt(collateral_amount, deposit_ctoken.asset.decimals) : 0n;
+        const onchain_debt_amount = borrow_ctoken ? FormatConverter.decimalToBigInt(debt_amount, borrow_ctoken.asset.decimals) : 0n;
 
         const data = await this.reader.getPositionHealth(
             this.address,
@@ -485,6 +512,12 @@ export class Market {
     }
 
     formatPositionHealth(positionHealth: bigint): Percentage | null {
+        // Defensive edge case handling where we explicitly update UINT256_MAX to
+        // null return which gets processed as infinity position health on the frontend.
+        if (positionHealth === UINT256_MAX) {
+            return null;
+        }
+
         return Decimal(positionHealth).div(WAD_DECIMAL).sub(1);
     }
 
@@ -640,43 +673,6 @@ export class Market {
         return cooldowns;
     }
 
-    static async fetchNativeYields(): Promise<{ symbol: string, apy: number }[]> {
-        if(setup_config.api_url == null) {
-            console.error("You must have an API URL setup to fetch native yields.");
-            return [];
-        }
-
-        let chain: string = setup_config.chain;
-        if(chain == 'monad-mainnet') {
-            chain = 'monad';
-        }
-
-        if(['monad'].includes(chain)) {
-            try {
-                const res = await fetch(`${setup_config.api_url}/v1/${chain}/native_apy`);
-                const yields = await res.json() as {
-                    "native_apy": {
-                        symbol: string,
-                        apy: number
-                    }[]
-                };
-    
-                // Add validation
-                if (!yields || !yields.native_apy || !Array.isArray(yields.native_apy)) {
-                    console.error("Invalid API response structure for native yields");
-                    return [];
-                }
-    
-                return yields.native_apy;
-            } catch (error) {
-                console.error("Error fetching native yields:", error);
-                return [];
-            }
-        } else {
-            return [];
-        }
-
-    }
     /**
      * Grab all the markets available and set them up using the protocol reader efficient RPC calls / API cached calls
      * @param reader  - instace of the ProtocolReader class
@@ -689,7 +685,11 @@ export class Market {
         const all_data = await reader.getAllMarketData(user as address);
         const deploy_keys: string[] = Object.keys(setup_config.contracts.markets) as (keyof typeof setup_config.contracts.markets)[];
         // Filter out USDC — DeFiLlama incorrectly returns YZM vault yield labeled as USDC
-        const yields = (await Market.fetchNativeYields()).filter(y => y.symbol.toUpperCase() !== 'USDC');
+        const [yields, merklLendOpps, merklBorrowOpps] = await Promise.all([
+            Api.fetchNativeYields().then(y => y.filter(y => y.symbol.toUpperCase() !== 'USDC')),
+            fetchMerklOpportunities({ action: 'LEND' }).catch(() => [] as MerklOpportunity[]),
+            fetchMerklOpportunities({ action: 'BORROW' }).catch(() => [] as MerklOpportunity[]),
+        ]);
 
         let markets: Market[] = [];
         for(let i = 0; i < all_data.staticMarket.length; i++) {
@@ -746,14 +746,19 @@ export class Market {
             }
 
             for(const token of market.tokens) {
-                // Hardcode YZM native yield — DeFiLlama incorrectly labels this pool as USDC
-                if(token.asset.symbol.toUpperCase() === 'YZM') {
-                    token.nativeYield = 0.083;
-                    continue;
+                const lendOpp = merklLendOpps.find(o => o.identifier.toLowerCase() === token.address.toLowerCase());
+                if(lendOpp != undefined) {
+                    token.incentiveSupplyApy = new Decimal(lendOpp.apr / 100);
                 }
+
+                const borrowOpp = merklBorrowOpps.find(o => o.identifier.toLowerCase() === token.address.toLowerCase());
+                if(borrowOpp != undefined) {
+                    token.incentiveBorrowApy = new Decimal(borrowOpp.apr / 100);
+                }
+
                 const api_yield = yields.find(y => y.symbol.toUpperCase() == token.asset.symbol.toUpperCase());
                 if(api_yield != undefined) {
-                    token.nativeYield = api_yield.apy / 100;
+                    token.nativeApy = new Decimal(api_yield.apy / 100);
                 }
             }
 

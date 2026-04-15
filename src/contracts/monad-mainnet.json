@@ -210,11 +210,36 @@
         "AUSD": "0xcdc9D2c4EaD8f2A9FD3D6F5a00bA4e6001ab7898"
       },
       "AUSD-DynamicIRM": "0xC813497D710CF30f7eEF73eF5dAC53c76fb821E6"
+    },
+    "vUSD | AUSD": {
+      "address": "0x2DB9AB1bB00d7000b21A2EbcE7D1a9b91F351E72",
+      "plugins": {
+        "simplePositionManager": "0xCb1709fAF66A73b4f6026b531Bef9AF971368f50"
+      },
+      "vUSD-DynamicIRM": "0x6439719873A332AAfb88Bd33e324E597e750c7Bd",
+      "tokens": {
+        "vUSD": "0x42369AFe4bA4225b800b8024Acc5F14f42A3836C",
+        "AUSD": "0x4806902Ec0320e5334c2B2679FFB58C830348F1c"
+      },
+      "AUSD-DynamicIRM": "0xb526Fa1D4e8D680FFDCAcdd977C2c912dD1CA43A"
+    },
+    "eBTC | WBTC": {
+      "address": "0xBc4cd7bbd8d38027A88838B88BA04561FA778C35",
+      "plugins": {
+        "simplePositionManager": "0x5e339724818c4b46E1Bc6966FeB4ea2924Ca17D9"
+      },
+      "eBTC-DynamicIRM": "0x2A0Ed67E41662339281A9c9697241d964152B782",
+      "tokens": {
+        "eBTC": "0x2840772E14fFbe337aB966727B7D1Dd09BDc76E4",
+        "WBTC": "0xdB3e888c3b50771821226d30Ab6eC14eB5ba85bA"
+      },
+      "WBTC-DynamicIRM": "0x95B961B9aD06dB25831FcdA3c7A79b1EB7c3AFA8"
     }
   },
-  "ProtocolReader": "0x0c791636db1561E1f5aDD5Bf3994c95F14f272fF",
+  "ProtocolReader": "0xC38ee49A22c7A7888f51F0Cc9a3663636a0deEa7",
   "CombinedAggregator-ezETH": "0xd5F84C4497621768f3F08b65ad7019BdF183b1fd",
   "CombinedAggregator-earnAUSD": "0xf80CC9965d260d7cD96E41b9734F031279dCDf2f",
   "DAOTimelock": "0x2677738657F27e1A3591E00AD7E5a78807688C08",
-  "VaultAggregator-USDC-YZM": "0x7cB60D0Ca3B3dd08bA2aE5DF6686beAd289b1cF4"
+  "VaultAggregator-USDC-YZM": "0x7cB60D0Ca3B3dd08bA2aE5DF6686beAd289b1cF4",
+  "VaultAggregator-AUSD-vUSD": "0x084BC7bE1326Ee1FD5387a4A48fD6999A79BFa8b"
 }

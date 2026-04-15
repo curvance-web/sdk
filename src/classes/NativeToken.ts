@@ -1,8 +1,9 @@
 import Decimal from "decimal.js";
 import { ChainRpcPrefix, validateProviderAsSigner, WAD } from "../helpers";
-import { chain_config, setup_config } from "../setup";
+import { setup_config } from "../setup";
 import { address, curvance_provider, TokenInput, USD } from "../types";
 import { OracleManager } from "./OracleManager";
+import { chain_config } from "../chains";
 
 export class NativeToken {
     name   : string;

@@ -1,0 +1,108 @@
+import { setup_config } from "../setup";
+import { address } from "../types";
+import { fetchWithTimeout } from "../validation";
+
+export type IncentiveResponse = {
+    market: address,
+    type: string,
+    rate: number,
+    description: string,
+    image: string
+};
+
+export type MilestoneResponse = {
+    market: address;
+    tvl: number;
+    multiplier: number;
+    fail_multiplier: number;
+    chain_network: string;
+    start_date: string;
+    end_date: string;
+    duration_in_days: number;
+}
+export type Milestones = { [key: string]: MilestoneResponse };
+export type Incentives = { [key: address]: Array<IncentiveResponse> };
+
+
+export class Api {
+    private url: string;
+    
+    public constructor() {
+        this.url = setup_config.api_url!;
+    }
+
+    static async fetchNativeYields(): Promise<{ symbol: string, apy: number }[]> {
+        const { api_url } = setup_config;
+        let chain: string = setup_config.chain;
+
+        if(api_url == null) {
+            console.error("You must have an API URL setup to fetch native yields.");
+            return [];
+        }
+
+        if(chain == 'monad-mainnet') {
+            chain = 'monad';
+        }
+
+        if(['monad'].includes(chain)) {
+            try {
+                const res = await fetchWithTimeout(`${api_url}/v1/${chain}/native_apy`);
+                const yields = await res.json() as {
+                    "native_apy": {
+                        symbol: string,
+                        apy: number
+                    }[]
+                };
+    
+                // Add validation
+                if (!yields || !yields.native_apy || !Array.isArray(yields.native_apy)) {
+                    console.error("Invalid API response structure for native yields");
+                    return [];
+                }
+    
+                return yields.native_apy;
+            } catch (error) {
+                console.error("Error fetching native yields:", error);
+                return [];
+            }
+        } else {
+            return [];
+        }
+    }
+
+    static async getRewards() {
+        const { chain, api_url } = setup_config
+
+        let milestones: Milestones = {};
+        let incentives: Incentives = {};
+
+        let rewards;
+        try {
+            rewards = await fetchWithTimeout(`${api_url}/v1/rewards/active/${chain}`).then(res => res.json()) as {
+                milestones: Array<MilestoneResponse>
+                incentives: Array<IncentiveResponse>
+            };
+        } catch(e) {
+            console.error("Failed to fetch rewards data from API:", e);
+            rewards = {
+                milestones: [],
+                incentives: []
+            };
+        }
+
+        for(const milestone of rewards.milestones) {
+            milestones[milestone.market] = milestone;
+        }
+
+        for(const incentive of rewards.incentives) {
+            const market = incentive.market as address;
+            if(!(market in incentives)) {
+                incentives[market] = [];
+            }
+
+            incentives[market]!.push(incentive);
+        }
+
+        return { milestones, incentives };
+    }
+}

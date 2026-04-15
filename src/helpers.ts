@@ -1,9 +1,10 @@
 import { Contract, parseUnits } from "ethers";
 import { Decimal } from "decimal.js";
 import { address, bytes, curvance_provider, curvance_signer, Percentage } from "./types";
-import { chains } from "./chains";
-import { chain_config, setup_config } from "./setup";
+import { chains } from "./contracts";
+import { setup_config } from "./setup";
 import FormatConverter from "./classes/FormatConverter";
+import { chain_config } from "./chains";
 
 // Set Decimal.js precision to handle large numbers
 Decimal.set({ precision: 50 });
@@ -154,6 +155,127 @@ async function tryAddGasBuffer(method: any, args: any[], bufferPercent: number):
  * @param bufferPercent The percentage buffer to add (default 10%)
  * @returns The same contract but with automatic gas buffering
  */
+// ---------------------------------------------------------------------------
+// Yield calculation helpers
+// ---------------------------------------------------------------------------
+
+export type MerklOpportunityLike = {
+    apr: number;
+    identifier: string;
+    tokens: { address: string }[];
+};
+
+export type ApyOverrides = Record<string, { value: number }>;
+
+/**
+ * Returns the native yield for a token — the rate provided by the asset issuer.
+ * When `nativeYield` is nonzero it already includes the interest component,
+ * so we return it directly.  Otherwise we fall back to any static APY override.
+ */
+export function getNativeYield(
+    token: { nativeYield: number; asset: { symbol: string } },
+    apyOverrides?: ApyOverrides,
+): Decimal {
+    if (token.nativeYield !== 0) return new Decimal(token.nativeYield);
+    const symbol = token.asset.symbol.toLowerCase();
+    return new Decimal(apyOverrides?.[symbol]?.value ?? 0);
+}
+
+/**
+ * Returns the interest yield — the lending APY earned on Curvance.
+ */
+export function getInterestYield(
+    token: { getApy(): Decimal },
+): Decimal {
+    return token.getApy();
+}
+
+/**
+ * Returns the Merkl incentive APY for a *deposit* token.
+ * Matches opportunities whose `tokens` array contains the given address.
+ */
+export function getMerklDepositIncentives(
+    tokenAddress: string,
+    opportunities: MerklOpportunityLike[] | undefined,
+): Decimal {
+    if (!opportunities?.length) return new Decimal(0);
+
+    const address = tokenAddress.toLowerCase();
+
+    const relevant = opportunities.filter((opp) =>
+        opp.tokens.some((t) => t.address.toLowerCase() === address),
+    );
+
+    if (!relevant.length) return new Decimal(0);
+
+    let bestApr = 0;
+    for (const opp of relevant) {
+        for (const t of opp.tokens) {
+            if (t.address.toLowerCase() === address) {
+                bestApr = Math.max(bestApr, opp.apr ?? 0);
+            }
+        }
+    }
+
+    return new Decimal(bestApr / 100);
+}
+
+/**
+ * Returns the Merkl incentive APY for a *borrow* token.
+ * Matches opportunities whose `identifier` equals the given address.
+ */
+export function getMerklBorrowIncentives(
+    tokenAddress: string,
+    opportunities: MerklOpportunityLike[] | undefined,
+): Decimal {
+    if (!opportunities?.length) return new Decimal(0);
+
+    const address = tokenAddress.toLowerCase();
+
+    const relevant = opportunities.filter(
+        (opp) => opp.identifier.toLowerCase() === address,
+    );
+
+    if (!relevant.length) return new Decimal(0);
+
+    const bestApr = relevant.reduce((max, opp) => Math.max(max, opp.apr ?? 0), 0);
+
+    return new Decimal(bestApr / 100);
+}
+
+/**
+ * Returns the total deposit APY for a token (native + interest + merkl).
+ * When `nativeYield` is nonzero it already includes interest, so we use it directly.
+ */
+export function getDepositApy(
+    token: { nativeYield: number; getApy(): Decimal; asset: { symbol: string }; address: string },
+    opportunities: MerklOpportunityLike[] | undefined,
+    apyOverrides?: ApyOverrides,
+): Decimal {
+    const base = token.nativeYield !== 0
+        ? new Decimal(token.nativeYield)
+        : token.getApy().add(new Decimal(apyOverrides?.[token.asset.symbol.toLowerCase()]?.value ?? 0));
+    const merkl = getMerklDepositIncentives(token.address, opportunities);
+    return base.add(merkl);
+}
+
+/**
+ * Returns the net borrow cost for a token (borrow rate − merkl incentives).
+ * Can be negative when Merkl rewards exceed the borrow rate.
+ */
+export function getBorrowCost(
+    token: { getBorrowRate(inPercentage: true): Decimal; address: string },
+    opportunities: MerklOpportunityLike[] | undefined,
+): Decimal {
+    const borrowRate = token.getBorrowRate(true);
+    const merkl = getMerklBorrowIncentives(token.address, opportunities);
+    return new Decimal(borrowRate).sub(merkl);
+}
+
+// ---------------------------------------------------------------------------
+// Gas helpers
+// ---------------------------------------------------------------------------
+
 export function contractWithGasBuffer<T extends object>(contract: T, bufferPercent = 10): T {
     return new Proxy(contract, {
         get(target, methodName, receiver) {

@@ -58,12 +58,12 @@ export class ERC20 {
     async balanceOf(account: address, in_token_input: boolean = false): Promise<bigint | TokenInput> {
         const amount = await this.contract.balanceOf(account);
 
-        const decimals = this.decimals ?? await this.contract.decimals();
+        const decimals = this.decimals ?? await this.fetchDecimals();
         return in_token_input ? FormatConverter.bigIntToDecimal(amount, decimals) : amount;
     }
 
     async transfer(to: address, amount: TokenInput) {
-        const decimals = this.decimals ?? await this.contract.decimals();
+        const decimals = this.decimals ?? await this.fetchDecimals();
         const tokens = toBigInt(amount, decimals);
         return this.contract.transfer(to, tokens);
     }

@@ -21,7 +21,7 @@ export class OracleManager {
     }
 
     async getPrice(asset: address, inUSD: boolean, getLower: boolean) {
-        const [price, errorCode]: bigint[] = await this.contract.getPrice(asset, inUSD, getLower);
+        const [price, errorCode] = await this.contract.getPrice(asset, inUSD, getLower) as [bigint, bigint];
 
         if(errorCode != 0n) {
             let addon_msg = "unknown";

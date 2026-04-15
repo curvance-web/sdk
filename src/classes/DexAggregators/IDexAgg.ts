@@ -7,7 +7,9 @@ export type QuoteArgs = [
     tokenIn: string,
     tokenOut: string,
     amount: bigint,
-    slippage: bigint
+    slippage: bigint,
+    feeBps?: bigint,
+    feeReceiver?: address,
 ];
 
 export type Quote = {

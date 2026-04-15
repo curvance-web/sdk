@@ -5,6 +5,8 @@ import { toBigInt, toDecimal, validateProviderAsSigner, WAD } from "../../helper
 import { ZapToken } from "../CToken";
 import { Swap } from "../Zapper";
 import IDexAgg from "./IDexAgg";
+import { safeBigInt, validateAddress, validateRouterAddress, fetchWithTimeout, validateSlippageBps } from "../../validation";
+import FormatConverter from "../FormatConverter";
 
 interface KuruJWTResponse {
     token: string;
@@ -70,7 +72,7 @@ export class Kuru implements IDexAgg {
             }
         }
 
-        const resp = await fetch(`${this.api}/generate-token`, {
+        const resp = await fetchWithTimeout(`${this.api}/generate-token`, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -97,7 +99,10 @@ export class Kuru implements IDexAgg {
         const requests = cached_requests.get(wallet) || [];
         const windowStart = now - 2;
 
+        // Trim old entries to prevent unbounded growth
         const recentRequests = requests.filter(timestamp => timestamp > windowStart);
+        cached_requests.set(wallet, recentRequests);
+
         if(recentRequests.length >= this.rps) {
             const earliestRequest = Math.min(...recentRequests);
             const sleepTime = (earliestRequest + 2) - now;
@@ -114,7 +119,7 @@ export class Kuru implements IDexAgg {
             endpoint += `&q=${encodeURIComponent(query)}`;
         }
 
-        const resp = await fetch(endpoint, {
+        const resp = await fetchWithTimeout(endpoint, {
             method: "GET",
             headers: {
                 "Content-Type": "application/json",
@@ -155,16 +160,24 @@ export class Kuru implements IDexAgg {
         
         let tokens: ZapToken[] = [];
         for(const token of list.data.data) {
+            let tokenAddress: address;
+            try {
+                tokenAddress = validateAddress(token.address, 'Kuru token list');
+            } catch {
+                console.warn(`Skipping token with invalid address from Kuru: ${token.address}`);
+                continue;
+            }
+
             const erc20 = new ERC20(
                 provider, 
-                token.address as address,
+                tokenAddress,
                 {
-                    address: token.address as address,
+                    address: tokenAddress,
                     name: token.name,
                     symbol: token.ticker,
-                    decimals: BigInt(token.decimals ?? 18),
-                    totalSupply: BigInt(token.total_supply ?? 0),
-                    balance: BigInt(token.balance ?? 0),
+                    decimals: safeBigInt(token.decimals ?? 18, 'Kuru token decimals'),
+                    totalSupply: safeBigInt(token.total_supply ?? 0, 'Kuru token totalSupply'),
+                    balance: safeBigInt(token.balance ?? 0, 'Kuru token balance'),
                     image: token.imageurl,
                     price: Decimal(token.last_price).div(WAD)
                 },
@@ -192,26 +205,28 @@ export class Kuru implements IDexAgg {
         return Math.floor(Date.now() / 1000);
     }
 
-    async quoteAction(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint) {
-        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage);
+    async quoteAction(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
+        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         const action = {
             inputToken: tokenIn,
             inputAmount: BigInt(amount),
             outputToken: tokenOut,
             target: quote.to,
-            slippage: slippage ?? 0n,
+            slippage: slippage ? FormatConverter.bpsToBpsWad(slippage) : 0n,
             call: quote.calldata
         } as Swap;
 
         return { action, quote };
     }
 
-    async quoteMin(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint) {
-        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage);
+    async quoteMin(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
+        const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         return quote.out;
     }
 
-    async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint) {
+    async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
+        validateSlippageBps(slippage, 'Kuru quote');
+
         await this.loadJWT(wallet);
         await this.rateLimitSleep(wallet);
 
@@ -229,13 +244,23 @@ export class Kuru implements IDexAgg {
             tokenIn: tokenIn,
             tokenOut: tokenOut,
             amount: amount.toString(),
-            referrerAddress: this.dao,
-            referrerFeeBps: 10,
-            slippage_tolerance: Number(slippage)
+            slippage_tolerance: Number(slippage),
         };
 
+        // Fee plumbing: Kuru charges via referrerAddress + referrerFeeBps,
+        // mirroring KyberSwap's currency_in fee model. We only include these
+        // fields when a fee is actually being charged — Kuru's API treats
+        // missing fields as "no referrer fee" which matches the NO_FEE_POLICY
+        // semantics. The previous hardcoded `referrerFeeBps: 10` to `this.dao`
+        // is removed so Kuru and KyberSwap behave consistently under the
+        // same fee policy.
+        if (feeBps !== undefined && feeBps > 0n && feeReceiver) {
+            payload.referrerAddress = feeReceiver;
+            payload.referrerFeeBps = Number(feeBps);
+        }
+
         cached_requests.set(wallet, (cached_requests.get(wallet) || []).concat(this.getCurrentTime()));
-        const resp = await fetch(`${this.api}/quote`, {
+        const resp = await fetchWithTimeout(`${this.api}/quote`, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -245,16 +270,29 @@ export class Kuru implements IDexAgg {
         });
 
         if(!resp.ok) {
+            // Clear cached JWT on auth failure so next call fetches a fresh token
+            if(resp.status === 401 || resp.status === 403) {
+                cached_jwt.delete(wallet);
+                this.jwt = null;
+            }
             throw new Error(`Failed to fetch quote: ${resp.status} ${resp.statusText}`);
         }
 
         const data = await resp.json() as KuruQuoteResponse;
 
+        // Validate router address matches expected — prevents a compromised API
+        // from routing swaps through an arbitrary contract
+        const validatedRouter = validateRouterAddress(data.transaction.to, this.router, 'Kuru');
+
+        // Normalize calldata prefix — Kuru may or may not include 0x
+        const rawCalldata = data.transaction.calldata;
+        const calldata = rawCalldata.startsWith('0x') ? rawCalldata : `0x${rawCalldata}`;
+
         return {
-            to: data.transaction.to as address,
-            calldata: `0x${data.transaction.calldata}` as bytes,
-            min_out: BigInt(data.minOut),
-            out: BigInt(data.output)
+            to: validatedRouter,
+            calldata: calldata as bytes,
+            min_out: safeBigInt(data.minOut, 'Kuru quote minOut'),
+            out: safeBigInt(data.output, 'Kuru quote output')
         };
     }
 
