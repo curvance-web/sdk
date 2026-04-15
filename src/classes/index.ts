@@ -11,4 +11,4 @@ export * from './BorrowableCToken';
 export * from './NativeToken';
 export * from './PositionManager';
 export * from './DexAggregators';
-export * from './FormatConverter';
+export { default as FormatConverter } from './FormatConverter';
