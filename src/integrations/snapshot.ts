@@ -100,29 +100,15 @@ export async function takePortfolioSnapshot(
     options?: { refresh?: boolean }
 ): Promise<PortfolioSnapshot> {
     if (options?.refresh && all_markets.length > 0) {
-        // Fetch all dynamic + user data in 2 RPC calls (not 2×N).
-        // Each market's reload fetches ALL markets then filters — so we call
-        // once via the shared reader and distribute results ourselves.
+        // Fetch all dynamic + user data in 1 combined ProtocolReader call.
         const reader = all_markets[0]!.reader;
-        const [dynamicData, userData] = await Promise.all([
-            reader.getDynamicMarketData(),
-            reader.getUserData(account),
-        ]);
+        const { dynamicMarket, userData } = await reader.getAllDynamicState(account);
 
         for (const market of all_markets) {
-            const dynamic = dynamicData.find((m) => m.address === market.address);
+            const dynamic = dynamicMarket.find((m) => m.address === market.address);
             const user = userData.markets.find((m) => m.address === market.address);
             if (!dynamic || !user) continue;
-
-            market.cache.dynamic = dynamic;
-            market.cache.user = user;
-
-            for (const token of market.tokens) {
-                const dynToken = dynamic.tokens.find((t) => t.address === token.address);
-                const usrToken = user.tokens.find((t) => t.address === token.address);
-                if (dynToken) token.cache = { ...token.cache, ...dynToken };
-                if (usrToken) token.cache = { ...token.cache, ...usrToken };
-            }
+            market.applyState(dynamic, user);
         }
     }
 

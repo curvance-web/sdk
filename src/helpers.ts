@@ -65,8 +65,7 @@ export function toBigInt(value: number | Decimal, decimals: bigint): bigint {
     return FormatConverter.decimalToBigInt(Decimal(value), decimals);
 }
 
-export function getChainConfig() {
-    const chain = setup_config.chain;
+export function getChainConfig(chain: ChainRpcPrefix = setup_config.chain) {
     const config = chain_config[chain];
     if (!config) {
         throw new Error(`No configuration found for chain ${chain}`);
@@ -82,6 +81,25 @@ export function validateProviderAsSigner(provider: curvance_provider) {
     }
 
     return provider as curvance_signer;
+}
+
+export function requireSigner(signer: curvance_signer | null | undefined): curvance_signer {
+    if (!signer) {
+        throw new Error("Provider is not a signer, therefor this action is not available. Please connect a wallet to execute this action.");
+    }
+
+    return signer;
+}
+
+export function requireAccount(
+    account: address | null | undefined,
+    signer: curvance_signer | null | undefined = null,
+): address {
+    if (account) {
+        return account;
+    }
+
+    return requireSigner(signer).address as address;
 }
 
 export function contractSetup<I>(provider: curvance_provider, contractAddress: address, abi: any): Contract & I {
@@ -119,6 +137,20 @@ function calculateGasWithBuffer(estimatedGas: bigint, bufferPercent: number): bi
  */
 function canEstimateGas(method: any): boolean {
     return typeof method?.estimateGas === 'function';
+}
+
+function supportsGasOverrides(contract: any, methodName: string | symbol): boolean {
+    if (typeof methodName !== "string") {
+        return false;
+    }
+
+    try {
+        const fragment = contract?.interface?.getFunction(methodName);
+        const stateMutability = fragment?.stateMutability;
+        return stateMutability !== "view" && stateMutability !== "pure";
+    } catch {
+        return false;
+    }
 }
 
 /**
@@ -289,8 +321,12 @@ export function contractWithGasBuffer<T extends object>(contract: T, bufferPerce
             // Return a wrapped version of the method
             return async (...args: any[]) => {
                 try {
-                    // Try to add gas buffer before calling the method
-                    await tryAddGasBuffer(originalMethod, args, bufferPercent);
+                    // Gas estimation is only useful on state-changing methods.
+                    // Estimating read-only functions adds an unnecessary RPC round-trip
+                    // and breaks fork tests when estimateGas is restricted or slow.
+                    if (supportsGasOverrides(target, methodName)) {
+                        await tryAddGasBuffer(originalMethod, args, bufferPercent);
+                    }
 
                     // Call the original method with potentially modified args
                     return await originalMethod.apply(target, args);

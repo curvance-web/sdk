@@ -1,9 +1,9 @@
 import { Contract, TransactionResponse } from "ethers";
-import { address, curvance_provider, Percentage, TokenInput, USD, USD_WAD } from "../types";
+import { address, curvance_read_provider, Percentage, TokenInput, USD, USD_WAD } from "../types";
 import { CToken, ICToken, ZapperInstructions } from "./CToken";
 import { DynamicMarketToken, StaticMarketToken, UserMarketToken } from "./ProtocolReader";
 import { Market } from "./Market";
-import { ChangeRate, contractSetup, getRateSeconds, SECONDS_PER_YEAR, validateProviderAsSigner, WAD } from "../helpers";
+import { ChangeRate, contractSetup, getRateSeconds, SECONDS_PER_YEAR, WAD } from "../helpers";
 import borrowable_ctoken_abi from '../abis/BorrowableCToken.json';
 import irm_abi from '../abis/IDynamicIRM.json';
 import Decimal from "decimal.js";
@@ -33,13 +33,17 @@ export class BorrowableCToken extends CToken {
     override contract: Contract & IBorrowableCToken;
 
     constructor(
-        provider: curvance_provider,
+        provider: curvance_read_provider,
         address: address,
         cache: StaticMarketToken & DynamicMarketToken & UserMarketToken,
         market: Market
     ) {
         super(provider, address, cache, market);
         this.contract = contractSetup<IBorrowableCToken>(provider, address, borrowable_ctoken_abi);
+    }
+
+    protected override getWriteContract() {
+        return contractSetup<IBorrowableCToken>(this.requireSigner(), this.address, borrowable_ctoken_abi);
     }
 
     getLiquidity(inUSD: true): USD;
@@ -92,10 +96,9 @@ export class BorrowableCToken extends CToken {
     }
 
     async hypotheticalBorrowOf(amount: TokenInput) {
-        const signer = validateProviderAsSigner(this.provider);
         const assets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
         return this.market.reader.hypotheticalBorrowOf(
-            signer.address as address,
+            this.getAccountOrThrow(),
             this,
             assets
         )
@@ -109,7 +112,7 @@ export class BorrowableCToken extends CToken {
     }
 
     async borrow(amount: TokenInput, receiver: address | null = null) {
-        const signer = validateProviderAsSigner(this.provider);
+        const signer = this.requireSigner();
         receiver ??= signer.address as address;
         const assets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
 
@@ -139,8 +142,7 @@ export class BorrowableCToken extends CToken {
     async fetchDebtBalanceAtTimestamp(timestamp: bigint, asUSD: true): Promise<USD>;
     async fetchDebtBalanceAtTimestamp(timestamp: bigint, asUSD: false): Promise<bigint>;
     async fetchDebtBalanceAtTimestamp(timestamp: bigint = 0n, asUSD: boolean = true): Promise<USD | bigint> {
-        const signer = validateProviderAsSigner(this.provider);
-        const debt = await this.market.reader.debtBalanceAtTimestamp(signer.address as address, this.address, timestamp);
+        const debt = await this.market.reader.debtBalanceAtTimestamp(this.getAccountOrThrow(), this.address, timestamp);
         return asUSD ? this.fetchConvertTokensToUsd(debt) : debt;
     }
 

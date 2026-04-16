@@ -85,7 +85,7 @@ export class TestFramework {
             setup.provider,
             setup.signer,
             chain,
-            await setupChain(chain, setup.signer, true, apiUrl),
+            await setupChain(chain, setup.signer, true, apiUrl, { readProvider: setup.provider }),
             log,
             apiUrl
         );
@@ -119,7 +119,7 @@ export class TestFramework {
         this.provider = setup.provider;
         this.signer = setup.signer;
         try {
-            this.curvance = await setupChain(this.chain, this.signer, true, this.apiUrl);
+            this.curvance = await setupChain(this.chain, this.signer, true, this.apiUrl, { readProvider: this.provider });
         } catch(e: any) {
             console.error(`[reset] setupChain failed: ${e.message}`);
             throw e;
@@ -157,7 +157,7 @@ export class TestFramework {
         await this.provider.send("anvil_impersonateAccount", [account]);
 
         const impersonatedSigner = await this.provider.getSigner(account);
-        this.curvance = await setupChain(this.chain, impersonatedSigner, true, this.apiUrl);
+        this.curvance = await setupChain(this.chain, impersonatedSigner, true, this.apiUrl, { readProvider: this.provider });
     }
 
     async impersonateStop() {
@@ -187,7 +187,13 @@ export class TestFramework {
                     await this.provider.send("anvil_impersonateAccount", [holder]);
                     const holderSigner = await this.provider.getSigner(holder);
 
-                    const erc20 = new ERC20(holderSigner as curvance_signer, token.asset.address);
+                    const erc20 = new ERC20(
+                        this.provider,
+                        token.asset.address,
+                        undefined,
+                        undefined,
+                        holderSigner as curvance_signer,
+                    );
                     const holderBalance = await erc20.balanceOf(holderSigner.address as address);
 
                     // Transfer a large amount from the holder to our test account
@@ -215,7 +221,13 @@ export class TestFramework {
                 await this.setERC20Balance(token.asset.address, this.account, BigInt(100000000e18), storageSlot);
 
                 // Verify the balance was set correctly
-                const erc20 = new ERC20(this.signer, token.asset.address);
+                const erc20 = new ERC20(
+                    this.provider,
+                    token.asset.address,
+                    undefined,
+                    undefined,
+                    this.signer,
+                );
                 try {
                     const actualBalance = await erc20.balanceOf(this.account);
                     const expectedBalance = BigInt(100000000e18);

@@ -4,7 +4,6 @@ import { contractSetup } from "../helpers";
 import { solidityPacked, TransactionResponse } from "ethers";
 import { MulticallAction } from "./CToken";
 import abi from '../abis/RedstoneCoreAdaptor.json';
-import { setup_config } from "../setup";
 import { MarketToken } from "./Market";
 
 export interface IRedstoneCoreAdaptor {
@@ -44,7 +43,7 @@ export class Redstone {
     }
 
     static async buildMultiCallAction(ctoken: MarketToken) {
-        const adaptor = setup_config.contracts.adaptors.RedstoneCoreAdaptor as address;
+        const adaptor = ctoken.market.setup.contracts.adaptors.RedstoneCoreAdaptor as address;
         const contract = contractSetup<IRedstoneCoreAdaptor>(ctoken.provider, adaptor, abi);
         const { payload, timestamp } = await Redstone.getPayload(ctoken.asset.symbol);
         

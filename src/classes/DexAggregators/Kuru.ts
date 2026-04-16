@@ -1,7 +1,7 @@
 import Decimal from "decimal.js";
-import { address, bytes, curvance_provider, TokenInput } from "../../types";
+import { address, bytes, curvance_read_provider, TokenInput } from "../../types";
 import { ERC20 } from "../ERC20";
-import { toBigInt, toDecimal, validateProviderAsSigner, WAD } from "../../helpers";
+import { EMPTY_ADDRESS, toBigInt, toDecimal, WAD } from "../../helpers";
 import { ZapToken } from "../CToken";
 import { Swap } from "../Zapper";
 import IDexAgg from "./IDexAgg";
@@ -110,10 +110,12 @@ export class Kuru implements IDexAgg {
         }
     }
 
-    async getAvailableTokens(provider: curvance_provider, query: string | null = null) {
-        const signer = validateProviderAsSigner(provider);
-
-        const userAddress = signer.address;
+    async getAvailableTokens(
+        provider: curvance_read_provider,
+        query: string | null = null,
+        account: address | null = null,
+    ) {
+        const userAddress = account ?? EMPTY_ADDRESS;
         let endpoint = `https://api.kuru.io/api/v2/tokens/search?limit=20&userAddress=${userAddress}`;
         if(query) {
             endpoint += `&q=${encodeURIComponent(query)}`;
@@ -181,6 +183,8 @@ export class Kuru implements IDexAgg {
                     image: token.imageurl,
                     price: Decimal(token.last_price).div(WAD)
                 },
+                undefined,
+                null,
             );
 
             tokens.push({

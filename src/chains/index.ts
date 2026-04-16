@@ -4,11 +4,14 @@ import IDexAgg from "../classes/DexAggregators/IDexAgg";
 import { JsonRpcProvider } from "ethers";
 import { address } from "../types";
 import { ChainRpcPrefix } from "../helpers";
+import { ChainRpcConfig } from "./rpc";
 
 export type ChainConfig = {
     chainId: number;
     dexAgg: IDexAgg;
+    rpc: ChainRpcConfig;
     provider: JsonRpcProvider;
+    fallbackProviders: JsonRpcProvider[];
     native_symbol: string;
     native_name: string;
     wrapped_native: address;
@@ -20,3 +23,5 @@ export const chain_config: Record<ChainRpcPrefix, ChainConfig> = {
     'monad-mainnet': monad_mainnet,
     'arb-sepolia': arb_testnet
 }
+
+export * from "./rpc";

@@ -1,9 +1,9 @@
-import { address, bytes, curvance_provider, Percentage, TokenInput } from "../../types";
+import { address, bytes, curvance_read_provider, Percentage, TokenInput } from "../../types";
 import { ZapToken } from "../CToken";
 import IDexAgg from "./IDexAgg";
 import { Swap } from "../Zapper";
 import { all_markets } from "../../setup";
-import { toBigInt, validateProviderAsSigner } from "../../helpers";
+import { EMPTY_ADDRESS, toBigInt } from "../../helpers";
 import { ERC20 } from "../ERC20";
 import FormatConverter from "../FormatConverter";
 import { safeBigInt, fetchWithTimeout, validateSlippageBps } from "../../validation";
@@ -189,7 +189,13 @@ export class KyberSwap implements IDexAgg {
         this.api = `${api}/${this.chain}`;
     }
 
-    async getAvailableTokens(provider: curvance_provider, query: string | null = null, page: number = 1, pageSize: number = 25): Promise<ZapToken[]> {
+    async getAvailableTokens(
+        provider: curvance_read_provider,
+        query: string | null = null,
+        account: address | null = null,
+        page: number = 1,
+        pageSize: number = 25,
+    ): Promise<ZapToken[]> {
         let zap_tokens: ZapToken[] = [];
 
         let tokens_set = new Set<string>();
@@ -212,14 +218,14 @@ export class KyberSwap implements IDexAgg {
                     interface: token.getAsset(true),
                     type: 'simple',
                     quote: async (tokenIn: string, tokenOut: string, amount: TokenInput, slippage: Percentage) => {
-                        const signer = validateProviderAsSigner(provider);
-                        const erc20in = new ERC20(provider, tokenIn as address);
+                        const wallet = account ?? EMPTY_ADDRESS;
+                        const erc20in = new ERC20(provider, tokenIn as address, undefined, undefined, null);
                         const decimalsIn = erc20in.decimals ?? await erc20in.contract.decimals();
                         const amount_bigint = toBigInt(amount, decimalsIn);
-                        const erc20Out = new ERC20(provider, tokenOut as address);
+                        const erc20Out = new ERC20(provider, tokenOut as address, undefined, undefined, null);
                         const decimalsOut = erc20Out.decimals ?? await erc20Out.contract.decimals();
 
-                        const results = await this.quote(signer.address, tokenIn, tokenOut, amount_bigint, FormatConverter.percentageToBps(slippage));
+                        const results = await this.quote(wallet, tokenIn, tokenOut, amount_bigint, FormatConverter.percentageToBps(slippage));
                         return {
                             minOut_raw: results.min_out,
                             output_raw: results.out,
