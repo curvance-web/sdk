@@ -577,13 +577,13 @@ interface IDexAgg {
   quote(...args: QuoteArgs): Promise<Quote>;
 }
 
-type QuoteArgs = [wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint];
+type QuoteArgs = [wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address];
 type Quote = { to: address; calldata: bytes; min_out: bigint; out: bigint; raw?: any; }
 ```
 
-**KyberSwap** (monad-mainnet): 2-step quote flow — GET `/api/v1/routes` → POST `/api/v1/route/build`. Client ID: `"curvance-sdk"`. Slippage in BPS. Throws `Error` on non-OK HTTP responses (no null returns — errors propagate as exceptions).
+**KyberSwap** (monad-mainnet): 2-step quote flow — GET `/api/v1/routes` → POST `/api/v1/route/build`. Client ID: `"curvance-sdk"`. Slippage in BPS. `quoteAction` converts to WAD via `bpsToBpsWad()` for the Swap struct's `slippage` field. `quote.min_out` = `amountOut * (10000 - slippage) / 10000` — use this for `repayAssets`, not arbitrary floors. Default 20min deadline (not set by SDK). Throws `Error` on non-OK HTTP responses. **Fee encoding:** when `feeBps > 0`, the SDK passes `feeAmount`, `chargeFeeBy=currency_in`, `isInBps=true`, `feeReceiver` as query params on the GET route request. KyberSwap stores the raw BPS value in `SwapDescriptionV2.feeAmounts[0]` (confirmed: `feeAmount=4` with `isInBps=true` → `feeAmounts[0] = 4` in calldata). The fee is deducted from input before routing. **On-chain validation:** every swap flows through `KyberSwapChecker.checkCalldata()` (resolved via `centralRegistry.externalCalldataChecker(kyberSwapRouter)`). The checker enforces: exactly 1 fee receiver == `centralRegistry.daoAddress()`, `feeAmounts[0] == FEE_BPS (4)`. Zero receivers rejected. Fee changes require checker redeployment.
 
-**Kuru** (monad-mainnet): JWT-authenticated (`/generate-token`), rate-limited. POST `/quote`. Token search via `api.kuru.io/api/v2/tokens/search`. Cached JWT with request tracking.
+**Kuru** (monad-mainnet): JWT-authenticated (`/generate-token`), rate-limited. POST `/quote`. Token search via `api.kuru.io/api/v2/tokens/search`. Cached JWT with request tracking. `quoteAction` converts slippage to WAD via `bpsToBpsWad()` — critical for `_swapSafe` on-chain check (raw BPS would read as ~0% tolerance).
 
 **MultiDexAgg** (multi-aggregator wrapper): Implements `IDexAgg`. Wraps 1+ aggregators — single aggregator = passthrough, multiple = parallel fan-out with best-quote selection. Config: `outlierThresholdPercent` (default 20, filters quotes deviating from median), `quoteTimeoutMs` (default 15000). Uses `Promise.allSettled` for fault tolerance. `_validateQuote` rejects responses missing `out`, `calldata`, or `to`. Monad mainnet chain config currently uses single `KyberSwap` instance (MultiDexAgg available but not yet default).
 
@@ -1028,14 +1028,21 @@ User wants to deposit TokenX into a CToken whose underlying is TokenY
 
 ## [LEVERAGE_FLOW]
 
+All three leverage entry points call `_getLeverageSnapshot(borrowToken)` as the first async step. This single ProtocolReader RPC call refreshes oracle prices + projected debt into the cache so preview computations use fresh state. Tunable buffers are centralized in the `LEVERAGE` constants block at the top of CToken.ts.
+
 ### Leverage Up
 ```
 token.leverageUp(borrowToken, newLeverage, positionManagerType, slippage?, simulate?)
+  ├── _getLeverageSnapshot(borrowToken)  → refreshes cache (prices + debt with 2min interest)
   ├── previewLeverageUp(newLev, borrowToken)
-  │     └── calculates: borrowAmount = (notional × newLev - notional) - currentDebt
+  │     └── calculates: borrowAmount, newCollateral (subtracts feeUsd), fee preview fields
   ├── getPositionManager(type)
   ├── switch(type):
-  │     ├── 'simple': dexAgg.quoteAction() → manager.getLeverageCalldata(action, slippage)
+  │     ├── 'simple':
+  │     │     ├── feePolicy.getFeeBps() → feeBps, feeReceiver
+  │     │     ├── dexAgg.quoteAction(borrowAssets, slippage, feeBps, feeReceiver)
+  │     │     ├── contractSlippage = slippage + (L−1) × feeBps  ← fee amplification
+  │     │     └── manager.getLeverageCalldata(action, bpsToBpsWad(contractSlippage))
   │     └── 'vault'/'native-vault': PositionManager.getVaultExpectedShares() → getLeverageCalldata()
   ├── _checkPositionManagerApproval()
   └── oracleRoute(calldata, { to: manager.address })
@@ -1044,26 +1051,30 @@ token.leverageUp(borrowToken, newLeverage, positionManagerType, slippage?, simul
 ### Leverage Down
 ```
 token.leverageDown(borrowToken, currentLev, newLev, type, slippage?, simulate?)
+  ├── _getLeverageSnapshot(borrowToken)  → refreshes cache (prices + debt with 2min interest)
   ├── previewLeverageDown(newLev, currentLev)
-  │     └── calculates collateralAssetReduction, collateralAssetReductionUsd
+  │     └── calculates collateralAssetReduction + fee preview fields
+  ├── feePolicy.getFeeBps() → feeBps, feeReceiver
   ├── if newLev == 1 (full deleverage):
-  │     ├── fetchDebtBalanceAtTimestamp(100n, false) → repay_balance
-  │     ├── initial dexAgg.quote to check if output covers debt
-  │     └── if quote.out < repay_balance: scale swapCollateral = reduction × repay_balance × 1005 / (quote.out × 1000)
+  │     └── swapCollateral = snapshot debt × (1 + DELEVERAGE_OVERHEAD_BPS + feeBps), capped at maxCollateral
+  │   else if feeBps > 0 (partial deleverage):
+  │     └── swapCollateral = collateralAssetReduction × 10000 / (10000 − feeBps)  ← fee compensation
   ├── switch(type):
-  │     └── 'simple': dexAgg.quoteAction(swapCollateral) → manager.getDeleverageCalldata()
+  │     └── 'simple': dexAgg.quoteAction(swapCollateral, slippage, feeBps, feeReceiver)
+  │           contractSlippage: full = slippage + (L−1) × (overhead + feeBps); partial = slippage
   │     └── default: throws (only 'simple' supported for deleverage)
   ├── _checkPositionManagerApproval()
   └── oracleRoute(calldata, { to: manager.address })
 ```
-Full deleverage (newLev == 1): `minRepay = 1n` (contract handles exact repayment). Contract slippage gets +50 BPS buffer (`slippage + 50n`) to account for oracle price variance in multicall. Partial deleverage: swap uses exact `collateralAssetReduction`, `minRepay = quote.out - 5%`.
+Full deleverage (newLev == 1): `minRepay = 1n` (contract handles exact repayment via `min(assetsHeld, totalDebt)`, returns excess to user). Partial deleverage: `minRepay = quote.min_out` (DEX's slippage-adjusted guarantee). **Contract slippage:** partial deleverage uses user's slippage as-is. Full deleverage uses `slippage + (L−1) × (DELEVERAGE_OVERHEAD_BPS + feeBps)` because the intentional swap oversize becomes `(L−1)×overhead` in equity-fraction terms after `checkSlippage` amplification — see #SLIPPAGE_HANDLING for derivation.
 
 ### Deposit and Leverage
 ```
 token.depositAndLeverage(depositAmount, borrowToken, multiplier, type, slippage)
   ├── ensureUnderlyingAmount()
-  ├── borrowAmount = convertTokenToToken(this, borrow, deposit × (mult-1))
-  ├── switch(type): same as leverageUp but with deposit prefix
+  ├── _getLeverageSnapshot(borrowToken)  → refreshes cache
+  ├── previewLeverageUp(multiplier, borrowToken, depositAssets)
+  ├── switch(type): same as leverageUp (fee resolution + contractSlippage)
   ├── _checkErc20Approval(asset, depositAmount, manager.address)
   ├── _checkPositionManagerApproval()
   └── oracleRoute(calldata, { to: manager.address })
@@ -2408,32 +2419,47 @@ const instructions = {
 };
 ```
 
-### expectedShares: leverageUp vs depositAndLeverage
+### expectedShares: leverage paths
 
-The SDK calculates `expectedShares` differently depending on the entry point:
+Both `leverageUp` and `depositAndLeverage` use `virtualConvertToShares(BigInt(quote.min_out), LEVERAGE.SHARES_BUFFER_BPS)` for simple types — cached conversion with 2bps buffer for exchange rate drift. Vault types use `getVaultExpectedShares` (async, two-hop conversion).
 
-| Entry point | Simple type | Vault type |
-|---|---|---|
-| `leverageUp` | **BUG:** `BigInt(quote.min_out)` — raw dex output in ASSET terms, not shares. Causes `InvalidSlippage` revert when exchange rate > 1:1 | `getVaultExpectedShares` (async, two-hop conversion) ✓ |
-| `depositAndLeverage` | `getExpectedShares(this, BigInt(quote.min_out))` — correctly converted via on-chain `convertToShares` ✓ | `getVaultExpectedShares` (async, two-hop conversion) ✓ |
-
-Fix for `leverageUp` simple: use `await PositionManager.getExpectedShares(this, BigInt(quote.min_out))`, same as `depositAndLeverage`.
-
-For `leverageUp` simple: the dex min_out (in asset terms) is used directly as expectedShares. The contract's `onBorrow` then checks `shares < action.expectedShares` where `shares` is the return value of `depositAsCollateral`. As interest accrues and the exchange rate grows above 1:1, depositing X assets yields fewer than X shares, causing the check to fail. The `checkSlippage` modifier provides portfolio-level protection, but the `expectedShares` check in `onBorrow` reverts first.
+The Zapper path uses `await ctoken.convertToShares(BigInt(quote.min_out))` — on-chain conversion with 2bps buffer. Both paths account for interest-driven exchange rate drift.
 
 ### Leverage-down special cases
 
 ```ts
 // Full deleverage (newLeverage = 1):
-//   collateralAssets = repay_balance + 0.05% buffer (ensures enough after swap)
-//   Dex swap amount = repay_balance_with_slippage (the buffered collateral amount)
-//   Min repay = exact repay_balance (raw debt, NO tolerance — full repay must cover debt)
+//   _getLeverageSnapshot refreshes debt with 2min interest projection
+//   debtInCollateral = snapshot debt converted to collateral asset terms
+//   swapCollateral = debtInCollateral × (1 + (DELEVERAGE_OVERHEAD_BPS + feeBps) / 10000)
+//   capped at maxCollateral (virtualConvertToAssets(userCollateral))
+//   Min repay = 1n (contract repays min(assetsHeld, totalDebt), returns excess)
+//   Contract slippage = user's slippage + (L−1) × (DELEVERAGE_OVERHEAD_BPS + feeBps)
+//                       — see equity-amplification note below
 
 // Partial deleverage:
-//   collateralAssets = collateralAssetReduction from previewLeverageDown
-//   Min repay = quote.out - 5% (intentional defense-in-depth floor, NOT user slippage)
-//   User slippage enforced by dex quote + _swapSafe oracle check + checkSlippage modifier
+//   collateralAssets = exact collateralAssetReduction from previewLeverageDown
+//   Min repay = quote.min_out (DEX's slippage-adjusted guarantee)
+//   Contract slippage = user's slippage (no amplification needed — exact sizing)
 ```
+
+**Equity-amplification (the `(L−1)` term):** Full deleverage intentionally oversizes the swap by `DELEVERAGE_OVERHEAD_BPS + feeBps` in absolute terms to prevent dust debt. The `checkSlippage` modifier (Layer 3) compares pre/post equity as a fraction of starting equity. Since `equity ≈ collateral / L`, an absolute X-bps loss on `swapCollateral` becomes `(L−1) × X bps` in equity-fraction terms. The contract slippage tolerance must be expanded by exactly that forced amount, leaving the user's `slippage` budget available for variable DEX impact + oracle drift. This does NOT loosen MEV protection — that lives at the `_swapSafe` layer (Layer 2), which still receives raw user slippage. The expansion only loosens the `checkSlippage` sanity check, which is documented as "primarily a sanity check rather than a security guarantee" in the contract NatSpec.
+
+The economic loss from the intentional overshoot is zero — the contract returns excess debt token to the user's wallet. The fee portion, however, IS real value loss from the position's perspective: it leaves via the swap input and is sent to `feeReceiver`, never returned. Both portions sit inside the expanded contract slippage tolerance.
+
+### Fee policy interaction
+
+When `setup_config.feePolicy` is non-zero (configured via `setupChain` options), KyberSwap deducts the fee from the swap input before swapping (`chargeFeeBy=currency_in`, `isInBps=true`). Effective swap input becomes `amount × (1 − feeBps/10000)`. Fees are mandatory — the on-chain `KyberSwapChecker` rejects swaps without exactly one fee receiver (DAO address) at exactly `FEE_BPS = 4`. Changing the fee requires redeploying the checker.
+
+**Leverage-up / deposit-and-leverage:** The fee reduces swap output, which `checkSlippage` (Layer 3) sees as equity loss amplified by `(L−1)`. Each call site computes `contractSlippage = slippage + (L−1) × feeBps` for the `checkSlippage` modifier, separate from the `action.slippage` passed to `_swapSafe` (Layer 2). The rounding buffer (`LEVERAGE_UP_BUFFER_BPS`, flat) and the fee amplification (`(L−1) × feeBps`) serve different purposes and are additive.
+
+**Deleverage (full):** The deleverage call site sizes `swapCollateral` with `(DELEVERAGE_OVERHEAD_BPS + feeBps)` so the post-fee swap output still covers the debt. The fee bps also enters the `(L−1)` contract slippage expansion — `contractSlippage = slippage + (L−1) × (overhead + feeBps)`. **Partial deleverage:** `swapCollateral` inflated by `10000 / (10000 − feeBps)` to compensate for fee deduction on swap input.
+
+**`_swapSafe` fee budget consumption:** Layer 2 values the full `action.inputAmount` at oracle price but the swap only received `(inputAmount − fee)` worth of tokens. The fee appears as ~`feeBps` of apparent slippage, consuming that budget from the user's tolerance. At 4 bps this is negligible for ≥0.1% user slippage. The app enforces a 0.1% (10 bps) minimum slippage floor.
+
+**DAO address desync risk:** The SDK hardcodes `CURVANCE_DAO_FEE_RECEIVER`. The on-chain checker validates against `centralRegistry.daoAddress()` dynamically. If `transferDaoPermissions()` changes the DAO address, the checker validates against the new address but the SDK still sends the old one — every swap reverts. Follow-up: read `daoAddress` at `setupChain` time via `protocolReader.centralRegistry()`.
+
+Same-token zaps and native↔wrapped routes are exempted by the policy (return `0n`) and short-circuited at `Zapper.getSimpleZapCalldata` to skip the DEX call entirely — mirroring `SimpleZapper._isMatchingToken` on-chain behavior. These paths never reach the checker.
 
 ### Protocol fee on leverage/deleverage
 
@@ -2447,7 +2473,7 @@ uint256 fee = FixedPointMathLib.mulDivUp(
 // Fee is deducted from actionAssets and sent to centralRegistry.daoAddress()
 // Remaining actionAssets are used for the swap/deposit
 ```
-This fee reduces the effective borrow amount (leverage) or collateral amount (deleverage). SDK expectedShares calculations don't account for this fee — the checkSlippage modifier catches any resulting value loss.
+This fee reduces the effective borrow amount (leverage) or collateral amount (deleverage). **`protocolLeverageFee` must remain 0 while SDK fees are active.** The on-chain fee mutates `action.borrowAssets` before the swap callback, causing `swapAction.inputAmount != action.borrowAssets` in `SimplePositionManager` (revert). Additionally, users would be double-charged (protocol fee on collateral/borrow + SDK fee on swap input). If `protocolLeverageFee` needs activation, the SDK must first query the fee, subtract it from `swapAction.inputAmount`, and quote KyberSwap for the reduced amount.
 
 ---
 
