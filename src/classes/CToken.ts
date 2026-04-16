@@ -1263,16 +1263,10 @@ export class CToken extends Calldata<ICToken> {
                         feeReceiver,
                     );
 
-                    // _swapSafe measures value loss as (valueIn - valueOut) / valueIn
-                    // where valueIn is the FULL input (pre-fee). KyberSwap deducts
-                    // the fee before swapping, so _swapSafe sees feeBps as "slippage"
-                    // even though it's a known, deterministic cost. Expand
-                    // action.slippage by feeBps so the fee doesn't consume the user's
-                    // MEV protection budget. The KyberSwap quote already used the
-                    // user's raw slippage for minReturnAmount (DEX-level protection).
-                    if (feeBps > 0n) {
-                        action.slippage = FormatConverter.bpsToBpsWad(slippage + feeBps);
-                    }
+                    // Fee-aware slippage expansion now lives inside KyberSwap.quoteAction
+                    // so any caller inherits correct behavior. See KyberSwap.ts for the
+                    // rationale. The fee still reduces swap output, which checkSlippage
+                    // sees as equity loss amplified by (L-1) — handled below.
 
                     // The fee also reduces swap output, which checkSlippage sees
                     // as equity loss amplified by (L-1) — same pattern as
@@ -1429,12 +1423,8 @@ export class CToken extends Calldata<ICToken> {
                         feeReceiver,
                     );
 
-                    // _swapSafe: expand action.slippage by feeBps so the
-                    // deterministic fee cost doesn't eat the user's MEV budget.
-                    // Same rationale as leverageUp — see comment there.
-                    if (feeBps > 0n) {
-                        action.slippage = FormatConverter.bpsToBpsWad(slippage + feeBps);
-                    }
+                    // Fee-aware slippage expansion for `_swapSafe` is handled by
+                    // KyberSwap.quoteAction. See KyberSwap.ts for rationale.
 
                     const minRepay = isFullDeleverage ? 1n : quote.min_out;
 
@@ -1536,12 +1526,8 @@ export class CToken extends Calldata<ICToken> {
                         feeReceiver,
                     );
 
-                    // _swapSafe: expand action.slippage by feeBps so the
-                    // deterministic fee cost doesn't eat the user's MEV budget.
-                    // Same rationale as leverageUp — see comment there.
-                    if (feeBps > 0n) {
-                        action.slippage = FormatConverter.bpsToBpsWad(slippage + feeBps);
-                    }
+                    // Fee-aware slippage expansion for `_swapSafe` is handled by
+                    // KyberSwap.quoteAction. See KyberSwap.ts for rationale.
 
                     // Fee amplification: same pattern as leverageUp.
                     const contractSlippage = feeBps > 0n

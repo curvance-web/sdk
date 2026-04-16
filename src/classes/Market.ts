@@ -333,13 +333,10 @@ export class Market {
      * @param account - Wallet address
      * @returns collateral, max debt, debt for the market
      */
-    async getSnapshots(account: address) {
-        let snapshots: Array<AccountSnapshot> = [];
-        for(const token of this.tokens) {
-            const snapshot = await token.getSnapshot(account);
-            snapshots.push(snapshot);
-        }
-        return snapshots;
+    async getSnapshots(account: address): Promise<AccountSnapshot[]> {
+        // Each ctoken.getSnapshot is an independent view call — dispatch in
+        // parallel so N tokens is one round-trip latency, not N.
+        return Promise.all(this.tokens.map((token) => token.getSnapshot(account)));
     }
 
     hasUserActivity() {

@@ -6,7 +6,7 @@ import { all_markets } from "../../setup";
 import { EMPTY_ADDRESS, toBigInt } from "../../helpers";
 import { ERC20 } from "../ERC20";
 import FormatConverter from "../FormatConverter";
-import { safeBigInt, fetchWithTimeout, validateSlippageBps } from "../../validation";
+import { safeBigInt, fetchWithTimeout, validateRouterAddress, validateSlippageBps } from "../../validation";
 import { AbiCoder } from "ethers";
 import { CURVANCE_FEE_BPS, CURVANCE_DAO_FEE_RECEIVER } from "../../feePolicy";
 
@@ -244,12 +244,21 @@ export class KyberSwap implements IDexAgg {
 
     async quoteAction(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
         const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
+
+        // Fee-aware slippage expansion: KyberSwap deducts its `currency_in`
+        // fee before the swap executes, so on-chain `_swapSafe` measures
+        // (valueIn − valueOut) / valueIn counting the fee as "slippage".
+        // Expand here so every caller of quoteAction gets correct behavior
+        // without needing a post-override. Raw user slippage still gates
+        // `minReturnAmount` inside the build payload (DEX-level protection).
+        const effectiveSlippage = feeBps && feeBps > 0n ? slippage + feeBps : slippage;
+
         const action = {
             inputToken: tokenIn,
             inputAmount: BigInt(amount),
             outputToken: tokenOut,
             target: quote.to,
-            slippage: slippage ? FormatConverter.bpsToBpsWad(slippage) : 0n,
+            slippage: effectiveSlippage ? FormatConverter.bpsToBpsWad(effectiveSlippage) : 0n,
             call: quote.calldata
         } as Swap;
 
@@ -326,16 +335,16 @@ export class KyberSwap implements IDexAgg {
         const amountOut = safeBigInt(build_data.data.amountOut, 'KyberSwap amountOut');
         const min_out = amountOut * (10000n - slippage) / 10000n;
 
-        if(build_data.data.routerAddress != this.router) {
-            throw new Error(`KyberSwap returned unexpected router address: ${build_data.data.routerAddress}`);
-        }
+        // Case-insensitive router comparison via validateRouterAddress — also
+        // enforces address format/checksum. Matches Kuru's router gate.
+        const validatedRouter = validateRouterAddress(build_data.data.routerAddress, this.router, 'KyberSwap');
 
         // Validate that the API actually embedded the fee params we requested.
         // Without this, a misconfigured API response silently reverts on-chain.
         validateSwapCalldata(build_data.data.data, feeBps ?? 0n, feeReceiver);
 
         return {
-            to: build_data.data.routerAddress,
+            to: validatedRouter,
             calldata: build_data.data.data as bytes,
             min_out: min_out,
             out: amountOut,
