@@ -34,10 +34,14 @@ const { markets, reader, dexAgg, global_milestone } = await setupChain("monad-ma
 ```ts
 setupChain(
     chain: ChainRpcPrefix,
-    provider: curvance_provider | null = null,   // null → SDK constructs a JsonRpcProvider
+    provider: curvance_provider | null = null,   // signer (wallet) OR read-only provider; null → SDK default
     approval_protection: boolean = false,         // revoke-before-approve pattern
     api_url: string = "https://api.curvance.com",
-    options: { feePolicy?: FeePolicy } = {}
+    options: {
+        feePolicy?: FeePolicy;                    // zap/leverage fee routing (default: NO_FEE_POLICY)
+        account?: address | null;                 // user address for user-specific reads without a signer
+        readProvider?: curvance_read_provider | null;  // explicit override for read transport
+    } = {}
 ): Promise<{
     markets: Market[],
     reader: ProtocolReader,
@@ -45,6 +49,13 @@ setupChain(
     global_milestone: MilestoneResponse | null
 }>
 ```
+
+### RPC routing
+
+- **Wallet connected** (signer with a `.provider`) → the wallet's own provider is the **primary** read source; the chain's configured RPC + fallbacks absorb wallet RPC failures. This distributes read load across users' wallet RPCs and respects whichever endpoint each user chose.
+- **Signerless / public view** → the chain's configured RPC is primary; chain fallbacks serve as backup.
+- **Explicit `options.readProvider`** → wins over all of the above. Use when you want deterministic read transport (e.g. fork testing).
+- **Writes** always route through the connected signer; they never use the chain RPC or fallbacks.
 
 ### Explore markets
 
