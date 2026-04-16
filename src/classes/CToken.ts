@@ -46,9 +46,10 @@ const EXCLUDED_ZAP_SYMBOLS = new Set([
  *
  * Because _swapSafe measures value loss against the FULL input (pre-fee),
  * the deterministic KyberSwap fee would consume feeBps of the user's MEV
- * tolerance if not compensated. Each call site expands action.slippage by
- * feeBps after quoting so the fee is absorbed and the user's chosen
- * tolerance is preserved for actual MEV/routing variance.
+ * tolerance if not compensated. `KyberSwap.quoteAction` (the DEX adapter)
+ * expands action.slippage by feeBps internally so the fee is absorbed and
+ * the user's chosen tolerance is preserved for actual MEV/routing variance.
+ * Callers pass raw user slippage — the adapter owns the expansion.
  *
  * Asymmetry between leverage up and deleverage
  * --------------------------------------------
@@ -79,10 +80,11 @@ const LEVERAGE = {
      *  wei-level share rounding plus possible Redstone price drift between
      *  snapshot RPC and tx broadcast block. Both are small constants.
      *
-     *  Fee handling: each call site expands both action.slippage (by feeBps,
-     *  so _swapSafe doesn't treat the fee as MEV) and contractSlippage (by
-     *  (L-1) × feeBps, so checkSlippage doesn't fire from equity-fraction
-     *  amplification). This buffer covers rounding/drift only. */
+     *  Fee handling: KyberSwap.quoteAction expands action.slippage by feeBps
+     *  internally so _swapSafe doesn't treat the fee as MEV. Each call site
+     *  still computes contractSlippage (expanded by (L-1) × feeBps) so
+     *  checkSlippage doesn't fire from equity-fraction amplification. This
+     *  buffer covers rounding/drift only. */
     LEVERAGE_UP_BUFFER_BPS: 10n,
     /** BPS overhead on full deleverage swap sizing — absolute terms.
      *  Oversizes the collateral→debt swap so DEX impact + drift doesn't

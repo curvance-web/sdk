@@ -46,8 +46,19 @@ export const DEFAULT_CHAIN_RPC_POLICY: ChainRpcPolicy = {
 export const chain_rpc_config = {
     "monad-mainnet": {
         ...DEFAULT_CHAIN_RPC_POLICY,
-        primary: "https://rpc-mainnet.monadinfra.com/",
-        fallbacks: ["https://monad-mainnet.drpc.org"],
+        // Empirically measured 2026-04-16 via app/scripts/rpc-probe.mjs against
+        // both staging.curvance.com and app.curvance.com origins. Primary +
+        // first fallback held 100/100 under 100-concurrent burst. Cascade
+        // ordered by: (1) CORS wildcard, (2) p50 latency, (3) per-IP rate
+        // limit headroom. monadinfra dropped — it returns 403 + missing
+        // Access-Control-Allow-Origin for requests from curvance.com origins.
+        primary: "https://monad-rpc.huginn.tech",
+        fallbacks: [
+            "https://gm.monad.at.htw.tech",
+            "https://monad-mainnet.drpc.org",
+            "https://rpc3.monad.xyz",
+            "https://rpc1.monad.xyz",
+        ],
     },
     "arb-sepolia": {
         ...DEFAULT_CHAIN_RPC_POLICY,
