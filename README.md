@@ -628,3 +628,46 @@ DEFAULT_SLIPPAGE_BPS  // 100n  (1%)
 | [ethers v6](https://www.npmjs.com/package/ethers) | Typed contract interactions, providers, and signer handling |
 | [decimal.js](https://www.npmjs.com/package/decimal.js) | Arbitrary-precision math for all token amounts, prices, and rates |
 | [@redstone-finance/sdk](https://www.npmjs.com/package/@redstone-finance/sdk) | Price feed writes bundled into multicalls for pull-oracle adaptors |
+
+## ❯ Pre-Publish Checklist
+
+Run before every `npm publish` that touches `src/chains/`, `src/setup.ts`,
+`src/retry-provider.ts`, or any RPC-adjacent code:
+
+1. **Unit tests green.** `npm test` — must show all `test:transport` tests
+   passing. `tests/rpc-config-shape.test.ts` locks the structural invariants
+   of `chain_rpc_config` (no known-bad RPCs, no duplicate fallbacks, policy
+   fields within sane ranges).
+
+2. **Live RPC probe against both app origins.** In the app repo:
+
+   ```bash
+   cd path/to/curvance-app
+   RPC_PROBE_YES=1 node scripts/rpc-probe.mjs
+   ```
+
+   The probe hits `staging.curvance.com` and `app.curvance.com` origins
+   against every URL in `chain_rpc_config`. Required thresholds for the
+   **primary** and **first fallback** on each chain:
+
+   - CORS preflight returns `204` or `200` with a matching `Access-Control-Allow-Origin` header
+   - Correctness call returns a valid `chainId` matching the chain
+   - Latency `p95 ≤ 500ms`
+   - 50-concurrent-burst: `≥ 45/50` successful (allow 10% for transient blips)
+
+   Any primary or first-fallback failing these thresholds **blocks the
+   publish**. Demote to a later fallback position or replace.
+
+   Deeper-cascade fallbacks (`fallbacks[1]+`) MAY have looser limits if
+   documented inline with a comment in `chain_rpc_config`.
+
+3. **Do not add the probe to CI.** The probe fires ~500 requests per run
+   across 5-10 public RPCs from a single IP. Running it on every PR would
+   trip per-IP rate limits and eventually provoke origin bans from the
+   free RPCs we depend on — recreating the exact failure mode
+   (monadinfra 403'ing `staging.curvance.com`) that motivated building
+   this probe.
+
+4. **Republish workflow.** Version bump → `npm publish` → in app repo,
+   bump `curvance` in `package.json` to the new version → `yarn install`
+   → commit `yarn.lock` → deploy.
