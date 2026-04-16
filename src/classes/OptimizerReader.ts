@@ -40,8 +40,7 @@ export interface AllocationBound {
 export interface IOptimizerReader {
     getOptimizerMarketData(optimizers: address[]): Promise<any[]>;
     getOptimizerUserData(optimizers: address[], account: address): Promise<any[]>;
-    optimalDeposit(optimizer: address, assets: bigint): Promise<address>;
-    optimalWithdrawal(optimizer: address, assets: bigint): Promise<address>;
+    getOptimizerAPY(optimizer: address): Promise<bigint>;
     optimalRebalance(optimizer: address, slippageBps: bigint): Promise<[ReallocationAction[], AllocationBound[]]>;
 }
 
@@ -82,12 +81,8 @@ export class OptimizerReader {
         }));
     }
 
-    async optimalDeposit(optimizer: address, assets: bigint): Promise<address> {
-        return await this.contract.optimalDeposit(optimizer, assets);
-    }
-
-    async optimalWithdrawal(optimizer: address, assets: bigint): Promise<address> {
-        return await this.contract.optimalWithdrawal(optimizer, assets);
+    async getOptimizerAPY(optimizer: address): Promise<bigint> {
+        return BigInt(await this.contract.getOptimizerAPY(optimizer));
     }
 
     async optimalRebalance(optimizer: address, slippageBps: bigint): Promise<{
