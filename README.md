@@ -644,6 +644,46 @@ NATIVE_ADDRESS   // canonical native token address
 DEFAULT_SLIPPAGE_BPS  // 100n  (1%)
 ```
 
+### Leverage tuning (`LEVERAGE`)
+
+Exposed tuning block used by leverage preview / mutation paths. Values are considered tunable across releases — SDK consumers pinning against specific values opt into the coupling.
+
+```ts
+import { LEVERAGE } from 'curvance';
+
+LEVERAGE.MAX_LEVERAGE_FACTOR          // Decimal(0.98)
+// Cap applied to the theoretical max leverage span. Reserves ~2% of the
+// equity-fraction slippage budget for deterministic loss channels
+// (CURVANCE_FEE_BPS, pool-fee variance, Redstone drift, share rounding)
+// that would otherwise push post-op LTV above collRatio at the boundary.
+
+LEVERAGE.LEVERAGE_UP_BUFFER_BPS       // 10n
+// Flat BPS buffer added to leverage-up slippage for share-rounding + fresh
+// Redstone price drift between snapshot RPC and tx broadcast. NOT amplified
+// by (L-1); the contract's equity-fraction denominator handles amplification.
+
+LEVERAGE.DELEVERAGE_OVERHEAD_BPS      // 20n
+// BPS overhead added to full-deleverage swap sizing to absorb DEX impact
+// and oracle drift without leaving dust debt. The contract returns any
+// excess debt token to the user, so economic loss is zero — but
+// `checkSlippage` treats the intentional overshoot as equity loss and
+// amplifies it by (L-1), which the contract-slippage expansion compensates.
+
+LEVERAGE.SHARES_BUFFER_BPS            // 2n
+// Downward BPS buffer on `virtualConvertToShares` and the inner
+// `previewDeposit` step of `getVaultExpectedShares`. Covers exchange-rate
+// drift from interest accrual since cache load so actual mint satisfies
+// `shares >= expectedShares` at tx inclusion.
+
+LEVERAGE.LEVERAGE_UP_VAULT_DRIFT_BPS  // 30n
+// Per-leverage-unit BPS buffer for `checkSlippage` on vault + native-vault
+// leverage-up paths. Absorbs drift between the collateral vault's
+// fundamental mint rate at tx time and the stored oracle price that
+// `marketManager.statusOf` uses inside `checkSlippage`. Mirrors the
+// `(L-1) × feeBps` amplification the simple branch uses for DEX-fee
+// absorption, with a different K since vault paths have no DEX leg.
+```
+
 ## ❯ Dependencies
 
 | Package | Purpose |

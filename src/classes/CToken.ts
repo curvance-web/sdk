@@ -1158,6 +1158,17 @@ export class CToken extends Calldata<ICToken> {
      * equity-fraction denominator amplifies it by (L-1)x automatically.
      * The user's swap-level slippage (passed separately to _swapSafe) is
      * unaffected — that's the layer that bounds MEV extraction.
+     *
+     * Applied uniformly to simple AND vault/native-vault leverage-up paths.
+     * Simple path uses the buffer for share-rounding + Redstone drift as
+     * described above. Vault paths inherit the flat 10 bps through the
+     * shared `slippage` variable before the per-branch
+     * `amplifyContractSlippage(..., LEVERAGE_UP_VAULT_DRIFT_BPS)` expansion;
+     * the flat addition is not amplified (base term stays flat) and covers
+     * the same residual class (share-rounding, oracle drift) on vault paths
+     * too. Removing the buffer for vault would save a trivial amount of
+     * user slippage budget at the cost of a false-negative risk on the
+     * residuals — we keep it for symmetry.
      */
     private _leverageUpSlippage(slippage: bigint, leverage: Decimal): bigint {
         if (leverage.lte(1)) return slippage;

@@ -115,7 +115,7 @@ describe('getDeposits — Issue 3 fix (renamed from getTvl, valued from totalAss
             assetPrice: 2n * WAD,
         });
         const expectedUsd = FormatConverter.bigIntTokensToUsd(100n * WAD, 2n * WAD, 18n);
-        assert.equal((ctoken as any).getDeposits(true).toString(), expectedUsd.toString());
+        assert.equal(ctoken.getDeposits(true).toString(), expectedUsd.toString());
     });
 
     test('exchangeRate > WAD: getDeposits(true) uses totalAssets, not totalSupply', () => {
@@ -132,7 +132,7 @@ describe('getDeposits — Issue 3 fix (renamed from getTvl, valued from totalAss
         });
         const expectedUsd = FormatConverter.bigIntTokensToUsd(103n * WAD, 1n * WAD, 18n);
         const buggyUsd = FormatConverter.bigIntTokensToUsd(100n * WAD, 1n * WAD, 18n);
-        const actual = (ctoken as any).getDeposits(true);
+        const actual = ctoken.getDeposits(true);
         assert.equal(actual.toString(), expectedUsd.toString(),
             'post-fix must value deposits from totalAssets');
         assert.notEqual(actual.toString(), buggyUsd.toString(),
@@ -148,7 +148,7 @@ describe('getDeposits — Issue 3 fix (renamed from getTvl, valued from totalAss
             totalSupply: 100n * WAD,
             totalAssets: 105n * WAD,
         });
-        assert.equal((ctoken as any).getDeposits(false), 105n * WAD);
+        assert.equal(ctoken.getDeposits(false), 105n * WAD);
     });
 
     test('getLiquidity(true) ≤ getDeposits(true) — core invariant', () => {
@@ -162,7 +162,7 @@ describe('getDeposits — Issue 3 fix (renamed from getTvl, valued from totalAss
             liquidity: 63n * WAD,            // totalAssets - debt
             assetPrice: 1n * WAD,
         });
-        const deposits = (token as any).getDeposits(true);
+        const deposits = token.getDeposits(true);
         const liquidity = token.getLiquidity(true);
         assert.ok(liquidity.lte(deposits),
             `expected liquidity (${liquidity}) ≤ deposits (${deposits})`);
@@ -178,7 +178,7 @@ describe('getDeposits — Issue 3 fix (renamed from getTvl, valued from totalAss
             liquidity: 63n * WAD,
             assetPrice: 1n * WAD,
         });
-        const deposits = (token as any).getDeposits(true);
+        const deposits = token.getDeposits(true);
         const liquidity = token.getLiquidity(true);
         const debtUsd = FormatConverter.bigIntTokensToUsd(40n * WAD, 1n * WAD, 18n);
         const sum = liquidity.plus(debtUsd);
