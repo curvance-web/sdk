@@ -3,7 +3,7 @@ import { ZapToken } from "../CToken";
 import IDexAgg from "./IDexAgg";
 import { Swap } from "../Zapper";
 import { all_markets } from "../../setup";
-import { EMPTY_ADDRESS, toBigInt } from "../../helpers";
+import { EMPTY_ADDRESS, toBigInt, toContractSwapSlippage } from "../../helpers";
 import { ERC20 } from "../ERC20";
 import FormatConverter from "../FormatConverter";
 import { safeBigInt, fetchWithTimeout, validateRouterAddress, validateSlippageBps } from "../../validation";
@@ -248,17 +248,16 @@ export class KyberSwap implements IDexAgg {
         // Fee-aware slippage expansion: KyberSwap deducts its `currency_in`
         // fee before the swap executes, so on-chain `_swapSafe` measures
         // (valueIn − valueOut) / valueIn counting the fee as "slippage".
-        // Expand here so every caller of quoteAction gets correct behavior
-        // without needing a post-override. Raw user slippage still gates
-        // `minReturnAmount` inside the build payload (DEX-level protection).
-        const effectiveSlippage = feeBps && feeBps > 0n ? slippage + feeBps : slippage;
-
+        // Routed through the shared `toContractSwapSlippage` helper so every
+        // aggregator adapter gets identical behavior. Raw user slippage
+        // still gates `minReturnAmount` inside the build payload (DEX-level
+        // protection stays tight).
         const action = {
             inputToken: tokenIn,
             inputAmount: BigInt(amount),
             outputToken: tokenOut,
             target: quote.to,
-            slippage: effectiveSlippage ? FormatConverter.bpsToBpsWad(effectiveSlippage) : 0n,
+            slippage: toContractSwapSlippage(slippage, feeBps),
             call: quote.calldata
         } as Swap;
 

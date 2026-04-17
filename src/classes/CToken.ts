@@ -1,5 +1,5 @@
 import { Contract, TransactionResponse } from "ethers";
-import { contractSetup, BPS, ChangeRate, getRateSeconds, requireAccount, requireSigner, WAD, getChainConfig, EMPTY_ADDRESS, toDecimal, SECONDS_PER_YEAR, toBps, NATIVE_ADDRESS, UINT256_MAX } from "../helpers";
+import { contractSetup, BPS, ChangeRate, getRateSeconds, requireAccount, requireSigner, WAD, getChainConfig, EMPTY_ADDRESS, toDecimal, SECONDS_PER_YEAR, toBps, NATIVE_ADDRESS, UINT256_MAX, amplifyContractSlippage } from "../helpers";
 import { AdaptorTypes, DynamicMarketToken, StaticMarketToken, UserMarketToken } from "./ProtocolReader";
 import { ERC20 } from "./ERC20";
 import { Market, PluginTypes } from "./Market";
@@ -71,10 +71,28 @@ const EXCLUDED_ZAP_SYMBOLS = new Set([
  */
 const LEVERAGE = {
     /** Max leverage cap: fraction of theoretical max the user can select.
-     *  Prevents boundary singularity at exact max leverage. Independent of
-     *  the slippage buffers below — protects post-op position health, not
-     *  in-op slippage. */
-    MAX_LEVERAGE_FACTOR: Decimal(0.995),
+     *  Prevents boundary singularity at exact max leverage — the contract's
+     *  post-op `canBorrow` check re-evaluates LTV against fresh on-chain
+     *  state, and several loss channels can tick final LTV above collRatio
+     *  at the boundary:
+     *    - Pool fees (variable 1bp–1% across pools; aggregator route choice
+     *      is not knowable at cap-compute time, can differ per-trade even
+     *      for the same market)
+     *    - `CURVANCE_FEE_BPS` (deterministic, amplified by (L-1); at L=10
+     *      eats ~36bps of equity-fraction)
+     *    - Oracle drift between preview snapshot and Redstone payload at
+     *      tx inclusion
+     *    - Share rounding (wei-level)
+     *
+     *  History: 0.99 → 0.995 when caching improved precision (pre-fee era).
+     *  0.995 → 0.98 when `CURVANCE_FEE_BPS = 4` landed and users on high-
+     *  collRatio markets (shMON r=0.9 → 10x theoretical) hit
+     *  `InsufficientCollateral` reverts at the boundary.
+     *
+     *  Independent of `LEVERAGE_UP_BUFFER_BPS` and `DELEVERAGE_OVERHEAD_BPS`
+     *  below — those protect in-op slippage at `_swapSafe`; this protects
+     *  post-op position health at `canBorrow`. */
+    MAX_LEVERAGE_FACTOR: Decimal(0.98),
     /** Flat BPS buffer added to leverage-up DEX/swapSafe slippage tolerance.
      *  Under single-oracle, the only forced loss at the swap level comes from
      *  wei-level share rounding plus possible Redstone price drift between
@@ -240,8 +258,9 @@ export class CToken extends Calldata<ICToken> {
     get exchangeRate() { return this.cache.exchangeRate; }
     get canZap() { return this.zapTypes.length > 0; }
     get maxLeverage() {
-        // Cap max leverage slightly below theoretical max (1% of leverage factor)
-        // to account for share rounding and fee losses that prevent reaching the exact max.
+        // Cap max leverage below theoretical max by applying MAX_LEVERAGE_FACTOR
+        // to the (theoretical - 1) span. See LEVERAGE.MAX_LEVERAGE_FACTOR docs
+        // for the loss channels this buffer absorbs and the tuning history.
         const theoretical = Decimal(this.cache.maxLeverage).div(BPS);
         const factor = theoretical.sub(1);
         return Decimal(1).add(factor.mul(LEVERAGE.MAX_LEVERAGE_FACTOR));
@@ -1273,14 +1292,12 @@ export class CToken extends Calldata<ICToken> {
                     // The fee also reduces swap output, which checkSlippage sees
                     // as equity loss amplified by (L-1) — same pattern as
                     // deleverage. Expand the contract-level tolerance to absorb it.
-                    const contractSlippage = feeBps > 0n
-                        ? slippage + BigInt(
-                            newLeverage.sub(1)
-                                .mul(Number(feeBps))
-                                .ceil()
-                                .toFixed(0)
-                        )
-                        : slippage;
+                    // See `amplifyContractSlippage` in helpers.ts for rationale.
+                    const contractSlippage = amplifyContractSlippage(
+                        slippage,
+                        newLeverage.sub(1),
+                        feeBps,
+                    );
 
                     calldata = manager.getLeverageCalldata(
                         {
@@ -1439,20 +1456,20 @@ export class CToken extends Calldata<ICToken> {
                     //
                     // Full:    (L-1) × (overhead + fee)  — overshoot + fee
                     // Partial: (ΔL)  × fee               — fee only, no overshoot
+                    //
+                    // See `amplifyContractSlippage` in helpers.ts for the shared
+                    // primitive + per-call-site asymmetry docs.
                     const leverageDelta = isFullDeleverage
                         ? currentLeverage.sub(1)
                         : currentLeverage.sub(newLeverage);
                     const forcedBps = isFullDeleverage
                         ? LEVERAGE.DELEVERAGE_OVERHEAD_BPS + feeBps
                         : feeBps;
-                    const contractSlippage = forcedBps > 0n
-                        ? slippage + BigInt(
-                            leverageDelta
-                                .mul(Number(forcedBps))
-                                .ceil()
-                                .toFixed(0)
-                        )
-                        : slippage;
+                    const contractSlippage = amplifyContractSlippage(
+                        slippage,
+                        leverageDelta,
+                        forcedBps,
+                    );
 
                     calldata = manager.getDeleverageCalldata({
                         cToken: this.address,
@@ -1531,15 +1548,13 @@ export class CToken extends Calldata<ICToken> {
                     // Fee-aware slippage expansion for `_swapSafe` is handled by
                     // KyberSwap.quoteAction. See KyberSwap.ts for rationale.
 
-                    // Fee amplification: same pattern as leverageUp.
-                    const contractSlippage = feeBps > 0n
-                        ? slippage + BigInt(
-                            multiplier.sub(1)
-                                .mul(Number(feeBps))
-                                .ceil()
-                                .toFixed(0)
-                        )
-                        : slippage;
+                    // Fee amplification: same pattern as leverageUp. See
+                    // `amplifyContractSlippage` in helpers.ts.
+                    const contractSlippage = amplifyContractSlippage(
+                        slippage,
+                        multiplier.sub(1),
+                        feeBps,
+                    );
 
                     calldata = manager.getDepositAndLeverageCalldata(
                         FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals),
