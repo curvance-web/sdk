@@ -69,7 +69,7 @@ const EXCLUDED_ZAP_SYMBOLS = new Set([
  * onRedeem lines 482-493), so the economic loss from the overshoot is
  * zero — only the contract's naive equity-loss check sees it as loss.
  */
-const LEVERAGE = {
+export const LEVERAGE = {
     /** Max leverage cap: fraction of theoretical max the user can select.
      *  Prevents boundary singularity at exact max leverage — the contract's
      *  post-op `canBorrow` check re-evaluates LTV against fresh on-chain
@@ -116,6 +116,22 @@ const LEVERAGE = {
     /** BPS buffer on virtualConvertToShares for leverage + collateral cap.
      *  Covers exchange rate drift from interest accrual since cache load. */
     SHARES_BUFFER_BPS: 2n,
+    /** Per-leverage-unit BPS buffer for `checkSlippage` on vault + native-vault
+     *  leverage-up paths. Absorbs the drift between the collateral vault's
+     *  fundamental mint rate at tx time and the stored oracle price that
+     *  `marketManager.statusOf` uses inside `checkSlippage`. The vault-token
+     *  oracle publishes discretely; the vault's exchange rate accrues
+     *  continuously — so new shares are minted at `r_current` but valued at
+     *  `r_oracle`, leaving a (L-1)-amplified equity-fraction gap that the
+     *  simple path doesn't see in practice (vault-token markets default to
+     *  the vault/native-vault PM and `leverageDown` drift goes the other
+     *  direction as a gain). Empirically calibrated against the ~3% user
+     *  slippage failure threshold on shMON/WMON native-vault leverage-up;
+     *  refine via fork testing if drift distribution turns out wider. The
+     *  constant is NOT "feed divergence" — shMON oracle IS derived from
+     *  p_MON × r_shMON off-chain; the gap is between publish-time snapshot
+     *  and tx-time state, not between two independent feeds. */
+    LEVERAGE_UP_VAULT_DRIFT_BPS: 30n,
 } as const;
 
 export interface AccountSnapshot {
@@ -561,19 +577,26 @@ export class CToken extends Calldata<ICToken> {
         return asPercentage ? Decimal(this.cache.supplyRate).div(WAD).mul(SECONDS_PER_YEAR) : this.cache.supplyRate;
     }
 
-    getTvl(inUSD: true): USD;
-    getTvl(inUSD: false): bigint;
-    getTvl(inUSD = true): USD | bigint {
-        const tvl = this.cache.totalSupply;
-        return inUSD ? this.convertTokensToUsd(tvl) : tvl;
+    /** @returns Deposits (underlying assets held by the cToken), in USD or raw
+     *  asset bigint. Renamed from `getTvl` — the underlying field must be
+     *  `totalAssets`, not `totalSupply`, or the displayed deposits are
+     *  understated by the exchange-rate drift factor whenever interest has
+     *  accrued. That drift also broke the `liquidity ≤ deposits` invariant
+     *  on live markets (e.g. loAZND/AUSD showed $29.97K liquidity vs $29.21K
+     *  deposits pre-fix — impossible for a solvent ERC4626). */
+    getDeposits(inUSD: true): USD;
+    getDeposits(inUSD: false): bigint;
+    getDeposits(inUSD = true): USD | bigint {
+        const deposits = this.cache.totalAssets;
+        return inUSD ? this.convertTokensToUsd(deposits) : deposits;
     }
 
-    async fetchTvl(inUSD: true): Promise<USD>;
-    async fetchTvl(inUSD: false): Promise<bigint>;
-    async fetchTvl(inUSD = true): Promise<USD | bigint> {
-        const tvl = await this.fetchTotalSupply();
-        this.cache.totalSupply = tvl;
-        return inUSD ? this.getTvl(true) : this.getTvl(false);
+    async fetchDeposits(inUSD: true): Promise<USD>;
+    async fetchDeposits(inUSD: false): Promise<bigint>;
+    async fetchDeposits(inUSD = true): Promise<USD | bigint> {
+        const deposits = await this.fetchTotalAssets();
+        this.cache.totalAssets = deposits;
+        return inUSD ? this.getDeposits(true) : this.getDeposits(false);
     }
 
     getTotalCollateral(inUSD: true): USD;
@@ -1135,6 +1158,17 @@ export class CToken extends Calldata<ICToken> {
      * equity-fraction denominator amplifies it by (L-1)x automatically.
      * The user's swap-level slippage (passed separately to _swapSafe) is
      * unaffected — that's the layer that bounds MEV extraction.
+     *
+     * Applied uniformly to simple AND vault/native-vault leverage-up paths.
+     * Simple path uses the buffer for share-rounding + Redstone drift as
+     * described above. Vault paths inherit the flat 10 bps through the
+     * shared `slippage` variable before the per-branch
+     * `amplifyContractSlippage(..., LEVERAGE_UP_VAULT_DRIFT_BPS)` expansion;
+     * the flat addition is not amplified (base term stays flat) and covers
+     * the same residual class (share-rounding, oracle drift) on vault paths
+     * too. Removing the buffer for vault would save a trivial amount of
+     * user slippage budget at the cost of a false-negative risk on the
+     * residuals — we keep it for symmetry.
      */
     private _leverageUpSlippage(slippage: bigint, leverage: Decimal): bigint {
         if (leverage.lte(1)) return slippage;
@@ -1146,7 +1180,7 @@ export class CToken extends Calldata<ICToken> {
         if(newLeverage.lte(currentLeverage)) {
             throw new Error("New leverage must be more than current leverage");
         }
-        
+
         if(newLeverage.gt(this.maxLeverage)) {
             newLeverage = this.maxLeverage;
         }
@@ -1314,6 +1348,17 @@ export class CToken extends Calldata<ICToken> {
 
                 case 'native-vault':
                 case 'vault': {
+                    // No DEX leg, so no fee-driven forced loss to absorb.
+                    // The `(L-1)×K` expansion here covers the vault-token
+                    // collateral drift between the vault's fundamental mint
+                    // rate at tx time and the stored oracle price that
+                    // `checkSlippage` reads. See LEVERAGE_UP_VAULT_DRIFT_BPS.
+                    const contractSlippage = amplifyContractSlippage(
+                        slippage,
+                        newLeverage.sub(1),
+                        LEVERAGE.LEVERAGE_UP_VAULT_DRIFT_BPS,
+                    );
+
                     calldata = manager.getLeverageCalldata(
                         {
                             borrowableCToken: borrow.address,
@@ -1327,7 +1372,7 @@ export class CToken extends Calldata<ICToken> {
                             swapAction      : PositionManager.emptySwapAction(),
                             auxData         : "0x",
                         },
-                        FormatConverter.bpsToBpsWad(slippage));
+                        FormatConverter.bpsToBpsWad(contractSlippage));
                     break;
                 }
 
@@ -1572,6 +1617,17 @@ export class CToken extends Calldata<ICToken> {
 
                 case 'native-vault':
                 case 'vault': {
+                    // Mirrors the leverageUp vault branch: absorb (L-1) ×
+                    // LEVERAGE_UP_VAULT_DRIFT_BPS for vault-token collateral
+                    // drift. Uses `multiplier.sub(1)` per the per-call-site
+                    // asymmetry documented in helpers.ts (depositAndLeverage
+                    // leverageDelta = multiplier - 1).
+                    const contractSlippage = amplifyContractSlippage(
+                        slippage,
+                        multiplier.sub(1),
+                        LEVERAGE.LEVERAGE_UP_VAULT_DRIFT_BPS,
+                    );
+
                     calldata = manager.getDepositAndLeverageCalldata(
                         FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals),
                         {
@@ -1586,7 +1642,7 @@ export class CToken extends Calldata<ICToken> {
                             swapAction: PositionManager.emptySwapAction(),
                             auxData: "0x",
                         },
-                        FormatConverter.bpsToBpsWad(slippage));
+                        FormatConverter.bpsToBpsWad(contractSlippage));
                     break;
                 }
 
