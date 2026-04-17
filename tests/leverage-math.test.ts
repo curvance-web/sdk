@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import Decimal from 'decimal.js';
-import { amplifyContractSlippage } from '../src/helpers';
+import { amplifyContractSlippage, toContractSwapSlippage } from '../src/helpers';
 
 /**
  * Pure unit tests for `amplifyContractSlippage`. No Anvil, no RPC — the
@@ -175,6 +175,104 @@ describe('amplifyContractSlippage', () => {
                 amplifyContractSlippage(100n, Decimal(9), 24n),
                 316n,
             );
+        });
+    });
+});
+
+describe('toContractSwapSlippage', () => {
+    // `bpsToBpsWad(n) = n × 1e14`. Expected WAD values below are hand-computed
+    // from that identity so a regression to a different conversion factor
+    // fails visibly.
+    const BPS_TO_WAD = 100_000_000_000_000n; // 1e14
+
+    describe('zero-input guard', () => {
+        test('returns 0n when userSlippage is 0n and feeBps is undefined', () => {
+            assert.strictEqual(toContractSwapSlippage(0n), 0n);
+        });
+
+        test('returns 0n when userSlippage is 0n and feeBps is 0n', () => {
+            assert.strictEqual(toContractSwapSlippage(0n, 0n), 0n);
+        });
+
+        test('returns 0n when userSlippage is 0n and feeBps is negative (no amplification)', () => {
+            // Negative feeBps represents a rebate-style aggregator (gas refund,
+            // positive-sum RFQ). We do NOT amplify on negative — the fee
+            // isn't reducing swap output, so _swapSafe sees nothing extra.
+            // Zero userSlippage + no amplification → 0n, preserving adapter
+            // parity for rebate paths.
+            assert.strictEqual(toContractSwapSlippage(0n, -5n), 0n);
+        });
+    });
+
+    describe('user slippage only (no fee)', () => {
+        test('100 bps user slippage → 100 × 1e14 WAD', () => {
+            assert.strictEqual(toContractSwapSlippage(100n), 100n * BPS_TO_WAD);
+        });
+
+        test('100 bps user slippage with explicit feeBps=0n → unchanged', () => {
+            assert.strictEqual(toContractSwapSlippage(100n, 0n), 100n * BPS_TO_WAD);
+        });
+
+        test('1 bps user slippage → 1e14 WAD', () => {
+            assert.strictEqual(toContractSwapSlippage(1n), BPS_TO_WAD);
+        });
+    });
+
+    describe('fee expansion (the bug-fix behavior for Kuru)', () => {
+        test('100 bps slippage + 4 bps fee → 104 × 1e14 WAD (CURVANCE_FEE_BPS at shMON)', () => {
+            // The exact case Kuru would have under-tolerated before the
+            // refactor. User sets 100 bps slippage; CURVANCE_FEE_BPS = 4
+            // means the on-chain _swapSafe sees 104 bps of swap-layer loss.
+            assert.strictEqual(
+                toContractSwapSlippage(100n, 4n),
+                104n * BPS_TO_WAD,
+            );
+        });
+
+        test('0 bps slippage + 4 bps fee → 4 × 1e14 WAD', () => {
+            // Edge: user sets zero slippage tolerance, fee alone is the
+            // entire _swapSafe budget. Matches KyberSwap's pre-extraction
+            // behavior (falsy userSlippage + truthy fee → expansion = fee).
+            assert.strictEqual(
+                toContractSwapSlippage(0n, 4n),
+                4n * BPS_TO_WAD,
+            );
+        });
+
+        test('200 bps slippage + 10 bps fee → 210 × 1e14 WAD', () => {
+            assert.strictEqual(
+                toContractSwapSlippage(200n, 10n),
+                210n * BPS_TO_WAD,
+            );
+        });
+    });
+
+    describe('KyberSwap non-regression (parity with pre-extraction inline form)', () => {
+        // Prior KyberSwap.ts:254-261 computed:
+        //   effective = feeBps && feeBps > 0n ? slippage + feeBps : slippage
+        //   result    = effective ? bpsToBpsWad(effective) : 0n
+        // These cases pin identical outputs so the refactor is a true
+        // behavior-preserving change for KyberSwap.
+        test('realistic call: 50 bps slippage + 4 bps CURVANCE fee', () => {
+            assert.strictEqual(
+                toContractSwapSlippage(50n, 4n),
+                54n * BPS_TO_WAD,
+            );
+        });
+
+        test('no-fee policy (feeBps undefined): slippage passes through unchanged', () => {
+            assert.strictEqual(
+                toContractSwapSlippage(75n, undefined),
+                75n * BPS_TO_WAD,
+            );
+        });
+
+        test('zero-slippage + zero-fee: returns 0n without WAD conversion', () => {
+            // Critical edge: the guard must short-circuit before bpsToBpsWad
+            // to preserve the `effective ? ... : 0n` semantics of both
+            // pre-extraction adapters.
+            assert.strictEqual(toContractSwapSlippage(0n, 0n), 0n);
+            assert.strictEqual(toContractSwapSlippage(0n), 0n);
         });
     });
 });

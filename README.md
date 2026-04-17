@@ -411,7 +411,7 @@ leverage.checkBorrowExceedsLiquidity(borrowAmount, availableLiquidity)
 ### Contract-level slippage amplification
 
 ```ts
-import { amplifyContractSlippage } from "curvance"
+import { amplifyContractSlippage, toContractSwapSlippage } from "curvance"
 
 // Used internally by CToken.leverageUp / leverageDown / depositAndLeverage to
 // expand the contract-level slippage budget for the equity-fraction amplification
@@ -420,6 +420,15 @@ import { amplifyContractSlippage } from "curvance"
 // (L-1)-terms, so contractSlippage must absorb it without dipping into the
 // user's raw `slippage` budget (reserved for variable DEX impact + drift).
 amplifyContractSlippage(baseSlippageBps, leverageDelta, bpsToAmplify)
+
+// Used by DEX aggregator adapters (KyberSwap etc.) in `quoteAction` to
+// compute the WAD-BPS slippage tolerance for the `Swap.slippage` struct
+// field consumed by on-chain `_swapSafe`. When the aggregator pre-deducts
+// a currency_in fee, the expansion absorbs that fee so `_swapSafe` doesn't
+// double-count it as swap slippage. Adapters whose fee model does NOT
+// pre-deduct (e.g., out-of-band referrer paid from output) should call
+// with `feeBps` omitted / 0n so no expansion applies.
+toContractSwapSlippage(userSlippageBps, feeBps?)
 ```
 
 ### Borrow math

@@ -117,6 +117,51 @@ export function amplifyContractSlippage(
     return baseSlippage + BigInt(expansion);
 }
 
+/**
+ * Compute the swap-layer slippage tolerance (in WAD-BPS form) for the
+ * `Swap.slippage` field passed through `CalldataChecker._swapSafe`.
+ *
+ * Semantics: `_swapSafe` measures `(valueIn − valueOut) / valueIn` on the
+ * swap leg itself — NOT equity-fraction (that's the contract-level
+ * `checkSlippage` modifier one layer up; see `amplifyContractSlippage`).
+ * When a DEX aggregator deducts a currency_in fee before executing the
+ * swap, the on-chain path sees `valueIn = full input` but receives only
+ * `valueOut = swap_out_post_fee`, so the fee appears to `_swapSafe` as
+ * swap slippage. Expand the tolerance here to absorb the known fee so the
+ * user's raw slippage budget stays reserved for variable in-op losses
+ * (pool-fee tier variance, DEX price impact, oracle drift).
+ *
+ * ## Symmetry across DEX aggregators
+ *
+ * Every aggregator adapter that charges `CURVANCE_FEE_BPS` via a
+ * currency_in deduction must route its `quoteAction` through this helper
+ * so the on-chain behavior is uniform. Currently used by:
+ *
+ *  - `KyberSwap.quoteAction` (explicit `currency_in` + `isInBps` params)
+ *  - `Kuru.quoteAction` (referrer-style fee deduction, per Kuru docs
+ *    mirroring KyberSwap's currency_in semantics)
+ *
+ * An aggregator that paid fees out-of-band (e.g., signed RFQ with fill-
+ * price already netted) would NOT use this helper — its `_swapSafe` sees
+ * no fee-induced loss. Gas-rebate models (negative fee) also skip.
+ *
+ * ## Return value
+ *
+ * BPS converted to WAD form via `FormatConverter.bpsToBpsWad`. Zero input
+ * (both userSlippage and feeBps are zero / undefined) returns `0n` without
+ * the conversion — preserves the historical zero-guard behavior of both
+ * adapters.
+ *
+ * @param userSlippage User's slippage tolerance in BPS (e.g., 100n = 1%)
+ * @param feeBps Aggregator's currency_in fee in BPS (e.g., CURVANCE_FEE_BPS = 4n).
+ *               Undefined / 0n / negative all produce no expansion.
+ * @returns WAD-BPS slippage for the `Swap.slippage` struct field
+ */
+export function toContractSwapSlippage(userSlippage: bigint, feeBps?: bigint): bigint {
+    const effective = feeBps && feeBps > 0n ? userSlippage + feeBps : userSlippage;
+    return effective ? FormatConverter.bpsToBpsWad(effective) : 0n;
+}
+
 export function getChainConfig(chain: ChainRpcPrefix = setup_config.chain) {
     const config = chain_config[chain];
     if (!config) {
