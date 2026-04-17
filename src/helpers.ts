@@ -65,6 +65,58 @@ export function toBigInt(value: number | Decimal, decimals: bigint): bigint {
     return FormatConverter.decimalToBigInt(Decimal(value), decimals);
 }
 
+/**
+ * Amplify a BPS slippage tolerance by `leverageDelta × bpsToAmplify` to
+ * compensate for the equity-fraction amplification that the on-chain
+ * `checkSlippage` modifier applies to in-op losses on leveraged operations.
+ *
+ * ## Why this exists
+ *
+ * `checkSlippage` measures loss as `(valueIn − valueOut) / equity`. On a
+ * leveraged swap where `valueIn = equity × L`, the same absolute loss X
+ * appears as `X / equity = (X / valueIn) × L` — amplified by `(L−1)` in
+ * (L−1)-terms. So any known per-swap loss (Curvance fee deducted before
+ * the swap; full-deleverage intentional overshoot) needs the contract-level
+ * slippage budget expanded by the amplified amount, otherwise a benign
+ * known loss trips the check and reverts the tx.
+ *
+ * The user's raw `slippage` budget is reserved for VARIABLE in-op losses
+ * (DEX impact, oracle drift) — this helper adds the DETERMINISTIC losses
+ * on top.
+ *
+ * ## Call sites
+ *
+ * Three sites in `CToken.ts` use this:
+ *
+ *  - `leverageUp` case `'simple'`:     `leverageDelta = newLeverage - 1`,        `bps = feeBps`
+ *  - `leverageDown` (simple):          `leverageDelta = full ? currL - 1 :         currL - newL`,
+ *                                       `bps = full ? DELEVERAGE_OVERHEAD_BPS + feeBps : feeBps`
+ *  - `depositAndLeverage` case simple:  `leverageDelta = multiplier - 1`,          `bps = feeBps`
+ *
+ * The `leverageDelta` and `bpsToAmplify` arguments preserve the per-site
+ * asymmetries: leverageUp/depositAndLeverage pass `newL - 1`; deleverage's
+ * full path uses `currL - 1` (the entire leverage range collapses) and its
+ * partial path uses `currL - newL` (only the shrunk range swaps). Full
+ * deleverage also adds `DELEVERAGE_OVERHEAD_BPS` on top of the fee.
+ *
+ * ## Not for
+ *
+ * - `KyberSwap.quoteAction`'s `action.slippage = userSlippage + feeBps` is
+ *   a DIFFERENT primitive — swap-layer flat fee absorption for `_swapSafe`,
+ *   not `(L−1)`-amplified for `checkSlippage`. Keep that in the adapter.
+ * - Borrow-amount sizing in `previewLeverageUp` — that's a fixed-point solve
+ *   against LTV, not a slippage-tolerance expansion.
+ */
+export function amplifyContractSlippage(
+    baseSlippage: bigint,
+    leverageDelta: Decimal,
+    bpsToAmplify: bigint,
+): bigint {
+    if (bpsToAmplify === 0n) return baseSlippage;
+    const expansion = leverageDelta.mul(Number(bpsToAmplify)).ceil().toFixed(0);
+    return baseSlippage + BigInt(expansion);
+}
+
 export function getChainConfig(chain: ChainRpcPrefix = setup_config.chain) {
     const config = chain_config[chain];
     if (!config) {

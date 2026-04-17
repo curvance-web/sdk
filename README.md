@@ -408,6 +408,20 @@ leverage.checkLeverageAmountBelowMinimum(input) // $10.10 minimum borrow
 leverage.checkBorrowExceedsLiquidity(borrowAmount, availableLiquidity)
 ```
 
+### Contract-level slippage amplification
+
+```ts
+import { amplifyContractSlippage } from "curvance"
+
+// Used internally by CToken.leverageUp / leverageDown / depositAndLeverage to
+// expand the contract-level slippage budget for the equity-fraction amplification
+// that on-chain `checkSlippage` applies. Each deterministic per-swap loss
+// (CURVANCE_FEE_BPS, full-deleverage overshoot) gets amplified by (L-1) in
+// (L-1)-terms, so contractSlippage must absorb it without dipping into the
+// user's raw `slippage` budget (reserved for variable DEX impact + drift).
+amplifyContractSlippage(baseSlippageBps, leverageDelta, bpsToAmplify)
+```
+
 ### Borrow math
 
 ```ts
