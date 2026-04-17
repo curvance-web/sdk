@@ -3,10 +3,15 @@ import test from "node:test";
 import { UINT256_MAX } from "../src/helpers";
 import {
     ProtocolReader,
+    __resetProtocolReaderCache,
     type DynamicMarketData,
     type StaticMarketData,
     type UserData,
 } from "../src/classes/ProtocolReader";
+
+test.beforeEach(() => {
+    __resetProtocolReaderCache();
+});
 
 const MARKET = "0x0000000000000000000000000000000000000001";
 const MARKET_B = "0x0000000000000000000000000000000000000003";
@@ -481,4 +486,158 @@ test("getMarketStates falls back to legacy calls when the selector is not deploy
     assert.equal(first.userMarkets[0]?.tokens[0]?.userDebt, 19n);
     assert.equal(second.dynamicMarkets[0]?.address, MARKET);
     assert.equal(second.userMarkets[0]?.tokens[0]?.userDebt, 5n);
+});
+
+// ---------------------------------------------------------------------------
+// bufferTime pass-through: the IProtocolReader interface declares bufferTime
+// as a parameter on hypothetical*Of, and sibling wrappers like maxRedemptionOf
+// accept an optional bufferTime default. The hypotheticalRedemptionOf /
+// hypotheticalBorrowOf wrappers previously hardcoded 0n, which silently
+// discards the caller's buffer preference. These tests validate the wrappers
+// forward the argument to the contract.
+// ---------------------------------------------------------------------------
+
+test("hypotheticalRedemptionOf forwards bufferTime to the contract call", async () => {
+    const reader = createReader();
+    let captured: { bufferTime: bigint | null } = { bufferTime: null };
+
+    reader.contract = {
+        hypotheticalRedemptionOf: async (
+            _account: string,
+            _ctoken: string,
+            _shares: bigint,
+            bufferTime: bigint,
+        ) => {
+            captured.bufferTime = bufferTime;
+            return [0n, 0n, true, false];
+        },
+    } as any;
+
+    const ctoken = { address: TOKEN } as any;
+    await (reader as any).hypotheticalRedemptionOf(ACCOUNT, ctoken, 1_000n, 180n);
+
+    assert.equal(
+        captured.bufferTime,
+        180n,
+        "wrapper must forward caller's bufferTime, not hardcode 0n",
+    );
+});
+
+test("hypotheticalRedemptionOf defaults bufferTime to 0n when not provided", async () => {
+    const reader = createReader();
+    let captured: { bufferTime: bigint | null } = { bufferTime: null };
+
+    reader.contract = {
+        hypotheticalRedemptionOf: async (
+            _account: string,
+            _ctoken: string,
+            _shares: bigint,
+            bufferTime: bigint,
+        ) => {
+            captured.bufferTime = bufferTime;
+            return [0n, 0n, true, false];
+        },
+    } as any;
+
+    const ctoken = { address: TOKEN } as any;
+    await reader.hypotheticalRedemptionOf(ACCOUNT as any, ctoken, 1_000n);
+
+    assert.equal(captured.bufferTime, 0n, "default must remain 0n for backward compatibility");
+});
+
+test("hypotheticalBorrowOf forwards bufferTime to the contract call", async () => {
+    const reader = createReader();
+    let captured: { bufferTime: bigint | null } = { bufferTime: null };
+
+    reader.contract = {
+        hypotheticalBorrowOf: async (
+            _account: string,
+            _ctoken: string,
+            _assets: bigint,
+            bufferTime: bigint,
+        ) => {
+            captured.bufferTime = bufferTime;
+            return [0n, 0n, true, false];
+        },
+    } as any;
+
+    const ctoken = { address: TOKEN } as any;
+    await (reader as any).hypotheticalBorrowOf(ACCOUNT, ctoken, 1_000n, 60n);
+
+    assert.equal(
+        captured.bufferTime,
+        60n,
+        "wrapper must forward caller's bufferTime, not hardcode 0n",
+    );
+});
+
+test("getMarketStates selector-support probe caches across instances at the same address", async () => {
+    // Every setupChain() constructs a fresh ProtocolReader. If selector-support
+    // is per-instance, each chain-switch (or re-setup) re-probes — and after
+    // the retry-provider's unknown-error cascade fix, one probe costs primary
+    // + every fallback provider. Cache by address so the second instance
+    // short-circuits straight to the legacy path.
+    const PROBE_ADDRESS = "0x00000000000000000000000000000000000000cc";
+
+    const reader1 = createReader();
+    (reader1 as any).address = PROBE_ADDRESS;
+    let reader1ProbeCount = 0;
+    reader1.contract = {
+        getMarketStates: async () => {
+            reader1ProbeCount += 1;
+            const error: any = new Error("execution reverted (no data present; likely require(false) occurred)");
+            error.shortMessage = "execution reverted (no data present; likely require(false) occurred)";
+            error.reason = "require(false)";
+            error.transaction = {
+                data: "0xaa78b4d400000000000000000000000000000000000000000000000000000000",
+            };
+            throw error;
+        },
+    } as any;
+    reader1.getDynamicMarketData = async () => [];
+    reader1.getUserData = async () => ({ locks: [], markets: [] });
+
+    await reader1.getMarketStates([], ACCOUNT as any);
+    assert.equal(reader1ProbeCount, 1, "first instance probes the contract");
+
+    const reader2 = createReader();
+    (reader2 as any).address = PROBE_ADDRESS;
+    let reader2ProbeCount = 0;
+    reader2.contract = {
+        getMarketStates: async () => {
+            reader2ProbeCount += 1;
+            throw new Error("probe should be cached; contract.getMarketStates must not be called again");
+        },
+    } as any;
+    reader2.getDynamicMarketData = async () => [];
+    reader2.getUserData = async () => ({ locks: [], markets: [] });
+
+    await reader2.getMarketStates([], ACCOUNT as any);
+    assert.equal(
+        reader2ProbeCount,
+        0,
+        "second instance at same address reuses cached probe result",
+    );
+});
+
+test("hypotheticalBorrowOf defaults bufferTime to 0n when not provided", async () => {
+    const reader = createReader();
+    let captured: { bufferTime: bigint | null } = { bufferTime: null };
+
+    reader.contract = {
+        hypotheticalBorrowOf: async (
+            _account: string,
+            _ctoken: string,
+            _assets: bigint,
+            bufferTime: bigint,
+        ) => {
+            captured.bufferTime = bufferTime;
+            return [0n, 0n, true, false];
+        },
+    } as any;
+
+    const ctoken = { address: TOKEN } as any;
+    await reader.hypotheticalBorrowOf(ACCOUNT as any, ctoken, 1_000n);
+
+    assert.equal(captured.bufferTime, 0n, "default must remain 0n for backward compatibility");
 });

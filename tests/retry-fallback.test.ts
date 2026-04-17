@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getRpcDebugSnapshot, resetRpcDebugState, RetryableProvider } from "../src/retry-provider";
+import { DEFAULT_RETRY_CONFIG, getRpcDebugSnapshot, resetRpcDebugState, RetryableProvider } from "../src/retry-provider";
 import { TransportHarness, fail, hang, ok } from "./support/transport-harness";
 
 test.beforeEach(() => {
@@ -384,4 +384,209 @@ test("rpc debug snapshot records endpoint health without request params", async 
         false,
         "debug state must not include RPC params",
     );
+});
+
+// ---------------------------------------------------------------------------
+// Regression: unknown errors on primary should still try the fallback.
+// Contract errors (revert, nonce, user rejection) are deterministic chain
+// state and must skip the fallback. But errors that are neither contract
+// nor known-retryable (e.g. BAD_DATA from ethers, malformed JSON, 401/403,
+// unrecognized RPC error shapes) indicate a transport-level issue that a
+// different provider may handle correctly. Without this, a primary with a
+// broken response shape causes every read to fail while a healthy fallback
+// sits idle.
+// ---------------------------------------------------------------------------
+
+test("unknown errors on primary fall through to fallback", async (t) => {
+    const harness = new TransportHarness(t);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            send: {
+                eth_call: fail("BAD_DATA: could not decode result", { code: "BAD_DATA" }),
+            },
+        },
+        {
+            fallbacks: [
+                {
+                    label: "fallback",
+                    send: {
+                        eth_call: ok("fallback:eth_call:ok"),
+                    },
+                },
+            ],
+        },
+    );
+
+    const result = await wrapped.send("eth_call", []);
+    assert.equal(result, "fallback:eth_call:ok");
+    assert.equal(
+        harness.getCalls("primary", "eth_call").length,
+        1,
+        "primary: single attempt (unknown errors are not retried on same provider)",
+    );
+    assert.equal(
+        harness.getCalls("fallback", "eth_call").length,
+        1,
+        "fallback: called after primary's unknown error",
+    );
+});
+
+test("unknown errors on a fallback advance to the next fallback", async (t) => {
+    const harness = new TransportHarness(t);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            send: {
+                eth_call: fail("timeout: primary eth_call"),
+            },
+        },
+        {
+            fallbacks: [
+                {
+                    label: "fallback-1",
+                    send: {
+                        eth_call: fail("Unexpected end of JSON input"),
+                    },
+                },
+                {
+                    label: "fallback-2",
+                    send: {
+                        eth_call: ok("fallback-2:eth_call:ok"),
+                    },
+                },
+            ],
+        },
+    );
+
+    const result = await wrapped.send("eth_call", []);
+    assert.equal(result, "fallback-2:eth_call:ok");
+    assert.deepEqual(
+        harness.callLabels(),
+        ["primary", "fallback-1", "fallback-2"],
+        "unknown error on fallback-1 should still advance to fallback-2",
+    );
+});
+
+test("contract errors on primary correctly skip fallback (regression)", async (t) => {
+    // Sibling of `non-retryable errors on read methods skip fallback` above.
+    // Kept as a regression guard so fixing the unknown-error behavior above
+    // doesn't accidentally start cascading contract reverts across providers.
+    const harness = new TransportHarness(t);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            send: {
+                eth_call: fail("user rejected transaction", { code: "ACTION_REJECTED" }),
+            },
+        },
+        {
+            fallbacks: [
+                {
+                    label: "fallback",
+                    send: {
+                        eth_call: ok("fallback:eth_call:ok"),
+                    },
+                },
+            ],
+        },
+    );
+
+    await assert.rejects(() => wrapped.send("eth_call", []), /user rejected/);
+    assert.equal(harness.getCalls("primary", "eth_call").length, 1);
+    assert.equal(
+        harness.getCalls("fallback", "eth_call").length,
+        0,
+        "contract/user errors must never cascade to fallbacks",
+    );
+});
+
+// ---------------------------------------------------------------------------
+// Worst-case latency budget — with defaults, a dying primary + healthy fallback
+// must not leave the user staring at a loading spinner longer than the user
+// will tolerate. At ~10s users start to assume the site is broken. Previous
+// defaults (maxRetries: 3, timeoutMs: 10s) produced a ~82s ceiling on a two-
+// provider cascade; the current policy targets ~17s worst case.
+//
+// These tests lock in the budget by simulation. Future config changes that
+// restore excessive latency will visibly fail here rather than silently ship.
+// ---------------------------------------------------------------------------
+
+test("DEFAULT_RETRY_CONFIG keeps single-provider worst-case under 10 seconds", () => {
+    // Math guardrail — independent of mock-timer plumbing. A two-provider
+    // cascade is bounded by 2 × this value + fallback handshake overhead,
+    // so keeping a single provider under 10s targets ~20s total worst case.
+    const attempts = DEFAULT_RETRY_CONFIG.maxRetries + 1;
+    const timeoutBudget = attempts * DEFAULT_RETRY_CONFIG.timeoutMs;
+    const worstBackoff = DEFAULT_RETRY_CONFIG.maxRetries * DEFAULT_RETRY_CONFIG.maxDelay;
+    const worstCase = timeoutBudget + worstBackoff;
+
+    assert.ok(
+        worstCase <= 10_000,
+        `Single-provider worst case is ${worstCase}ms; cascade = ~${worstCase * 2}ms. ` +
+        `Target <= 10_000ms per provider (~20s total) to keep users from bouncing.`,
+    );
+});
+
+test("read with hanging primary and healthy fallback resolves within latency budget", async (t) => {
+    // Behavioral guardrail — uses the ACTUAL default config, not harness overrides.
+    // Budget is set to the Option C target (~17s). Failure here signals that the
+    // default retry policy has drifted into "user-hostile" territory.
+    const LATENCY_BUDGET_MS = 17_000;
+
+    const harness = new TransportHarness(t);
+    harness.enableMockTime();
+
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            send: {
+                // Enough hangs to cover any retry count the defaults could specify.
+                eth_call: [hang(), hang(), hang(), hang(), hang(), hang()],
+            },
+        },
+        {
+            // Intentionally use the production defaults, not harness overrides —
+            // this test validates the shipped policy, not a test fixture.
+            config: {
+                maxRetries: DEFAULT_RETRY_CONFIG.maxRetries,
+                timeoutMs: DEFAULT_RETRY_CONFIG.timeoutMs,
+                baseDelay: DEFAULT_RETRY_CONFIG.baseDelay,
+                maxDelay: DEFAULT_RETRY_CONFIG.maxDelay,
+                backoffMultiplier: DEFAULT_RETRY_CONFIG.backoffMultiplier,
+                retryableErrors: DEFAULT_RETRY_CONFIG.retryableErrors,
+            },
+            fallbacks: [
+                {
+                    label: "fallback",
+                    send: {
+                        eth_call: ok("fallback:eth_call:ok"),
+                    },
+                },
+            ],
+        },
+    );
+
+    let resolved = false;
+    const promise = wrapped.send("eth_call", []).then((v: any) => {
+        resolved = true;
+        return v;
+    });
+
+    // Advance time in 500ms increments up to the budget ceiling so any
+    // setTimeout-driven step (per-attempt timeout, backoff sleep) fires.
+    for (let elapsed = 0; elapsed < LATENCY_BUDGET_MS && !resolved; elapsed += 500) {
+        await harness.tick(500);
+    }
+
+    assert.ok(
+        resolved,
+        `Read did not resolve within ${LATENCY_BUDGET_MS}ms budget — ` +
+        `dying primary + healthy fallback should not leave the user hanging.`,
+    );
+    assert.equal(await promise, "fallback:eth_call:ok");
 });

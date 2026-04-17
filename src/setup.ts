@@ -89,6 +89,17 @@ export async function setupChain(
     if(provider != null) {
         if("address" in provider) {
             signer = provider as curvance_signer;
+            // Wallet-primary for reads: when a wallet is connected, its own
+            // provider is the primary read source. chainReadProvider + chain
+            // fallbacks become the fallback chain via wrapProviderWithRetries
+            // below. This distributes read load across users' wallet RPCs
+            // instead of funneling every Curvance session through one origin,
+            // and matches the pre-`358d46b` architecture the original author
+            // designed (explicitly citing Rabby as the unreliable-wallet case).
+            // Explicit `options.readProvider` wins if set.
+            if(!readProviderOverride && signer.provider) {
+                readProviderOverride = signer.provider as curvance_read_provider;
+            }
         } else {
             readProviderOverride = provider as curvance_read_provider;
         }

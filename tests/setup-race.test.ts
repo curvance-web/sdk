@@ -205,3 +205,147 @@ test("setupChain wraps explicit read-provider overrides with chain fallbacks", a
         assert.ok(urls.includes(fallback));
     }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Wallet-primary reads.
+//
+// When a signer is connected, the wallet's own provider should be the primary
+// read source — the SDK's configured chain RPC + fallbacks serve as fallback
+// only. This matches the pre-`358d46b` architecture (which explicitly named
+// Rabby as the motivating unreliable-wallet case in an inline comment) and
+// distributes read load across users' wallet-configured RPCs instead of
+// funneling every Curvance user's reads through the single `chain_config`
+// primary origin.
+//
+// Graceful degradation: wallet provider errors → retry wrapper falls through
+// to chainReadProvider → chain fallbacks. Users with broken or missing wallet
+// RPCs never lose access.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("setupChain uses the wallet's own provider as the read primary when signer has one", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const walletRpcProvider = new JsonRpcProvider("https://wallet-rpc.example");
+    const fakeSigner = {
+        address: "0x000000000000000000000000000000000000dEaD",
+        provider: walletRpcProvider,
+    } as any;
+
+    resetRpcDebugState();
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async () => [] as any) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+        resetRpcDebugState();
+    });
+
+    await setupChain("monad-mainnet", fakeSigner, false, "https://api.example");
+
+    const snapshot = getRpcDebugSnapshot();
+    const monadRpc = getChainRpcConfig("monad-mainnet");
+    const primary = snapshot.endpoints.find((e) => e.role === "primary");
+    const fallbackUrls = snapshot.endpoints
+        .filter((e) => e.role === "fallback")
+        .map((e) => e.url)
+        .filter((url): url is string => url != null);
+
+    // Signer is still the write path.
+    assert.equal(setup_config.signer, fakeSigner);
+    assert.equal(setup_config.account, fakeSigner.address);
+    // Read primary is the wallet's own provider — load distributes across users.
+    assert.equal(
+        primary?.url,
+        "https://wallet-rpc.example",
+        "wallet's provider must be the read primary when a signer is connected",
+    );
+    // Chain's configured primary is a fallback (catches wallet RPC failures).
+    assert.ok(
+        fallbackUrls.includes(monadRpc.primary.replace(/\/+$/, "")),
+        "chain primary must be in the fallback chain behind the wallet provider",
+    );
+    // Chain's configured fallbacks are also in the fallback chain.
+    for (const fallback of monadRpc.fallbacks.map((url) => url.replace(/\/+$/, ""))) {
+        assert.ok(
+            fallbackUrls.includes(fallback),
+            `chain fallback ${fallback} must be in the fallback chain`,
+        );
+    }
+});
+
+test("setupChain falls back to chain provider when the signer has no .provider", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const fakeSignerNoProvider = {
+        address: "0x000000000000000000000000000000000000dEaD",
+        // no .provider — defensive path for Wallet signers constructed without
+        // a connected provider, or any non-standard signer implementation.
+    } as any;
+
+    resetRpcDebugState();
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async () => [] as any) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+        resetRpcDebugState();
+    });
+
+    await setupChain("monad-mainnet", fakeSignerNoProvider, false, "https://api.example");
+
+    const snapshot = getRpcDebugSnapshot();
+    const monadRpc = getChainRpcConfig("monad-mainnet");
+    const primary = snapshot.endpoints.find((e) => e.role === "primary");
+
+    assert.equal(setup_config.signer, fakeSignerNoProvider);
+    assert.equal(
+        primary?.url,
+        monadRpc.primary.replace(/\/+$/, ""),
+        "signer without .provider must degrade to chain primary",
+    );
+});
+
+test("explicit readProvider option wins over the signer's own provider", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const walletRpcProvider = new JsonRpcProvider("https://wallet-rpc.example");
+    const fakeSigner = {
+        address: "0x000000000000000000000000000000000000dEaD",
+        provider: walletRpcProvider,
+    } as any;
+    const overrideProvider = new JsonRpcProvider("https://override-rpc.example");
+
+    resetRpcDebugState();
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async () => [] as any) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+        resetRpcDebugState();
+    });
+
+    await setupChain("monad-mainnet", fakeSigner, false, "https://api.example", {
+        readProvider: overrideProvider,
+    });
+
+    const snapshot = getRpcDebugSnapshot();
+    const primary = snapshot.endpoints.find((e) => e.role === "primary");
+    const fallbackUrls = snapshot.endpoints
+        .filter((e) => e.role === "fallback")
+        .map((e) => e.url)
+        .filter((url): url is string => url != null);
+
+    // Explicit option wins — wallet's provider is ignored for reads.
+    assert.equal(
+        primary?.url,
+        "https://override-rpc.example",
+        "explicit readProvider option must take precedence over signer.provider",
+    );
+    assert.ok(
+        !fallbackUrls.includes("https://wallet-rpc.example"),
+        "wallet's provider must not appear in the fallback chain when an explicit override was given",
+    );
+});

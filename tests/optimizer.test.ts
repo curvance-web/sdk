@@ -24,7 +24,11 @@ const ALLOCATION_CAPS_BPS = [6000, 5000, 2000];
 const FEE_BPS = 1000;
 const DEPOSIT_AMOUNT = 10_000n * 10n ** 6n; // 10,000 USDC (6 decimals)
 
-describe('Lending Optimizer', () => {
+const FORK_SKIP = (!process.env.DEPLOYER_PRIVATE_KEY || !process.env.TEST_RPC)
+    ? 'Fork env not configured: set DEPLOYER_PRIVATE_KEY and TEST_RPC in .env. See tests/README.md.'
+    : undefined;
+
+describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
     let framework: TestFramework;
     let account: address;
     let reader: OptimizerReader;
@@ -63,7 +67,7 @@ describe('Lending Optimizer', () => {
         const readerContract = await readerFactory.deploy();
         await readerContract.waitForDeployment();
         const readerAddress = (await readerContract.getAddress()) as address;
-        reader = new OptimizerReader(readerAddress, framework.signer);
+        reader = new OptimizerReader(readerAddress, framework.provider);
         console.log(`OptimizerReader deployed at: ${readerAddress}`);
 
         // Deploy LendingOptimizer

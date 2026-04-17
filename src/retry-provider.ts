@@ -435,52 +435,59 @@ class RetryableProvider {
         this.publishDebugState(state);
     }
 
-    private isRetryableError(error: any): boolean {
-        // First check for non-retryable smart contract errors
+    // Contract / user-intent errors that are deterministic chain state. These
+    // must never be retried on the same provider AND must never cascade to a
+    // fallback provider — the next provider would return the same result.
+    private static readonly CONTRACT_ERROR_PATTERNS = [
+        'revert',
+        'execution reverted',
+        'transaction reverted',
+        'insufficient funds',
+        'gas required exceeds allowance',
+        'nonce too high',
+        'nonce too low',
+        'replacement transaction underpriced',
+        'already pending',
+        'invalid opcode',
+        'stack overflow',
+        'stack underflow',
+        'out of gas',
+        'call_exception',
+        'unpredictable_gas_limit',
+        'invalid_argument',
+        'missing_argument',
+        'unexpected_argument',
+        'numeric_fault',
+        'user rejected',
+        'user denied',
+        'user cancelled',
+        'action_rejected',
+        '4001',
+    ];
+
+    private isContractError(error: any): boolean {
         const errorMessage = error?.message?.toLowerCase() || '';
         const errorCode = error?.code?.toString() || '';
-        
-        // These are contract execution errors that should NOT be retried
-        const nonRetryablePatterns = [
-            'revert',
-            'execution reverted',
-            'transaction reverted',
-            'insufficient funds',
-            'gas required exceeds allowance',
-            'nonce too high',
-            'nonce too low',
-            'replacement transaction underpriced',
-            'already pending',
-            'invalid opcode',
-            'stack overflow',
-            'stack underflow',
-            'out of gas',
-            'call_exception',
-            'unpredictable_gas_limit',
-            'invalid_argument',
-            'missing_argument',
-            'unexpected_argument',
-            'numeric_fault',
-            'user rejected',
-            'user denied',
-            'user cancelled',
-            'action_rejected',
-            '4001'
-        ];
-        
-        // If it's a contract execution error, don't retry
-        const isContractError = nonRetryablePatterns.some(pattern => 
+
+        return RetryableProvider.CONTRACT_ERROR_PATTERNS.some((pattern) =>
             errorMessage.includes(pattern) || errorCode.includes(pattern)
         );
-        
-        if (isContractError) {
+    }
+
+    private isRetryableError(error: any): boolean {
+        // Retry policy — only known-transient errors warrant a same-provider
+        // retry. Unknown error shapes are NOT retried here (re-sending the
+        // same payload to the same broken endpoint rarely helps), but they
+        // DO still advance to the fallback chain via isContractError below.
+        if (this.isContractError(error)) {
             return false;
         }
-        
-        // Now check for retryable network/RPC errors
+
+        const errorMessage = error?.message?.toLowerCase() || '';
+        const errorCode = error?.code?.toString() || '';
         const errorStatus = error?.response?.status?.toString() || '';
-        
-        return this.config.retryableErrors.some(retryableError => 
+
+        return this.config.retryableErrors.some(retryableError =>
             errorMessage.includes(retryableError.toLowerCase()) ||
             errorCode.includes(retryableError) ||
             errorStatus.includes(retryableError)
@@ -706,7 +713,12 @@ class RetryableProvider {
                 this.markFallbackSuccess(state);
                 return result;
             } catch (fallbackError: any) {
-                if (!this.isRetryableError(fallbackError)) {
+                // Only deterministic contract/user errors short-circuit the
+                // fallback chain. Unknown transport-level errors on one
+                // fallback must still advance to the next configured provider
+                // — a malformed response or auth issue on fallback N is not
+                // a reason to abandon fallback N+1.
+                if (this.isContractError(fallbackError)) {
                     throw fallbackError;
                 }
 
@@ -738,7 +750,11 @@ class RetryableProvider {
         try {
             return await this.executeWithRetry(timedPrimaryOp, context, primaryState);
         } catch (primaryError: any) {
-            if (!this.isRetryableError(primaryError)) {
+            // Contract/user errors skip fallback — deterministic chain state.
+            // Everything else (known-retryable AND unknown transport errors)
+            // advances to the fallback chain so a broken primary can't block
+            // reads while healthy fallbacks sit idle.
+            if (this.isContractError(primaryError)) {
                 throw primaryError;
             }
 

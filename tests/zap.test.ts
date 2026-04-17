@@ -8,7 +8,11 @@ import { fastForwardTime, MARKET_HOLD_PERIOD_SECS } from './utils/helper';
 import { ERC20 } from '../src';
 import assert from 'node:assert';
 
-describe('Zapping', () => {
+const FORK_SKIP = (!process.env.DEPLOYER_PRIVATE_KEY || !process.env.TEST_RPC)
+    ? 'Fork env not configured: set DEPLOYER_PRIVATE_KEY and TEST_RPC in .env. See tests/README.md.'
+    : undefined;
+
+describe('Zapping', { skip: FORK_SKIP }, () => {
     let account: address;
     let framework: TestFramework;
 
@@ -96,7 +100,7 @@ describe('Zapping', () => {
         console.log(`WMON decimals: ${wmonDecimals}, USDC decimals: ${usdcDecimals}`);
         assert.notEqual(wmonDecimals, usdcDecimals, 'Test requires tokens with different decimals');
 
-        const zapTokens = await framework.curvance.dexAgg.getAvailableTokens(framework.signer, null);
+        const zapTokens = await framework.curvance.dexAgg.getAvailableTokens(framework.provider, null);
         const wmonZap = zapTokens.find(z => z.interface.address.toLowerCase() === wmonAddress.toLowerCase());
         assert(wmonZap, `Could not find zap token for WMON (${wmonAddress})`);
         assert(wmonZap!.quote, `Zap token for WMON has no quote function`);

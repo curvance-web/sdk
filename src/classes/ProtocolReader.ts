@@ -224,12 +224,26 @@ function createEmptyUserData(staticMarkets: StaticMarketData[]): UserData {
     };
 }
 
+// Module-level cache: reader address → whether the new getMarketStates
+// selector is deployed on that contract. Every setupChain() constructs a
+// fresh ProtocolReader, so a per-instance flag would re-probe on every
+// chain switch. After the retry-provider unknown-error cascade fix, one
+// probe costs primary + every configured fallback RPC, making the re-probe
+// observable cost rather than a silent waste.
+const PROTOCOL_READER_SELECTOR_SUPPORT = new Map<address, boolean>();
+const PROTOCOL_READER_FALLBACK_WARNED = new Set<address>();
+
+/** Test-only: reset the module-level probe cache so tests can validate
+ *  probe-path behavior in isolation. Not part of the public runtime API. */
+export function __resetProtocolReaderCache(): void {
+    PROTOCOL_READER_SELECTOR_SUPPORT.clear();
+    PROTOCOL_READER_FALLBACK_WARNED.clear();
+}
+
 export class ProtocolReader {
     provider: curvance_read_provider;
     address: address;
     contract: Contract & IProtocolReader;
-    private supportsGetMarketStates: boolean | null = null;
-    private hasWarnedAboutMarketStatesFallback = false;
 
     constructor(address: address, provider: curvance_read_provider = setup_config.readProvider) {
         this.provider = provider;
@@ -261,8 +275,8 @@ export class ProtocolReader {
         // runs the SDK (main deployment, staging, forks, local Anvil) has a
         // ProtocolReader with getMarketStates deployed. Removing it right after
         // a single deployment upgrade will break older forks and stale test envs.
-        if (!this.hasWarnedAboutMarketStatesFallback) {
-            this.hasWarnedAboutMarketStatesFallback = true;
+        if (!PROTOCOL_READER_FALLBACK_WARNED.has(this.address)) {
+            PROTOCOL_READER_FALLBACK_WARNED.add(this.address);
             console.warn(
                 "[ProtocolReader] getMarketStates is not available on this deployment yet. " +
                 "Falling back to getDynamicMarketData + getUserData for targeted refreshes."
@@ -299,11 +313,11 @@ export class ProtocolReader {
         };
     }
 
-    async getAllMarketData(account: address | null = null, use_api = true) {
+    async getAllMarketData(account: address | null = null) {
         if(account == null || account === EMPTY_ADDRESS) {
             const [staticMarket, dynamicMarket] = await Promise.all([
-                this.getStaticMarketData(use_api),
-                this.getDynamicMarketData(use_api),
+                this.getStaticMarketData(),
+                this.getDynamicMarketData(),
             ]);
 
             return {
@@ -314,7 +328,7 @@ export class ProtocolReader {
         }
 
         const [staticMarket, { dynamicMarket, userData }] = await Promise.all([
-            this.getStaticMarketData(use_api),
+            this.getStaticMarketData(),
             this.getAllDynamicState(account),
         ]);
 
@@ -334,8 +348,8 @@ export class ProtocolReader {
         };
     }
 
-    async hypotheticalRedemptionOf(account: address, ctoken: CToken, shares: bigint) {
-        const data = await this.contract.hypotheticalRedemptionOf(account, ctoken.address, shares, 0n);
+    async hypotheticalRedemptionOf(account: address, ctoken: CToken, shares: bigint, bufferTime: bigint = 0n) {
+        const data = await this.contract.hypotheticalRedemptionOf(account, ctoken.address, shares, bufferTime);
         return {
             excess: BigInt(data[0]),
             deficit: BigInt(data[1]),
@@ -344,8 +358,8 @@ export class ProtocolReader {
         }
     }
 
-    async hypotheticalBorrowOf(account: address, ctoken: BorrowableCToken, assets: bigint) {
-        const data = await this.contract.hypotheticalBorrowOf(account, ctoken.address, assets, 0n);
+    async hypotheticalBorrowOf(account: address, ctoken: BorrowableCToken, assets: bigint, bufferTime: bigint = 0n) {
+        const data = await this.contract.hypotheticalBorrowOf(account, ctoken.address, assets, bufferTime);
         return {
             excess: BigInt(data[0]),
             deficit: BigInt(data[1]),
@@ -372,8 +386,7 @@ export class ProtocolReader {
         }
     }
 
-    async getDynamicMarketData(use_api = true) {
-        // TODO: Implement API call
+    async getDynamicMarketData() {
         const data = await this.contract.getDynamicMarketData();
         return normalizeDynamicMarketData(data);
     }
@@ -392,13 +405,13 @@ export class ProtocolReader {
     }
 
     async getMarketStates(markets: address[], account: address) {
-        if (this.supportsGetMarketStates === false) {
+        if (PROTOCOL_READER_SELECTOR_SUPPORT.get(this.address) === false) {
             return this.getMarketStatesFallback(markets, account);
         }
 
         try {
             const data = await this.contract.getMarketStates(markets, account);
-            this.supportsGetMarketStates = true;
+            PROTOCOL_READER_SELECTOR_SUPPORT.set(this.address, true);
             return {
                 dynamicMarkets: normalizeDynamicMarketData(data.dynamicMarkets ?? data[0] ?? []),
                 userMarkets: normalizeUserMarkets(data.userMarkets ?? data[1] ?? []),
@@ -408,7 +421,7 @@ export class ProtocolReader {
                 throw error;
             }
 
-            this.supportsGetMarketStates = false;
+            PROTOCOL_READER_SELECTOR_SUPPORT.set(this.address, false);
             return this.getMarketStatesFallback(markets, account);
         }
     }
@@ -456,8 +469,7 @@ export class ProtocolReader {
         return { collateralUsd, debtUsd, collateralAssetPrice, sharePrice, debtAssetPrice, debtTokenBalance, oracleError };
     }
 
-    async getStaticMarketData(use_api = true) {
-        // TODO: Implement API call
+    async getStaticMarketData() {
         const data = await this.contract.getStaticMarketData();
 
         const typedData: StaticMarketData[] = data.map((market: any) => ({

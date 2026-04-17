@@ -1,15 +1,16 @@
 # SDK Test Harness
 
-This directory now has two explicit validation layers:
+This directory has three validation layers:
 
-1. `test:transport`
-   - Fast, deterministic, no live chain required
-   - Validates transport policy, setup wiring, reader normalization, and query-budget expectations
-2. `test:fork`
-   - Real integration against an Anvil-compatible fork
-   - Validates the SDK against live chain state, real writes, and real post-write refreshes
+1. `npm test` (alias for `test:transport`)
+   - Routine safety net. Fast, deterministic, no live chain required.
+   - Validates transport policy, setup wiring, reader normalization, fee policy, conversion math, and query-budget expectations.
+2. `npm run test:all`
+   - Same as `test:transport` plus env-dependent integration suites (`basic`, `arb-basic`, `leverage`, `optimizer`, `zap`). Integration describes skip gracefully with a human-readable reason when `DEPLOYER_PRIVATE_KEY` / `TEST_RPC` aren't set.
+3. `npm run test:fork`
+   - Real integration against an Anvil-compatible fork. Validates the SDK against live chain state, real writes, and real post-write refreshes.
 
-Use them for different jobs. `test:transport` is the routine safety net. `test:fork` is the integration gate.
+Use them for different jobs. `npm test` is the routine default. `test:fork` is the integration gate before publishing.
 
 ## Recommended Workflow
 
@@ -18,7 +19,7 @@ Use them for different jobs. `test:transport` is the routine safety net. `test:f
 Run:
 
 ```bash
-npm run test:transport
+npm test
 ```
 
 This is the right default after transport/setup/query changes because it is fast and deterministic.
@@ -41,21 +42,29 @@ WGW candidate: treating `test:transport` as sufficient for publish confidence. I
 
 Runs:
 
+- `tests/contract-gas-buffer.test.ts`
 - `tests/retry-fallback.test.ts`
 - `tests/rpc-ranking.test.ts`
 - `tests/protocol-reader.test.ts`
 - `tests/setup-race.test.ts`
 - `tests/query-budget.test.ts`
+- `tests/conversion.test.ts`
+- `tests/feePolicy.test.ts`
+- `tests/market-refresh.test.ts`
+- `tests/dex-aggregators.test.ts`
 
 What it proves:
 
-- retry vs non-retryable classification
-- fallback cascade and cooldown behavior
-- dynamic fallback ranking
+- gas-buffer proxy skips view methods and preserves write overrides
+- retry vs non-retryable vs unknown error classification (unknown errors cascade to fallback, contract errors do not)
+- fallback cascade, cooldown behavior, and dynamic ranking
 - debug snapshot privacy constraints
-- `setupChain` read-provider vs signer wiring
-- `ProtocolReader` normalization for public and connected loads
+- `setupChain` read-provider vs signer wiring and cross-invocation race guard
+- `ProtocolReader` normalization for public and connected loads; selector-support probe caches across instances
 - query-budget expectations for boot and targeted refresh paths
+- fee-policy routing and Decimal↔bigint conversion correctness
+- `Market.getSnapshots` concurrent dispatch and `applyState` partial-refresh preservation
+- DEX aggregator fee-aware slippage expansion (KyberSwap expands inside quoteAction; Kuru keeps raw)
 
 What it does not prove:
 
@@ -66,6 +75,12 @@ What it does not prove:
 The transport harness used by these tests lives in:
 
 - `tests/support/transport-harness.ts`
+
+### `npm run test:all`
+
+Runs every `tests/*.test.ts` file (both deterministic and env-dependent). Use this when you want the full suite picture locally.
+
+Env-dependent suites (`basic`, `arb-basic`, `leverage`, `optimizer`, `zap`) skip their `describe` blocks with a human-readable reason when `DEPLOYER_PRIVATE_KEY` / `ARB_DEPLOYER_PRIVATE_KEY` / `TEST_RPC` are missing from `.env`. Set them in `.env` (see `.env.sample`) to run those suites against a local Anvil fork.
 
 ### `npm run test:fork`
 

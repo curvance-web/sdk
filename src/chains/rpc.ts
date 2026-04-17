@@ -20,10 +20,19 @@ export interface ChainRpcConfig extends ChainRpcPolicy {
     fallbacks: string[];
 }
 
+// Latency budget: primary + 1 fallback must resolve within ~17s worst case so
+// users don't assume the site is broken. The fallback IS the real second try
+// — retrying 3× on a dying primary before failover is double-insurance. One
+// retry per provider (2 attempts each) with a 4s per-attempt timeout gives:
+// primary ~8.2s + fallback ~8.2s ≈ 16.5s ceiling. Healthy RPCs respond in
+// <1s so happy path is unchanged.
+// See tests/retry-fallback.test.ts — "DEFAULT_RETRY_CONFIG keeps single-
+// provider worst-case under 10 seconds" and "read with hanging primary..."
+// lock this budget in.
 export const DEFAULT_CHAIN_RPC_POLICY: ChainRpcPolicy = {
-    retryCount: 3,
+    retryCount: 1,
     retryDelayMs: 150,
-    timeoutMs: 10_000,
+    timeoutMs: 4_000,
     fallbackCooldownMs: 30_000,
     rankIntervalMs: 30_000,
     rankSampleCount: 5,
@@ -37,8 +46,19 @@ export const DEFAULT_CHAIN_RPC_POLICY: ChainRpcPolicy = {
 export const chain_rpc_config = {
     "monad-mainnet": {
         ...DEFAULT_CHAIN_RPC_POLICY,
-        primary: "https://rpc-mainnet.monadinfra.com/",
-        fallbacks: ["https://monad-mainnet.drpc.org"],
+        // Empirically measured 2026-04-16 via app/scripts/rpc-probe.mjs against
+        // both staging.curvance.com and app.curvance.com origins. Primary +
+        // first fallback held 100/100 under 100-concurrent burst. Cascade
+        // ordered by: (1) CORS wildcard, (2) p50 latency, (3) per-IP rate
+        // limit headroom. monadinfra dropped — it returns 403 + missing
+        // Access-Control-Allow-Origin for requests from curvance.com origins.
+        primary: "https://monad-rpc.huginn.tech",
+        fallbacks: [
+            "https://gm.monad.at.htw.tech",
+            "https://monad-mainnet.drpc.org",
+            "https://rpc3.monad.xyz",
+            "https://rpc1.monad.xyz",
+        ],
     },
     "arb-sepolia": {
         ...DEFAULT_CHAIN_RPC_POLICY,
