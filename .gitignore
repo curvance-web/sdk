@@ -7,3 +7,4 @@ diff.diff
 test.ts
 tests/replay.test.ts
 package-lock.json
+*.tgz

@@ -195,13 +195,17 @@ export class Market {
         return `${min.mul(100)}% - ${max.mul(100)}%`;
     }
 
-    /** @returns Total market deposits */
-    get tvl() {
-        let marketTvl = new Decimal(0);
+    /** @returns Total market deposits in USD, summed across the market's tokens.
+     *  Renamed from `tvl` to match the sibling getter naming
+     *  (`totalDebt`, `totalCollateral`). Backed by the per-token
+     *  `getDeposits` (which now values via `totalAssets`, not `totalSupply`,
+     *  so the liquidity ≤ deposits invariant holds). */
+    get totalDeposits() {
+        let total = new Decimal(0);
         for(const token of this.tokens) {
-            marketTvl = marketTvl.add(token.getTvl(true));
+            total = total.add(token.getDeposits(true));
         }
-        return marketTvl;
+        return total;
     }
 
     /** @returns Total market debt */

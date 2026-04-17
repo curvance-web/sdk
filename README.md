@@ -61,7 +61,7 @@ setupChain(
 
 ```ts
 for (const market of markets) {
-    console.log(`${market.name} | tvl: ${market.tvl} | debt: ${market.totalDebt}`);
+    console.log(`${market.name} | deposits: ${market.totalDeposits} | debt: ${market.totalDebt}`);
     for (const token of market.tokens) {
         console.log(`  ${token.symbol} | price: ${token.getPrice()} | apy: ${token.getApy(true)}%`);
     }
@@ -90,7 +90,7 @@ for (const market of markets) {
 ```ts
 market.name                 // market name
 market.address              // market contract address
-market.tvl                  // total value locked (USD, Decimal)
+market.totalDeposits        // total market deposits (USD, Decimal)
 market.totalDebt            // total outstanding debt (USD, Decimal)
 market.totalCollateral      // total posted collateral (USD, Decimal)
 market.cooldownLength       // hold period between actions (20 min)
@@ -182,7 +182,7 @@ token.getUserDebt(inUSD)              // outstanding debt (borrow tokens)
 ### Market totals & caps
 
 ```ts
-token.getTvl(inUSD)
+token.getDeposits(inUSD)               // underlying assets held (USD or bigint)
 token.getTotalCollateral(inUSD)
 token.getCollateralCap(inUSD)          // remaining collateral capacity
 token.getDebtCap(inUSD)               // remaining debt capacity
