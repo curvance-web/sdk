@@ -1,4 +1,4 @@
-import { address, bytes, curvance_provider, Percentage } from "../../types";
+import { address, bytes, curvance_read_provider, Percentage } from "../../types";
 import { ZapToken } from "../CToken";
 import { Swap } from "../Zapper";
 import IDexAgg, { Quote, QuoteArgs } from "./IDexAgg";
@@ -61,13 +61,17 @@ export class MultiDexAgg implements IDexAgg {
      * Returns available tokens from all aggregators, deduplicated by address.
      * Primary aggregator's tokens take precedence on conflicts.
      */
-    async getAvailableTokens(provider: curvance_provider, query: string | null = null): Promise<ZapToken[]> {
+    async getAvailableTokens(
+        provider: curvance_read_provider,
+        query: string | null = null,
+        account: address | null = null,
+    ): Promise<ZapToken[]> {
         if (this.aggregators.length === 1) {
-            return this.primary.getAvailableTokens(provider, query);
+            return this.primary.getAvailableTokens(provider, query, account);
         }
 
         const results = await Promise.allSettled(
-            this.aggregators.map(agg => agg.getAvailableTokens(provider, query))
+            this.aggregators.map(agg => agg.getAvailableTokens(provider, query, account))
         );
 
         const seen = new Set<string>();

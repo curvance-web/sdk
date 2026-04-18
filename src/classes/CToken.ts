@@ -1,21 +1,19 @@
 import { Contract, TransactionResponse } from "ethers";
-import { contractSetup, BPS, ChangeRate, getRateSeconds, validateProviderAsSigner, WAD, getChainConfig, EMPTY_ADDRESS, toDecimal, SECONDS_PER_YEAR, toBps, NATIVE_ADDRESS, UINT256_MAX } from "../helpers";
+import { contractSetup, BPS, ChangeRate, getRateSeconds, requireAccount, requireSigner, WAD, getChainConfig, EMPTY_ADDRESS, toDecimal, SECONDS_PER_YEAR, toBps, NATIVE_ADDRESS, UINT256_MAX, amplifyContractSlippage } from "../helpers";
 import { AdaptorTypes, DynamicMarketToken, StaticMarketToken, UserMarketToken } from "./ProtocolReader";
 import { ERC20 } from "./ERC20";
 import { Market, PluginTypes } from "./Market";
 import { Calldata } from "./Calldata";
 import Decimal from "decimal.js";
 import base_ctoken_abi from '../abis/BaseCToken.json';
-import { address, bytes, curvance_provider, Percentage, TokenInput, USD, USD_WAD } from "../types";
+import { address, bytes, curvance_read_provider, curvance_signer, Percentage, TokenInput, USD, USD_WAD } from "../types";
 import { Redstone } from "./Redstone";
 import { Zapper, ZapperTypes, zapperTypeToName } from "./Zapper";
-import { setup_config } from "../setup";
 import { PositionManager, PositionManagerTypes } from "./PositionManager";
 import { BorrowableCToken } from "./BorrowableCToken";
 import { NativeToken } from "./NativeToken";
 import { ERC4626 } from "./ERC4626";
 import FormatConverter from "./FormatConverter";
-import { chain_config } from "../chains";
 
 const EXCLUDED_ZAP_SYMBOLS = new Set([
     'eBTC', 'earnAUSD', 'vUSD', 'syzUSD', 'ezETH', 'YZM', 'wsrUSD', 'sAUSD',
@@ -48,9 +46,10 @@ const EXCLUDED_ZAP_SYMBOLS = new Set([
  *
  * Because _swapSafe measures value loss against the FULL input (pre-fee),
  * the deterministic KyberSwap fee would consume feeBps of the user's MEV
- * tolerance if not compensated. Each call site expands action.slippage by
- * feeBps after quoting so the fee is absorbed and the user's chosen
- * tolerance is preserved for actual MEV/routing variance.
+ * tolerance if not compensated. `KyberSwap.quoteAction` (the DEX adapter)
+ * expands action.slippage by feeBps internally so the fee is absorbed and
+ * the user's chosen tolerance is preserved for actual MEV/routing variance.
+ * Callers pass raw user slippage — the adapter owns the expansion.
  *
  * Asymmetry between leverage up and deleverage
  * --------------------------------------------
@@ -72,19 +71,38 @@ const EXCLUDED_ZAP_SYMBOLS = new Set([
  */
 const LEVERAGE = {
     /** Max leverage cap: fraction of theoretical max the user can select.
-     *  Prevents boundary singularity at exact max leverage. Independent of
-     *  the slippage buffers below — protects post-op position health, not
-     *  in-op slippage. */
-    MAX_LEVERAGE_FACTOR: Decimal(0.995),
+     *  Prevents boundary singularity at exact max leverage — the contract's
+     *  post-op `canBorrow` check re-evaluates LTV against fresh on-chain
+     *  state, and several loss channels can tick final LTV above collRatio
+     *  at the boundary:
+     *    - Pool fees (variable 1bp–1% across pools; aggregator route choice
+     *      is not knowable at cap-compute time, can differ per-trade even
+     *      for the same market)
+     *    - `CURVANCE_FEE_BPS` (deterministic, amplified by (L-1); at L=10
+     *      eats ~36bps of equity-fraction)
+     *    - Oracle drift between preview snapshot and Redstone payload at
+     *      tx inclusion
+     *    - Share rounding (wei-level)
+     *
+     *  History: 0.99 → 0.995 when caching improved precision (pre-fee era).
+     *  0.995 → 0.98 when `CURVANCE_FEE_BPS = 4` landed and users on high-
+     *  collRatio markets (shMON r=0.9 → 10x theoretical) hit
+     *  `InsufficientCollateral` reverts at the boundary.
+     *
+     *  Independent of `LEVERAGE_UP_BUFFER_BPS` and `DELEVERAGE_OVERHEAD_BPS`
+     *  below — those protect in-op slippage at `_swapSafe`; this protects
+     *  post-op position health at `canBorrow`. */
+    MAX_LEVERAGE_FACTOR: Decimal(0.98),
     /** Flat BPS buffer added to leverage-up DEX/swapSafe slippage tolerance.
      *  Under single-oracle, the only forced loss at the swap level comes from
      *  wei-level share rounding plus possible Redstone price drift between
      *  snapshot RPC and tx broadcast block. Both are small constants.
      *
-     *  Fee handling: each call site expands both action.slippage (by feeBps,
-     *  so _swapSafe doesn't treat the fee as MEV) and contractSlippage (by
-     *  (L-1) × feeBps, so checkSlippage doesn't fire from equity-fraction
-     *  amplification). This buffer covers rounding/drift only. */
+     *  Fee handling: KyberSwap.quoteAction expands action.slippage by feeBps
+     *  internally so _swapSafe doesn't treat the fee as MEV. Each call site
+     *  still computes contractSlippage (expanded by (L-1) × feeBps) so
+     *  checkSlippage doesn't fire from equity-fraction amplification. This
+     *  buffer covers rounding/drift only. */
     LEVERAGE_UP_BUFFER_BPS: 10n,
     /** BPS overhead on full deleverage swap sizing — absolute terms.
      *  Oversizes the collateral→debt swap so DEX impact + drift doesn't
@@ -165,7 +183,7 @@ export interface ICToken {
 }
 
 export class CToken extends Calldata<ICToken> {
-    provider: curvance_provider;
+    provider: curvance_read_provider;
     address: address;
     contract: Contract & ICToken;
     abi: any;
@@ -179,9 +197,11 @@ export class CToken extends Calldata<ICToken> {
     nativeApy = Decimal(0);
     incentiveSupplyApy = Decimal(0);
     incentiveBorrowApy = Decimal(0);
+    get signer(): curvance_signer | null { return this.market.signer; }
+    protected get account(): address | null { return this.market.account; }
 
     constructor(
-        provider: curvance_provider,
+        provider: curvance_read_provider,
         address: address,
         cache: StaticMarketToken & DynamicMarketToken & UserMarketToken,
         market: Market
@@ -193,11 +213,11 @@ export class CToken extends Calldata<ICToken> {
         this.cache = cache;
         this.market = market;
 
-        const chain_config = getChainConfig();
+        const chainSettings = this.currentChainConfig;
         const assetAddr = this.asset.address.toLowerCase();
-        this.isNativeVault = chain_config.native_vaults.some(vault => vault.contract.toLowerCase() == assetAddr);
-        this.isVault = chain_config.vaults.some(vault => vault.contract.toLowerCase() == assetAddr);
-        this.isWrappedNative = chain_config.wrapped_native.toLowerCase() == assetAddr;
+        this.isNativeVault = chainSettings.native_vaults.some(vault => vault.contract.toLowerCase() == assetAddr);
+        this.isVault = chainSettings.vaults.some(vault => vault.contract.toLowerCase() == assetAddr);
+        this.isWrappedNative = chainSettings.wrapped_native.toLowerCase() == assetAddr;
 
         if(EXCLUDED_ZAP_SYMBOLS.has(this.asset.symbol)) {
             return;
@@ -214,6 +234,17 @@ export class CToken extends Calldata<ICToken> {
         this.zapTypes.push('simple');
     }
 
+    private get setup() { return this.market.setup; }
+    private get currentChain() { return this.setup.chain; }
+    private get currentChainConfig() { return getChainConfig(this.currentChain); }
+    protected requireSigner() { return requireSigner(this.signer); }
+    protected getAccountOrThrow(account: address | null = null) {
+        return requireAccount(account ?? this.account, this.signer);
+    }
+    protected getWriteContract() {
+        return contractSetup<ICToken>(this.requireSigner(), this.address, base_ctoken_abi);
+    }
+
     get adapters() { return this.cache.adapters; }
     get borrowPaused() { return this.cache.borrowPaused }
     get collateralizationPaused() { return this.cache.collateralizationPaused }
@@ -227,8 +258,9 @@ export class CToken extends Calldata<ICToken> {
     get exchangeRate() { return this.cache.exchangeRate; }
     get canZap() { return this.zapTypes.length > 0; }
     get maxLeverage() {
-        // Cap max leverage slightly below theoretical max (1% of leverage factor)
-        // to account for share rounding and fee losses that prevent reaching the exact max.
+        // Cap max leverage below theoretical max by applying MAX_LEVERAGE_FACTOR
+        // to the (theoretical - 1) span. See LEVERAGE.MAX_LEVERAGE_FACTOR docs
+        // for the loss channels this buffer absorbs and the tuning history.
         const theoretical = Decimal(this.cache.maxLeverage).div(BPS);
         const factor = theoretical.sub(1);
         return Decimal(1).add(factor.mul(LEVERAGE.MAX_LEVERAGE_FACTOR));
@@ -422,8 +454,7 @@ export class CToken extends Calldata<ICToken> {
     fetchUserCollateral(formatted: true): Promise<TokenInput>;
     fetchUserCollateral(formatted: false): Promise<bigint>;
     async fetchUserCollateral(formatted: boolean = false): Promise<bigint | TokenInput> {
-        const signer = validateProviderAsSigner(this.provider);
-        const collateral = await this.contract.collateralPosted(signer.address as address);
+        const collateral = await this.contract.collateralPosted(this.getAccountOrThrow());
         this.cache.userCollateral = collateral;
 
         return formatted ? toDecimal(collateral, this.decimals) : collateral;
@@ -456,7 +487,13 @@ export class CToken extends Calldata<ICToken> {
             throw new Error("CToken does not use a vault asset as its underlying asset");
         }
 
-        return new ERC4626(this.provider, this.getAsset(false));
+        return new ERC4626(
+            this.provider,
+            this.getAsset(false),
+            undefined,
+            this.setup.contracts.OracleManager as address,
+            this.signer,
+        );
     }
 
     async getVaultAsset(asErc20: true): Promise<ERC20>;
@@ -468,7 +505,15 @@ export class CToken extends Calldata<ICToken> {
     getAsset(asErc20: true): ERC20;
     getAsset(asErc20: false): address;
     getAsset(asErc20: boolean) {
-        return asErc20 ? new ERC20(this.provider, this.cache.asset.address, this.cache.asset) : this.cache.asset.address
+        return asErc20
+            ? new ERC20(
+                this.provider,
+                this.cache.asset.address,
+                this.cache.asset,
+                this.setup.contracts.OracleManager as address,
+                this.signer,
+            )
+            : this.cache.asset.address
     }
 
     getPrice(): USD;
@@ -546,7 +591,7 @@ export class CToken extends Calldata<ICToken> {
     }
 
     getPositionManager(type: PositionManagerTypes) {
-        const signer = validateProviderAsSigner(this.provider);
+        const signer = this.requireSigner();
 
         let manager_contract = this.getPluginAddress(type, 'positionManager');
 
@@ -558,14 +603,14 @@ export class CToken extends Calldata<ICToken> {
     }
 
     getZapper(type: ZapperTypes) {
-        const signer = validateProviderAsSigner(this.provider);
+        const signer = this.requireSigner();
         const zap_contract = this.getPluginAddress(type, 'zapper');
 
         if(zap_contract == null) {
             return null;
         }
 
-        return new Zapper(zap_contract, signer, type);
+        return new Zapper(zap_contract, signer, type, this.setup);
     }
 
     async isZapAssetApproved(instructions: ZapperInstructions, amount: bigint) {
@@ -577,8 +622,8 @@ export class CToken extends Calldata<ICToken> {
             return true;
         }
 
-        const signer = validateProviderAsSigner(this.provider);
-        const asset =  new ERC20(signer, instructions.inputToken);
+        const signer = this.requireSigner();
+        const asset =  new ERC20(this.provider, instructions.inputToken, undefined, undefined, signer);
         const plugin = this.getPluginAddress(instructions.type, 'zapper');
 
         const allowance = await asset.allowance(signer.address as address, plugin!);
@@ -594,8 +639,8 @@ export class CToken extends Calldata<ICToken> {
             return;
         }
 
-        const signer = validateProviderAsSigner(this.provider);
-        const asset =  new ERC20(signer, instructions.inputToken);
+        const signer = this.requireSigner();
+        const asset =  new ERC20(this.provider, instructions.inputToken, undefined, undefined, signer);
         const plugin = this.getPluginAddress(instructions.type, 'zapper');
 
         return asset.approve(plugin!, amount);
@@ -606,7 +651,7 @@ export class CToken extends Calldata<ICToken> {
             return true;
         }
 
-        const signer = validateProviderAsSigner(this.provider);
+        const signer = this.requireSigner();
         const plugin_address = this.getPluginAddress(plugin, type);
 
         if(plugin_address == null) {
@@ -623,7 +668,7 @@ export class CToken extends Calldata<ICToken> {
             throw new Error("Plugin does not have an associated contract");
         }
 
-        return this.contract.setDelegateApproval(plugin_address, true);
+        return this.getWriteContract().setDelegateApproval(plugin_address, true);
     }
 
     getPluginAddress(plugin: ZapperTypes | PositionManagerTypes, type: PluginTypes): address | null {
@@ -635,11 +680,11 @@ export class CToken extends Calldata<ICToken> {
                 }
 
                 const plugin_name = zapperTypeToName.get(plugin);
-                if(!plugin_name || !setup_config.contracts.zappers || !(plugin_name in setup_config.contracts.zappers)) {
+                if(!plugin_name || !this.setup.contracts.zappers || !(plugin_name in this.setup.contracts.zappers)) {
                     throw new Error(`Plugin ${plugin_name} not found in zappers`);
                 }
 
-                return setup_config.contracts.zappers[plugin_name] as address;
+                return this.setup.contracts.zappers[plugin_name] as address;
             }
 
             case 'positionManager': {
@@ -656,8 +701,8 @@ export class CToken extends Calldata<ICToken> {
     }
 
     async getAllowance(check_contract: address, underlying = true) {
-        const signer = validateProviderAsSigner(this.provider);
-        const erc20 = new ERC20(this.provider, underlying ? this.asset.address : this.address);
+        const signer = this.requireSigner();
+        const erc20 = new ERC20(this.provider, underlying ? this.asset.address : this.address, undefined, undefined, this.signer);
         const allowance = await erc20.allowance(signer.address as address, check_contract);
         return allowance;
     }
@@ -668,13 +713,13 @@ export class CToken extends Calldata<ICToken> {
      * @returns tx
      */
     async approveUnderlying(amount: TokenInput | null = null, target: address | null = null) {
-        const erc20 = new ERC20(this.provider, this.asset.address);
+        const erc20 = new ERC20(this.provider, this.asset.address, undefined, undefined, this.signer);
         const tx = await erc20.approve(target ? target : this.address, amount);
         return tx;
     }
 
     async approve(amount: TokenInput | null = null, spender: address) {
-        const erc20 = new ERC20(this.provider, this.address);
+        const erc20 = new ERC20(this.provider, this.address, undefined, undefined, this.signer);
         const tx = await erc20.approve(spender, amount);
         return tx;
     }
@@ -755,11 +800,11 @@ export class CToken extends Calldata<ICToken> {
 
     async transfer(receiver: address, amount: TokenInput) {
         const shares = this.convertTokenInputToShares(amount);
-        return this.contract.transfer(receiver, shares);
+        return this.getWriteContract().transfer(receiver, shares);
     }
 
     async redeemCollateral(amount: Decimal, receiver: address | null = null, owner: address | null = null) {
-        const signer = validateProviderAsSigner(this.provider);
+        const signer = this.requireSigner();
         receiver ??= signer.address as address;
         owner ??= signer.address as address;
 
@@ -769,7 +814,7 @@ export class CToken extends Calldata<ICToken> {
     }
 
     async postCollateral(amount: TokenInput) {
-        const signer = validateProviderAsSigner(this.provider);
+        const signer = this.requireSigner();
         const shares = this.convertTokenInputToShares(amount);
         const balance = await this.balanceOf(signer.address as address);
         const collateral = await this.fetchUserCollateral();
@@ -786,21 +831,43 @@ export class CToken extends Calldata<ICToken> {
     }
 
     async getZapBalance(zap: ZapperInstructions): Promise<bigint> {
-        const signer = validateProviderAsSigner(this.provider);
+        const signer = this.requireSigner();
         let asset: ERC20 | NativeToken;
 
         if(typeof zap === 'object') {
             if(zap.type === 'native-vault' || zap.type === 'native-simple' || zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
-                asset = new NativeToken(setup_config.chain, this.provider);
+                asset = new NativeToken(
+                    this.currentChain,
+                    this.provider,
+                    this.setup.contracts.OracleManager as address,
+                    this.signer,
+                    this.account,
+                );
             } else {
-                asset = new ERC20(this.provider, zap.inputToken);
+                asset = new ERC20(this.provider, zap.inputToken, undefined, undefined, this.signer);
             }
         } else {
             switch (zap) {
                 case 'none': asset = this.getAsset(true); break;
                 case 'vault': asset = await this.getVaultAsset(true); break;
-                case 'native-vault': asset = new NativeToken(setup_config.chain, this.provider); break;
-                case 'native-simple': asset = new NativeToken(setup_config.chain, this.provider); break;
+                case 'native-vault':
+                    asset = new NativeToken(
+                        this.currentChain,
+                        this.provider,
+                        this.setup.contracts.OracleManager as address,
+                        this.signer,
+                        this.account,
+                    );
+                    break;
+                case 'native-simple':
+                    asset = new NativeToken(
+                        this.currentChain,
+                        this.provider,
+                        this.setup.contracts.OracleManager as address,
+                        this.signer,
+                        this.account,
+                    );
+                    break;
                 default: throw new Error("Unsupported zap type for balance fetch");
             }
         }
@@ -819,7 +886,7 @@ export class CToken extends Calldata<ICToken> {
             if (zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
                 decimals = 18n;
             } else {
-                const inputErc20 = new ERC20(this.provider, zap.inputToken as address);
+                const inputErc20 = new ERC20(this.provider, zap.inputToken as address, undefined, undefined, this.signer);
                 decimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
             }
         }
@@ -911,8 +978,7 @@ export class CToken extends Calldata<ICToken> {
     async maxRedemption(in_shares: true, bufferTime: bigint, breakdown:true): Promise<{max_collateral: bigint, max_uncollateralized: bigint}>;
     async maxRedemption(in_shares: false, bufferTime: bigint, breakdown:true): Promise<{max_collateral: TokenInput, max_uncollateralized: TokenInput}>;
     async maxRedemption(in_shares: boolean = false, bufferTime: bigint = 0n, breakdown: boolean = false): Promise<(TokenInput | bigint) | {max_collateral: (TokenInput | bigint), max_uncollateralized: (TokenInput | bigint)}> {
-        const signer = validateProviderAsSigner(this.provider);
-        const data = await this.market.reader.maxRedemptionOf(signer.address as address, this, bufferTime);
+        const data = await this.market.reader.maxRedemptionOf(this.getAccountOrThrow(), this, bufferTime);
 
         if(data.errorCodeHit) {
             throw new Error(`Error fetching max redemption. Possible stale price or other issues...`);
@@ -950,7 +1016,13 @@ export class CToken extends Calldata<ICToken> {
 
         if(this.zapTypes.includes('native-vault')) {
             tokens.push({
-                interface: new NativeToken(setup_config.chain, this.provider),
+                interface: new NativeToken(
+                    this.currentChain,
+                    this.provider,
+                    this.setup.contracts.OracleManager as address,
+                    this.signer,
+                    this.account,
+                ),
                 type: 'native-vault'
             });
             tokens_exclude.push(EMPTY_ADDRESS, NATIVE_ADDRESS);
@@ -958,7 +1030,13 @@ export class CToken extends Calldata<ICToken> {
 
         if(this.zapTypes.includes('native-simple')) {
             tokens.push({
-                interface: new NativeToken(setup_config.chain, this.provider),
+                interface: new NativeToken(
+                    this.currentChain,
+                    this.provider,
+                    this.setup.contracts.OracleManager as address,
+                    this.signer,
+                    this.account,
+                ),
                 type: 'native-simple'
             });
 
@@ -977,14 +1055,20 @@ export class CToken extends Calldata<ICToken> {
         }
 
         if(this.zapTypes.includes('simple')) {
-            let dexAggSearch = await chain_config[setup_config.chain].dexAgg.getAvailableTokens(this.provider, search);
+            let dexAggSearch = await this.currentChainConfig.dexAgg.getAvailableTokens(this.provider, search, this.account);
             tokens = tokens.concat(dexAggSearch.filter(token => !tokens_exclude.includes(token.interface.address.toLocaleLowerCase())));
 
             // Add native MON as a zap option for any token with a simple zapper
             // (not just wrapped native). The simple zapper handles wrapping + swapping.
             if (!tokens_exclude.includes(NATIVE_ADDRESS.toLowerCase()) && !this.isWrappedNative) {
                 tokens.push({
-                    interface: new NativeToken(setup_config.chain, this.provider),
+                    interface: new NativeToken(
+                        this.currentChain,
+                        this.provider,
+                        this.setup.contracts.OracleManager as address,
+                        this.signer,
+                        this.account,
+                    ),
                     type: 'simple'
                 });
                 tokens_exclude.push(NATIVE_ADDRESS.toLowerCase());
@@ -1005,10 +1089,9 @@ export class CToken extends Calldata<ICToken> {
     }
 
     async hypotheticalRedemptionOf(amount: TokenInput) {
-        const signer = validateProviderAsSigner(this.provider);
         const shares = this.convertTokenInputToShares(amount);
         return this.market.reader.hypotheticalRedemptionOf(
-            signer.address as address,
+            this.getAccountOrThrow(),
             this,
             shares
         )
@@ -1025,9 +1108,8 @@ export class CToken extends Calldata<ICToken> {
      * for full deleverage swap sizing).
      */
     private async _getLeverageSnapshot(borrow: BorrowableCToken) {
-        const signer = validateProviderAsSigner(this.provider);
         const snapshot = await this.market.reader.getLeverageSnapshot(
-            signer.address as address, this.address, borrow.address, 120n
+            this.getAccountOrThrow(), this.address, borrow.address, 120n
         );
 
         if (snapshot.oracleError) {
@@ -1081,7 +1163,7 @@ export class CToken extends Calldata<ICToken> {
 
         // Fee preview: queried from the configured fee policy.
         const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
-        const feeBps = setup_config.feePolicy.getFeeBps({
+        const feeBps = this.setup.feePolicy.getFeeBps({
             operation: 'leverage-up',
             inputToken: borrow.asset.address,
             outputToken: this.asset.address,
@@ -1136,7 +1218,7 @@ export class CToken extends Calldata<ICToken> {
         // (exact for partial; for full deleverage the actual swap is sized
         // by leverageDown using the snapshot, but the preview is close enough
         // for display purposes).
-        const feeBps = borrow ? setup_config.feePolicy.getFeeBps({
+        const feeBps = borrow ? this.setup.feePolicy.getFeeBps({
             operation: 'leverage-down',
             inputToken: this.asset.address,
             outputToken: borrow.asset.address,
@@ -1171,7 +1253,7 @@ export class CToken extends Calldata<ICToken> {
         simulate: boolean = false
     ): Promise<any> {
         try {
-            validateProviderAsSigner(this.provider);
+            this.requireSigner();
             const slippage = this._leverageUpSlippage(FormatConverter.percentageToBps(slippage_), newLeverage);
             const manager = this.getPositionManager(type);
 
@@ -1182,7 +1264,7 @@ export class CToken extends Calldata<ICToken> {
             switch(type) {
                 case 'simple': {
                     const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
-                    const feeBps = setup_config.feePolicy.getFeeBps({
+                    const feeBps = this.setup.feePolicy.getFeeBps({
                         operation: 'leverage-up',
                         inputToken: borrow.asset.address,
                         outputToken: this.asset.address,
@@ -1190,9 +1272,9 @@ export class CToken extends Calldata<ICToken> {
                         currentLeverage: this.getLeverage() ?? Decimal(1),
                         targetLeverage: newLeverage,
                     });
-                    const feeReceiver = feeBps > 0n ? setup_config.feePolicy.feeReceiver : undefined;
+                    const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
 
-                    const { action, quote } = await chain_config[setup_config.chain].dexAgg.quoteAction(
+                    const { action, quote } = await this.currentChainConfig.dexAgg.quoteAction(
                         manager.address,
                         borrow.asset.address,
                         this.asset.address,
@@ -1202,28 +1284,20 @@ export class CToken extends Calldata<ICToken> {
                         feeReceiver,
                     );
 
-                    // _swapSafe measures value loss as (valueIn - valueOut) / valueIn
-                    // where valueIn is the FULL input (pre-fee). KyberSwap deducts
-                    // the fee before swapping, so _swapSafe sees feeBps as "slippage"
-                    // even though it's a known, deterministic cost. Expand
-                    // action.slippage by feeBps so the fee doesn't consume the user's
-                    // MEV protection budget. The KyberSwap quote already used the
-                    // user's raw slippage for minReturnAmount (DEX-level protection).
-                    if (feeBps > 0n) {
-                        action.slippage = FormatConverter.bpsToBpsWad(slippage + feeBps);
-                    }
+                    // Fee-aware slippage expansion now lives inside KyberSwap.quoteAction
+                    // so any caller inherits correct behavior. See KyberSwap.ts for the
+                    // rationale. The fee still reduces swap output, which checkSlippage
+                    // sees as equity loss amplified by (L-1) — handled below.
 
                     // The fee also reduces swap output, which checkSlippage sees
                     // as equity loss amplified by (L-1) — same pattern as
                     // deleverage. Expand the contract-level tolerance to absorb it.
-                    const contractSlippage = feeBps > 0n
-                        ? slippage + BigInt(
-                            newLeverage.sub(1)
-                                .mul(Number(feeBps))
-                                .ceil()
-                                .toFixed(0)
-                        )
-                        : slippage;
+                    // See `amplifyContractSlippage` in helpers.ts for rationale.
+                    const contractSlippage = amplifyContractSlippage(
+                        slippage,
+                        newLeverage.sub(1),
+                        feeBps,
+                    );
 
                     calldata = manager.getLeverageCalldata(
                         {
@@ -1286,9 +1360,9 @@ export class CToken extends Calldata<ICToken> {
                 throw new Error("New leverage must be less than current leverage");
             }
 
-            validateProviderAsSigner(this.provider);
+            this.requireSigner();
 
-            const config = getChainConfig();
+            const config = this.currentChainConfig;
             const slippage = toBps(slippage_);
             const manager = this.getPositionManager(type);
             let calldata: bytes;
@@ -1316,7 +1390,7 @@ export class CToken extends Calldata<ICToken> {
                     // exact for current callers. Future notional-tiered policies
                     // should be aware that for full deleverage the inputAmount
                     // passed here is an underestimate.
-                    const feeBps = setup_config.feePolicy.getFeeBps({
+                    const feeBps = this.setup.feePolicy.getFeeBps({
                         operation: 'leverage-down',
                         inputToken: this.asset.address,
                         outputToken: borrowToken.asset.address,
@@ -1324,7 +1398,7 @@ export class CToken extends Calldata<ICToken> {
                         currentLeverage: currentLeverage,
                         targetLeverage: newLeverage,
                     });
-                    const feeReceiver = feeBps > 0n ? setup_config.feePolicy.feeReceiver : undefined;
+                    const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
 
                     if (isFullDeleverage) {
                         // Use exact projected debt from snapshot to size the swap.
@@ -1368,12 +1442,8 @@ export class CToken extends Calldata<ICToken> {
                         feeReceiver,
                     );
 
-                    // _swapSafe: expand action.slippage by feeBps so the
-                    // deterministic fee cost doesn't eat the user's MEV budget.
-                    // Same rationale as leverageUp — see comment there.
-                    if (feeBps > 0n) {
-                        action.slippage = FormatConverter.bpsToBpsWad(slippage + feeBps);
-                    }
+                    // Fee-aware slippage expansion for `_swapSafe` is handled by
+                    // KyberSwap.quoteAction. See KyberSwap.ts for rationale.
 
                     const minRepay = isFullDeleverage ? 1n : quote.min_out;
 
@@ -1386,20 +1456,20 @@ export class CToken extends Calldata<ICToken> {
                     //
                     // Full:    (L-1) × (overhead + fee)  — overshoot + fee
                     // Partial: (ΔL)  × fee               — fee only, no overshoot
+                    //
+                    // See `amplifyContractSlippage` in helpers.ts for the shared
+                    // primitive + per-call-site asymmetry docs.
                     const leverageDelta = isFullDeleverage
                         ? currentLeverage.sub(1)
                         : currentLeverage.sub(newLeverage);
                     const forcedBps = isFullDeleverage
                         ? LEVERAGE.DELEVERAGE_OVERHEAD_BPS + feeBps
                         : feeBps;
-                    const contractSlippage = forcedBps > 0n
-                        ? slippage + BigInt(
-                            leverageDelta
-                                .mul(Number(forcedBps))
-                                .ceil()
-                                .toFixed(0)
-                        )
-                        : slippage;
+                    const contractSlippage = amplifyContractSlippage(
+                        slippage,
+                        leverageDelta,
+                        forcedBps,
+                    );
 
                     calldata = manager.getDeleverageCalldata({
                         cToken: this.address,
@@ -1455,7 +1525,7 @@ export class CToken extends Calldata<ICToken> {
             switch(type) {
                 case 'simple': {
                     const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
-                    const feeBps = setup_config.feePolicy.getFeeBps({
+                    const feeBps = this.setup.feePolicy.getFeeBps({
                         operation: 'deposit-and-leverage',
                         inputToken: borrow.asset.address,
                         outputToken: this.asset.address,
@@ -1463,9 +1533,9 @@ export class CToken extends Calldata<ICToken> {
                         currentLeverage: this.getLeverage() ?? Decimal(1),
                         targetLeverage: multiplier,
                     });
-                    const feeReceiver = feeBps > 0n ? setup_config.feePolicy.feeReceiver : undefined;
+                    const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
 
-                    const { action, quote } = await chain_config[setup_config.chain].dexAgg.quoteAction(
+                    const { action, quote } = await this.currentChainConfig.dexAgg.quoteAction(
                         manager.address,
                         borrow.asset.address,
                         this.asset.address,
@@ -1475,22 +1545,16 @@ export class CToken extends Calldata<ICToken> {
                         feeReceiver,
                     );
 
-                    // _swapSafe: expand action.slippage by feeBps so the
-                    // deterministic fee cost doesn't eat the user's MEV budget.
-                    // Same rationale as leverageUp — see comment there.
-                    if (feeBps > 0n) {
-                        action.slippage = FormatConverter.bpsToBpsWad(slippage + feeBps);
-                    }
+                    // Fee-aware slippage expansion for `_swapSafe` is handled by
+                    // KyberSwap.quoteAction. See KyberSwap.ts for rationale.
 
-                    // Fee amplification: same pattern as leverageUp.
-                    const contractSlippage = feeBps > 0n
-                        ? slippage + BigInt(
-                            multiplier.sub(1)
-                                .mul(Number(feeBps))
-                                .ceil()
-                                .toFixed(0)
-                        )
-                        : slippage;
+                    // Fee amplification: same pattern as leverageUp. See
+                    // `amplifyContractSlippage` in helpers.ts.
+                    const contractSlippage = amplifyContractSlippage(
+                        slippage,
+                        multiplier.sub(1),
+                        feeBps,
+                    );
 
                     calldata = manager.getDepositAndLeverageCalldata(
                         FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals),
@@ -1549,7 +1613,7 @@ export class CToken extends Calldata<ICToken> {
     ): Promise<{ success: boolean; error?: string }> {
         try {
             amount = await this.ensureUnderlyingAmount(amount, zap);
-            const signer = validateProviderAsSigner(this.provider);
+            const signer = this.requireSigner();
             receiver ??= signer.address as address;
 
             const isZapping = typeof zap === 'object' && zap.type !== 'none';
@@ -1558,7 +1622,7 @@ export class CToken extends Calldata<ICToken> {
             if (isZapping && (zap as any).inputToken) {
                 const isNative = (zap as any).inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
                 const zapDecimals = isNative ? 18n : (() => {
-                    const inputErc20 = new ERC20(this.provider, (zap as any).inputToken as address);
+                    const inputErc20 = new ERC20(this.provider, (zap as any).inputToken as address, undefined, undefined, this.signer);
                     return inputErc20.decimals ?? inputErc20.contract.decimals();
                 })();
                 zapAssets = FormatConverter.decimalToBigInt(amount, await zapDecimals);
@@ -1580,7 +1644,7 @@ export class CToken extends Calldata<ICToken> {
     ): Promise<{ success: boolean; error?: string }> {
         try {
             amount = await this.ensureUnderlyingAmount(amount, zap);
-            const signer = validateProviderAsSigner(this.provider);
+            const signer = this.requireSigner();
             receiver ??= signer.address as address;
 
             const isZapping = typeof zap === 'object' && zap.type !== 'none';
@@ -1589,7 +1653,7 @@ export class CToken extends Calldata<ICToken> {
             if (isZapping && (zap as any).inputToken) {
                 const isNative = (zap as any).inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
                 const zapDecimals = isNative ? 18n : (() => {
-                    const inputErc20 = new ERC20(this.provider, (zap as any).inputToken as address);
+                    const inputErc20 = new ERC20(this.provider, (zap as any).inputToken as address, undefined, undefined, this.signer);
                     return inputErc20.decimals ?? inputErc20.contract.decimals();
                 })();
                 zapAssets = FormatConverter.decimalToBigInt(amount, await zapDecimals);
@@ -1657,7 +1721,7 @@ export class CToken extends Calldata<ICToken> {
 
     async deposit(amount: TokenInput, zap: ZapperInstructions = 'none', receiver: address | null = null) {
         amount = await this.ensureUnderlyingAmount(amount, zap);
-        const signer = validateProviderAsSigner(this.provider);
+        const signer = this.requireSigner();
         receiver ??= signer.address as address;
         // When zapping, the swap amount uses input token decimals, but the
         // default deposit calldata uses the deposit token decimals.
@@ -1668,7 +1732,7 @@ export class CToken extends Calldata<ICToken> {
             if (zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
                 zapAssets = FormatConverter.decimalToBigInt(amount, 18n);
             } else {
-                const inputErc20 = new ERC20(this.provider, zap.inputToken as address);
+                const inputErc20 = new ERC20(this.provider, zap.inputToken as address, undefined, undefined, this.signer);
                 const zapDecimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
                 zapAssets = FormatConverter.decimalToBigInt(amount, zapDecimals);
             }
@@ -1695,7 +1759,7 @@ export class CToken extends Calldata<ICToken> {
 
     async depositAsCollateral(amount: Decimal, zap: ZapperInstructions = 'none',  receiver: address | null = null) {
         amount = await this.ensureUnderlyingAmount(amount, zap);
-        const signer = validateProviderAsSigner(this.provider);
+        const signer = this.requireSigner();
         receiver ??= signer.address as address;
         // When zapping, the swap amount uses input token decimals, but collateral
         // cap checks and the default deposit calldata use the deposit token decimals.
@@ -1706,7 +1770,7 @@ export class CToken extends Calldata<ICToken> {
             if (zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
                 zapAssets = FormatConverter.decimalToBigInt(amount, 18n);
             } else {
-                const inputErc20 = new ERC20(this.provider, zap.inputToken as address);
+                const inputErc20 = new ERC20(this.provider, zap.inputToken as address, undefined, undefined, this.signer);
                 const zapDecimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
                 zapAssets = FormatConverter.decimalToBigInt(amount, zapDecimals);
             }
@@ -1732,7 +1796,7 @@ export class CToken extends Calldata<ICToken> {
     }
 
     async redeem(amount: TokenInput) {
-        const signer   = validateProviderAsSigner(this.provider);
+        const signer   = this.requireSigner();
         const receiver = signer.address as address;
         const owner    = signer.address as address;
 
@@ -1751,7 +1815,7 @@ export class CToken extends Calldata<ICToken> {
     }
 
     async redeemShares(amount: bigint) {
-        const signer = validateProviderAsSigner(this.provider);
+        const signer = this.requireSigner();
         const receiver = signer.address as address;
         const owner = signer.address as address;
 
@@ -1760,12 +1824,11 @@ export class CToken extends Calldata<ICToken> {
     }
 
     async collateralPosted(account: address | null = null) {
-        if(!account) account = validateProviderAsSigner(this.provider).address as address;
-        return this.contract.collateralPosted(account);
+        return this.contract.collateralPosted(this.getAccountOrThrow(account));
     }
 
     async multicall(calls: MulticallAction[]) {
-        return this.contract.multicall(calls);
+        return this.getWriteContract().multicall(calls);
     }
 
     async getSnapshot(account: address) {
@@ -1836,11 +1899,11 @@ export class CToken extends Calldata<ICToken> {
     }
 
     private async _checkZapperApproval(zapper: Zapper) {
-        if(!setup_config.approval_protection) {
+        if(!this.setup.approval_protection) {
             return;
         }
 
-        if (setup_config.approval_protection && zapper) {
+        if (this.setup.approval_protection && zapper) {
             const plugin_allowed = await this.isPluginApproved(zapper.type, 'zapper');
             if (!plugin_allowed) {
                 throw new Error(`Please approve the ${zapper.type} Zapper to be able to move ${this.symbol} on your behalf.`);
@@ -1849,8 +1912,8 @@ export class CToken extends Calldata<ICToken> {
     }
 
     private async _checkErc20Approval(erc20_address: address, amount: bigint, spender: address) {
-        const signer = validateProviderAsSigner(this.provider);
-        const erc20 = new ERC20(signer, erc20_address);
+        const signer = this.requireSigner();
+        const erc20 = new ERC20(this.provider, erc20_address, undefined, undefined, signer);
         const allowance = await erc20.allowance(signer.address as address, spender);
         if(allowance < amount) {
             const symbol = await erc20.fetchSymbol();
@@ -1859,12 +1922,12 @@ export class CToken extends Calldata<ICToken> {
     }
 
     private async _checkAssetApproval(assets: bigint) {
-        if(!setup_config.approval_protection) {
+        if(!this.setup.approval_protection) {
             return;
         }
 
         const asset = this.getAsset(true);
-        const owner = validateProviderAsSigner(this.provider).address as address;
+        const owner = this.getAccountOrThrow();
         const allowance = await asset.allowance(owner, this.address);
         if(allowance < assets) {
             throw new Error(`Please approve the ${asset.symbol} token for ${this.symbol}`);
@@ -1872,7 +1935,7 @@ export class CToken extends Calldata<ICToken> {
     }
 
     private async _checkDepositApprovals(zapper: Zapper | null, assets: bigint) {
-        if(!setup_config.approval_protection) {
+        if(!this.setup.approval_protection) {
             return;
         }
 
@@ -1884,7 +1947,7 @@ export class CToken extends Calldata<ICToken> {
     }
 
     async oracleRoute(calldata: bytes, override: { [key: string]: any } = {}): Promise<TransactionResponse> {
-        const signer = validateProviderAsSigner(this.provider);
+        const signer = this.requireSigner();
         const price_updates = await this.getPriceUpdates();
 
         if(price_updates.length > 0) {

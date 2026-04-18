@@ -65,8 +65,104 @@ export function toBigInt(value: number | Decimal, decimals: bigint): bigint {
     return FormatConverter.decimalToBigInt(Decimal(value), decimals);
 }
 
-export function getChainConfig() {
-    const chain = setup_config.chain;
+/**
+ * Amplify a BPS slippage tolerance by `leverageDelta × bpsToAmplify` to
+ * compensate for the equity-fraction amplification that the on-chain
+ * `checkSlippage` modifier applies to in-op losses on leveraged operations.
+ *
+ * ## Why this exists
+ *
+ * `checkSlippage` measures loss as `(valueIn − valueOut) / equity`. On a
+ * leveraged swap where `valueIn = equity × L`, the same absolute loss X
+ * appears as `X / equity = (X / valueIn) × L` — amplified by `(L−1)` in
+ * (L−1)-terms. So any known per-swap loss (Curvance fee deducted before
+ * the swap; full-deleverage intentional overshoot) needs the contract-level
+ * slippage budget expanded by the amplified amount, otherwise a benign
+ * known loss trips the check and reverts the tx.
+ *
+ * The user's raw `slippage` budget is reserved for VARIABLE in-op losses
+ * (DEX impact, oracle drift) — this helper adds the DETERMINISTIC losses
+ * on top.
+ *
+ * ## Call sites
+ *
+ * Three sites in `CToken.ts` use this:
+ *
+ *  - `leverageUp` case `'simple'`:     `leverageDelta = newLeverage - 1`,        `bps = feeBps`
+ *  - `leverageDown` (simple):          `leverageDelta = full ? currL - 1 :         currL - newL`,
+ *                                       `bps = full ? DELEVERAGE_OVERHEAD_BPS + feeBps : feeBps`
+ *  - `depositAndLeverage` case simple:  `leverageDelta = multiplier - 1`,          `bps = feeBps`
+ *
+ * The `leverageDelta` and `bpsToAmplify` arguments preserve the per-site
+ * asymmetries: leverageUp/depositAndLeverage pass `newL - 1`; deleverage's
+ * full path uses `currL - 1` (the entire leverage range collapses) and its
+ * partial path uses `currL - newL` (only the shrunk range swaps). Full
+ * deleverage also adds `DELEVERAGE_OVERHEAD_BPS` on top of the fee.
+ *
+ * ## Not for
+ *
+ * - `KyberSwap.quoteAction`'s `action.slippage = userSlippage + feeBps` is
+ *   a DIFFERENT primitive — swap-layer flat fee absorption for `_swapSafe`,
+ *   not `(L−1)`-amplified for `checkSlippage`. Keep that in the adapter.
+ * - Borrow-amount sizing in `previewLeverageUp` — that's a fixed-point solve
+ *   against LTV, not a slippage-tolerance expansion.
+ */
+export function amplifyContractSlippage(
+    baseSlippage: bigint,
+    leverageDelta: Decimal,
+    bpsToAmplify: bigint,
+): bigint {
+    if (bpsToAmplify === 0n) return baseSlippage;
+    const expansion = leverageDelta.mul(Number(bpsToAmplify)).ceil().toFixed(0);
+    return baseSlippage + BigInt(expansion);
+}
+
+/**
+ * Compute the swap-layer slippage tolerance (in WAD-BPS form) for the
+ * `Swap.slippage` field passed through `CalldataChecker._swapSafe`.
+ *
+ * Semantics: `_swapSafe` measures `(valueIn − valueOut) / valueIn` on the
+ * swap leg itself — NOT equity-fraction (that's the contract-level
+ * `checkSlippage` modifier one layer up; see `amplifyContractSlippage`).
+ * When a DEX aggregator deducts a currency_in fee before executing the
+ * swap, the on-chain path sees `valueIn = full input` but receives only
+ * `valueOut = swap_out_post_fee`, so the fee appears to `_swapSafe` as
+ * swap slippage. Expand the tolerance here to absorb the known fee so the
+ * user's raw slippage budget stays reserved for variable in-op losses
+ * (pool-fee tier variance, DEX price impact, oracle drift).
+ *
+ * ## Symmetry across DEX aggregators
+ *
+ * Every aggregator adapter that charges `CURVANCE_FEE_BPS` via a
+ * currency_in deduction must route its `quoteAction` through this helper
+ * so the on-chain behavior is uniform. Currently used by:
+ *
+ *  - `KyberSwap.quoteAction` (explicit `currency_in` + `isInBps` params)
+ *  - `Kuru.quoteAction` (referrer-style fee deduction, per Kuru docs
+ *    mirroring KyberSwap's currency_in semantics)
+ *
+ * An aggregator that paid fees out-of-band (e.g., signed RFQ with fill-
+ * price already netted) would NOT use this helper — its `_swapSafe` sees
+ * no fee-induced loss. Gas-rebate models (negative fee) also skip.
+ *
+ * ## Return value
+ *
+ * BPS converted to WAD form via `FormatConverter.bpsToBpsWad`. Zero input
+ * (both userSlippage and feeBps are zero / undefined) returns `0n` without
+ * the conversion — preserves the historical zero-guard behavior of both
+ * adapters.
+ *
+ * @param userSlippage User's slippage tolerance in BPS (e.g., 100n = 1%)
+ * @param feeBps Aggregator's currency_in fee in BPS (e.g., CURVANCE_FEE_BPS = 4n).
+ *               Undefined / 0n / negative all produce no expansion.
+ * @returns WAD-BPS slippage for the `Swap.slippage` struct field
+ */
+export function toContractSwapSlippage(userSlippage: bigint, feeBps?: bigint): bigint {
+    const effective = feeBps && feeBps > 0n ? userSlippage + feeBps : userSlippage;
+    return effective ? FormatConverter.bpsToBpsWad(effective) : 0n;
+}
+
+export function getChainConfig(chain: ChainRpcPrefix = setup_config.chain) {
     const config = chain_config[chain];
     if (!config) {
         throw new Error(`No configuration found for chain ${chain}`);
@@ -82,6 +178,25 @@ export function validateProviderAsSigner(provider: curvance_provider) {
     }
 
     return provider as curvance_signer;
+}
+
+export function requireSigner(signer: curvance_signer | null | undefined): curvance_signer {
+    if (!signer) {
+        throw new Error("Provider is not a signer, therefor this action is not available. Please connect a wallet to execute this action.");
+    }
+
+    return signer;
+}
+
+export function requireAccount(
+    account: address | null | undefined,
+    signer: curvance_signer | null | undefined = null,
+): address {
+    if (account) {
+        return account;
+    }
+
+    return requireSigner(signer).address as address;
 }
 
 export function contractSetup<I>(provider: curvance_provider, contractAddress: address, abi: any): Contract & I {
@@ -119,6 +234,20 @@ function calculateGasWithBuffer(estimatedGas: bigint, bufferPercent: number): bi
  */
 function canEstimateGas(method: any): boolean {
     return typeof method?.estimateGas === 'function';
+}
+
+function supportsGasOverrides(contract: any, methodName: string | symbol): boolean {
+    if (typeof methodName !== "string") {
+        return false;
+    }
+
+    try {
+        const fragment = contract?.interface?.getFunction(methodName);
+        const stateMutability = fragment?.stateMutability;
+        return stateMutability !== "view" && stateMutability !== "pure";
+    } catch {
+        return false;
+    }
 }
 
 /**
@@ -289,8 +418,12 @@ export function contractWithGasBuffer<T extends object>(contract: T, bufferPerce
             // Return a wrapped version of the method
             return async (...args: any[]) => {
                 try {
-                    // Try to add gas buffer before calling the method
-                    await tryAddGasBuffer(originalMethod, args, bufferPercent);
+                    // Gas estimation is only useful on state-changing methods.
+                    // Estimating read-only functions adds an unnecessary RPC round-trip
+                    // and breaks fork tests when estimateGas is restricted or slow.
+                    if (supportsGasOverrides(target, methodName)) {
+                        await tryAddGasBuffer(originalMethod, args, bufferPercent);
+                    }
 
                     // Call the original method with potentially modified args
                     return await originalMethod.apply(target, args);

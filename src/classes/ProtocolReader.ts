@@ -1,7 +1,7 @@
 import { Contract } from "ethers";
-import { contractSetup, toDecimal, WAD } from "../helpers";
+import { contractSetup, EMPTY_ADDRESS, toDecimal, UINT256_MAX, WAD } from "../helpers";
 import abi from '../abis/ProtocolReader.json'
-import { address, curvance_provider, TokenInput, TypeBPS } from "../types";
+import { address, curvance_read_provider, TokenInput, TypeBPS } from "../types";
 import Decimal from "decimal.js";
 import { setup_config } from "../setup";
 import { MarketToken } from "./Market";
@@ -122,6 +122,8 @@ export interface UserData {
 }
 
 export interface IProtocolReader {
+    getAllDynamicState(account: address): Promise<any>;
+    getMarketStates(markets: address[], account: address): Promise<any>;
     getUserData(account: address): Promise<UserData>;
     getDynamicMarketData(): Promise<DynamicMarketData[]>;
     getStaticMarketData(): Promise<StaticMarketData[]>;
@@ -137,29 +139,204 @@ export interface IProtocolReader {
     getLeverageSnapshot(account: address, cToken: address, borrowableCToken: address, bufferTime: bigint): Promise<[bigint, bigint, bigint, bigint, bigint, bigint, boolean]>;
 }
 
+const PROTOCOL_READER_EXTRA_ABI = [
+    "function getMarketStates(address[] markets, address account) view returns ((address _address,(address _address,uint256 totalSupply,uint256 exchangeRate,uint256 totalAssets,uint256 collateral,uint256 debt,uint256 sharePrice,uint256 assetPrice,uint256 sharePriceLower,uint256 assetPriceLower,uint256 borrowRate,uint256 predictedBorrowRate,uint256 utilizationRate,uint256 supplyRate,uint256 liquidity)[] tokens)[] dynamicMarkets,(address _address,uint256 collateral,uint256 maxDebt,uint256 debt,uint256 positionHealth,uint256 cooldown,bool errorCodeHit,(address _address,uint256 userAssetBalance,uint256 userShareBalance,uint256 userUnderlyingBalance,uint256 userCollateral,uint256 userDebt,uint256 liquidationPrice)[] tokens)[] userMarkets)",
+] as const;
+const GET_MARKET_STATES_SELECTOR = "0xaa78b4d4";
+
+function normalizeDynamicMarketData(data: any[]): DynamicMarketData[] {
+    return data.map((market: any) => ({
+        address: market._address,
+        tokens: market.tokens.map((token: any) => ({
+            address: token._address,
+            totalSupply: BigInt(token.totalSupply),
+            totalAssets: BigInt(token.totalAssets),
+            exchangeRate: BigInt(token.exchangeRate),
+            collateral: BigInt(token.collateral),
+            debt: BigInt(token.debt),
+            sharePrice: BigInt(token.sharePrice),
+            assetPrice: BigInt(token.assetPrice),
+            sharePriceLower: BigInt(token.sharePriceLower),
+            assetPriceLower: BigInt(token.assetPriceLower),
+            borrowRate: BigInt(token.borrowRate),
+            predictedBorrowRate: BigInt(token.predictedBorrowRate),
+            utilizationRate: BigInt(token.utilizationRate),
+            supplyRate: BigInt(token.supplyRate),
+            liquidity: BigInt(token.liquidity),
+        })),
+    }));
+}
+
+function normalizeUserMarkets(data: any[]): UserMarket[] {
+    return data.map((market: any) => ({
+        address: market._address,
+        collateral: BigInt(market.collateral),
+        maxDebt: BigInt(market.maxDebt),
+        debt: BigInt(market.debt),
+        positionHealth: BigInt(market.positionHealth),
+        cooldown: BigInt(market.cooldown),
+        // ABI names this field `errorCodeHit`; older SDK code/context call it `priceStale`.
+        priceStale: Boolean(market.priceStale ?? market.errorCodeHit),
+        tokens: market.tokens.map((token: any) => ({
+            address: token._address,
+            userAssetBalance: BigInt(token.userAssetBalance),
+            userShareBalance: BigInt(token.userShareBalance),
+            userUnderlyingBalance: BigInt(token.userUnderlyingBalance),
+            userCollateral: BigInt(token.userCollateral),
+            userDebt: BigInt(token.userDebt),
+            liquidationPrice: BigInt(token.liquidationPrice),
+        })),
+    }));
+}
+
+function normalizeUserData(data: any): UserData {
+    return {
+        locks: (data?.locks ?? []).map((lock: any) => ({
+            lockIndex: BigInt(lock.lockIndex),
+            amount: BigInt(lock.amount),
+            unlockTime: BigInt(lock.unlockTime),
+        })),
+        markets: normalizeUserMarkets(data?.markets ?? []),
+    };
+}
+
+function createEmptyUserData(staticMarkets: StaticMarketData[]): UserData {
+    return {
+        locks: [],
+        markets: staticMarkets.map((market) => ({
+            address: market.address,
+            collateral: 0n,
+            maxDebt: 0n,
+            debt: 0n,
+            positionHealth: UINT256_MAX,
+            cooldown: market.cooldownLength,
+            priceStale: false,
+            tokens: market.tokens.map((token) => ({
+                address: token.address,
+                userAssetBalance: 0n,
+                userShareBalance: 0n,
+                userUnderlyingBalance: 0n,
+                userCollateral: 0n,
+                userDebt: 0n,
+                liquidationPrice: UINT256_MAX,
+            })),
+        })),
+    };
+}
+
+// Module-level cache: reader address → whether the new getMarketStates
+// selector is deployed on that contract. Every setupChain() constructs a
+// fresh ProtocolReader, so a per-instance flag would re-probe on every
+// chain switch. After the retry-provider unknown-error cascade fix, one
+// probe costs primary + every configured fallback RPC, making the re-probe
+// observable cost rather than a silent waste.
+const PROTOCOL_READER_SELECTOR_SUPPORT = new Map<address, boolean>();
+const PROTOCOL_READER_FALLBACK_WARNED = new Set<address>();
+
+/** Test-only: reset the module-level probe cache so tests can validate
+ *  probe-path behavior in isolation. Not part of the public runtime API. */
+export function __resetProtocolReaderCache(): void {
+    PROTOCOL_READER_SELECTOR_SUPPORT.clear();
+    PROTOCOL_READER_FALLBACK_WARNED.clear();
+}
+
 export class ProtocolReader {
-    provider: curvance_provider;
+    provider: curvance_read_provider;
     address: address;
     contract: Contract & IProtocolReader;
 
-    constructor(address: address, provider: curvance_provider = setup_config.provider) {
+    constructor(address: address, provider: curvance_read_provider = setup_config.readProvider) {
         this.provider = provider;
         this.address = address;
-        this.contract = contractSetup<IProtocolReader>(provider, address, abi);
+        this.contract = contractSetup<IProtocolReader>(provider, address, [...abi, ...PROTOCOL_READER_EXTRA_ABI]);
     }
 
-    async getAllMarketData(account: address, use_api = true) {
-        const all = await Promise.all([
-            this.getStaticMarketData(use_api),
-            this.getDynamicMarketData(use_api),
-            this.getUserData(account)
-        ])
+    private isMissingGetMarketStates(error: any): boolean {
+        const message = String(error?.message ?? "").toLowerCase();
+        const shortMessage = String(error?.shortMessage ?? "").toLowerCase();
+        const revertReason = String(error?.reason ?? "").toLowerCase();
+        const txData = String(error?.transaction?.data ?? "").toLowerCase();
+
+        const looksLikeSelectorMiss =
+            txData.startsWith(GET_MARKET_STATES_SELECTOR) &&
+            (
+                shortMessage.includes("no data present") ||
+                shortMessage.includes("missing revert data") ||
+                message.includes("no data present") ||
+                message.includes("missing revert data") ||
+                revertReason === "require(false)"
+            );
+
+        return looksLikeSelectorMiss;
+    }
+
+    private async getMarketStatesFallback(markets: address[], account: address) {
+        // Compatibility fallback: keep this path until every environment that
+        // runs the SDK (main deployment, staging, forks, local Anvil) has a
+        // ProtocolReader with getMarketStates deployed. Removing it right after
+        // a single deployment upgrade will break older forks and stale test envs.
+        if (!PROTOCOL_READER_FALLBACK_WARNED.has(this.address)) {
+            PROTOCOL_READER_FALLBACK_WARNED.add(this.address);
+            console.warn(
+                "[ProtocolReader] getMarketStates is not available on this deployment yet. " +
+                "Falling back to getDynamicMarketData + getUserData for targeted refreshes."
+            );
+        }
+
+        const [allDynamicMarkets, userData] = await Promise.all([
+            this.getDynamicMarketData(),
+            this.getUserData(account),
+        ]);
+
+        const dynamicByAddress = new Map(allDynamicMarkets.map((market) => [market.address, market] as const));
+        const userByAddress = new Map(userData.markets.map((market) => [market.address, market] as const));
+
+        const dynamicMarkets = markets.map((marketAddress) => {
+            const dynamicMarket = dynamicByAddress.get(marketAddress);
+            if (!dynamicMarket) {
+                throw new Error(`Fallback could not find dynamic market state for ${marketAddress}.`);
+            }
+            return dynamicMarket;
+        });
+
+        const userMarkets = markets.map((marketAddress) => {
+            const userMarket = userByAddress.get(marketAddress);
+            if (!userMarket) {
+                throw new Error(`Fallback could not find user market state for ${marketAddress}.`);
+            }
+            return userMarket;
+        });
 
         return {
-            staticMarket : all[0],
-            dynamicMarket: all[1],
-            userData     : all[2]
+            dynamicMarkets,
+            userMarkets,
+        };
+    }
+
+    async getAllMarketData(account: address | null = null) {
+        if(account == null || account === EMPTY_ADDRESS) {
+            const [staticMarket, dynamicMarket] = await Promise.all([
+                this.getStaticMarketData(),
+                this.getDynamicMarketData(),
+            ]);
+
+            return {
+                staticMarket,
+                dynamicMarket,
+                userData: createEmptyUserData(staticMarket),
+            };
         }
+
+        const [staticMarket, { dynamicMarket, userData }] = await Promise.all([
+            this.getStaticMarketData(),
+            this.getAllDynamicState(account),
+        ]);
+
+        return {
+            staticMarket,
+            dynamicMarket,
+            userData,
+        };
     }
 
     async maxRedemptionOf(account: address, ctoken: CToken, bufferTime: bigint = 0n) {
@@ -171,8 +348,8 @@ export class ProtocolReader {
         };
     }
 
-    async hypotheticalRedemptionOf(account: address, ctoken: CToken, shares: bigint) {
-        const data = await this.contract.hypotheticalRedemptionOf(account, ctoken.address, shares, 0n);
+    async hypotheticalRedemptionOf(account: address, ctoken: CToken, shares: bigint, bufferTime: bigint = 0n) {
+        const data = await this.contract.hypotheticalRedemptionOf(account, ctoken.address, shares, bufferTime);
         return {
             excess: BigInt(data[0]),
             deficit: BigInt(data[1]),
@@ -181,8 +358,8 @@ export class ProtocolReader {
         }
     }
 
-    async hypotheticalBorrowOf(account: address, ctoken: BorrowableCToken, assets: bigint) {
-        const data = await this.contract.hypotheticalBorrowOf(account, ctoken.address, assets, 0n);
+    async hypotheticalBorrowOf(account: address, ctoken: BorrowableCToken, assets: bigint, bufferTime: bigint = 0n) {
+        const data = await this.contract.hypotheticalBorrowOf(account, ctoken.address, assets, bufferTime);
         return {
             excess: BigInt(data[0]),
             deficit: BigInt(data[1]),
@@ -209,64 +386,44 @@ export class ProtocolReader {
         }
     }
 
-    async getDynamicMarketData(use_api = true) {
-        // TODO: Implement API call
+    async getDynamicMarketData() {
         const data = await this.contract.getDynamicMarketData();
-        const typedData: DynamicMarketData[] = data.map((market: any) => ({
-            address: market._address,
-            tokens: market.tokens.map((token: any) => ({
-                address: token._address,
-                totalSupply: BigInt(token.totalSupply),
-                totalAssets: BigInt(token.totalAssets),
-                exchangeRate: BigInt(token.exchangeRate),
-                collateral: BigInt(token.collateral),
-                debt: BigInt(token.debt),
-                sharePrice: BigInt(token.sharePrice),
-                assetPrice: BigInt(token.assetPrice),
-                sharePriceLower: BigInt(token.sharePriceLower),
-                assetPriceLower: BigInt(token.assetPriceLower),
-                borrowRate: BigInt(token.borrowRate),
-                predictedBorrowRate: BigInt(token.predictedBorrowRate),
-                utilizationRate: BigInt(token.utilizationRate),
-                supplyRate: BigInt(token.supplyRate),
-                liquidity: BigInt(token.liquidity)
-            }))
-        }));
-
-        return typedData;
-
+        return normalizeDynamicMarketData(data);
     }
 
     async getUserData(account: address) {
         const data = await this.contract.getUserData(account);
+        return normalizeUserData(data);
+    }
 
-        const typedData: UserData = {
-            locks: data.locks.map((lock: any) => ({
-                lockIndex: BigInt(lock.lockIndex),
-                amount: BigInt(lock.amount),
-                unlockTime: BigInt(lock.unlockTime)
-            })),
-            markets: data.markets.map((market: any) => ({
-                address: market._address,
-                collateral: BigInt(market.collateral),
-                maxDebt: BigInt(market.maxDebt),
-                debt: BigInt(market.debt),
-                positionHealth: BigInt(market.positionHealth),
-                cooldown: BigInt(market.cooldown),
-                priceStale: market.priceStale,
-                tokens: market.tokens.map((token: any) => ({
-                    address: token._address,
-                    userAssetBalance: BigInt(token.userAssetBalance),
-                    userShareBalance: BigInt(token.userShareBalance),
-                    userUnderlyingBalance: BigInt(token.userUnderlyingBalance),
-                    userCollateral: BigInt(token.userCollateral),
-                    userDebt: BigInt(token.userDebt),
-                    liquidationPrice: BigInt(token.liquidationPrice)
-                }))
-            }))
+    async getAllDynamicState(account: address) {
+        const data = await this.contract.getAllDynamicState(account);
+        return {
+            dynamicMarket: normalizeDynamicMarketData(data.market ?? data[0] ?? []),
+            userData: normalizeUserData(data.user ?? data[1] ?? { locks: [], markets: [] }),
         };
+    }
 
-        return typedData;
+    async getMarketStates(markets: address[], account: address) {
+        if (PROTOCOL_READER_SELECTOR_SUPPORT.get(this.address) === false) {
+            return this.getMarketStatesFallback(markets, account);
+        }
+
+        try {
+            const data = await this.contract.getMarketStates(markets, account);
+            PROTOCOL_READER_SELECTOR_SUPPORT.set(this.address, true);
+            return {
+                dynamicMarkets: normalizeDynamicMarketData(data.dynamicMarkets ?? data[0] ?? []),
+                userMarkets: normalizeUserMarkets(data.userMarkets ?? data[1] ?? []),
+            };
+        } catch (error: any) {
+            if (!this.isMissingGetMarketStates(error)) {
+                throw error;
+            }
+
+            PROTOCOL_READER_SELECTOR_SUPPORT.set(this.address, false);
+            return this.getMarketStatesFallback(markets, account);
+        }
     }
 
     async previewAssetImpact(user: address, collateral_ctoken: address, debt_ctoken: address, deposit_amount: bigint, borrow_amount: bigint) {
@@ -312,8 +469,7 @@ export class ProtocolReader {
         return { collateralUsd, debtUsd, collateralAssetPrice, sharePrice, debtAssetPrice, debtTokenBalance, oracleError };
     }
 
-    async getStaticMarketData(use_api = true) {
-        // TODO: Implement API call
+    async getStaticMarketData() {
         const data = await this.contract.getStaticMarketData();
 
         const typedData: StaticMarketData[] = data.map((market: any) => ({

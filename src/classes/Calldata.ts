@@ -1,18 +1,18 @@
 import { Contract, TransactionResponse } from "ethers";
-import { address, bytes, curvance_provider } from "../types";
-import { validateProviderAsSigner } from "../helpers";
+import { address, bytes, curvance_signer } from "../types";
+import { requireSigner } from "../helpers";
 
 export abstract class Calldata<T> {
     abstract address: address;
     abstract contract: Contract & T;
-    abstract provider: curvance_provider;
+    abstract signer: curvance_signer | null;
     
     getCallData(functionName: string, exec_params: any[]) {
         return this.contract.interface.encodeFunctionData(functionName, exec_params) as bytes;
     }
 
     async executeCallData(calldata: bytes, overrides: { [key: string]: any } = {}): Promise<TransactionResponse> {
-        const signer = validateProviderAsSigner(this.provider);
+        const signer = requireSigner(this.signer);
         return signer.sendTransaction({
             to: this.address,
             data: calldata,
@@ -21,7 +21,7 @@ export abstract class Calldata<T> {
     }
 
     async simulateCallData(calldata: bytes, overrides: { [key: string]: any } = {}): Promise<{ success: boolean; error?: string }> {
-        const signer = validateProviderAsSigner(this.provider);
+        const signer = requireSigner(this.signer);
         try {
             await signer.call({
                 to: this.address,

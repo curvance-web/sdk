@@ -1,12 +1,12 @@
-import { address, bytes, curvance_provider, Percentage, TokenInput } from "../../types";
+import { address, bytes, curvance_read_provider, Percentage, TokenInput } from "../../types";
 import { ZapToken } from "../CToken";
 import IDexAgg from "./IDexAgg";
 import { Swap } from "../Zapper";
 import { all_markets } from "../../setup";
-import { toBigInt, validateProviderAsSigner } from "../../helpers";
+import { EMPTY_ADDRESS, toBigInt, toContractSwapSlippage } from "../../helpers";
 import { ERC20 } from "../ERC20";
 import FormatConverter from "../FormatConverter";
-import { safeBigInt, fetchWithTimeout, validateSlippageBps } from "../../validation";
+import { safeBigInt, fetchWithTimeout, validateRouterAddress, validateSlippageBps } from "../../validation";
 import { AbiCoder } from "ethers";
 import { CURVANCE_FEE_BPS, CURVANCE_DAO_FEE_RECEIVER } from "../../feePolicy";
 
@@ -189,7 +189,13 @@ export class KyberSwap implements IDexAgg {
         this.api = `${api}/${this.chain}`;
     }
 
-    async getAvailableTokens(provider: curvance_provider, query: string | null = null, page: number = 1, pageSize: number = 25): Promise<ZapToken[]> {
+    async getAvailableTokens(
+        provider: curvance_read_provider,
+        query: string | null = null,
+        account: address | null = null,
+        page: number = 1,
+        pageSize: number = 25,
+    ): Promise<ZapToken[]> {
         let zap_tokens: ZapToken[] = [];
 
         let tokens_set = new Set<string>();
@@ -212,14 +218,14 @@ export class KyberSwap implements IDexAgg {
                     interface: token.getAsset(true),
                     type: 'simple',
                     quote: async (tokenIn: string, tokenOut: string, amount: TokenInput, slippage: Percentage) => {
-                        const signer = validateProviderAsSigner(provider);
-                        const erc20in = new ERC20(provider, tokenIn as address);
+                        const wallet = account ?? EMPTY_ADDRESS;
+                        const erc20in = new ERC20(provider, tokenIn as address, undefined, undefined, null);
                         const decimalsIn = erc20in.decimals ?? await erc20in.contract.decimals();
                         const amount_bigint = toBigInt(amount, decimalsIn);
-                        const erc20Out = new ERC20(provider, tokenOut as address);
+                        const erc20Out = new ERC20(provider, tokenOut as address, undefined, undefined, null);
                         const decimalsOut = erc20Out.decimals ?? await erc20Out.contract.decimals();
 
-                        const results = await this.quote(signer.address, tokenIn, tokenOut, amount_bigint, FormatConverter.percentageToBps(slippage));
+                        const results = await this.quote(wallet, tokenIn, tokenOut, amount_bigint, FormatConverter.percentageToBps(slippage));
                         return {
                             minOut_raw: results.min_out,
                             output_raw: results.out,
@@ -238,12 +244,20 @@ export class KyberSwap implements IDexAgg {
 
     async quoteAction(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
         const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
+
+        // Fee-aware slippage expansion: KyberSwap deducts its `currency_in`
+        // fee before the swap executes, so on-chain `_swapSafe` measures
+        // (valueIn − valueOut) / valueIn counting the fee as "slippage".
+        // Routed through the shared `toContractSwapSlippage` helper so every
+        // aggregator adapter gets identical behavior. Raw user slippage
+        // still gates `minReturnAmount` inside the build payload (DEX-level
+        // protection stays tight).
         const action = {
             inputToken: tokenIn,
             inputAmount: BigInt(amount),
             outputToken: tokenOut,
             target: quote.to,
-            slippage: slippage ? FormatConverter.bpsToBpsWad(slippage) : 0n,
+            slippage: toContractSwapSlippage(slippage, feeBps),
             call: quote.calldata
         } as Swap;
 
@@ -320,16 +334,16 @@ export class KyberSwap implements IDexAgg {
         const amountOut = safeBigInt(build_data.data.amountOut, 'KyberSwap amountOut');
         const min_out = amountOut * (10000n - slippage) / 10000n;
 
-        if(build_data.data.routerAddress != this.router) {
-            throw new Error(`KyberSwap returned unexpected router address: ${build_data.data.routerAddress}`);
-        }
+        // Case-insensitive router comparison via validateRouterAddress — also
+        // enforces address format/checksum. Matches Kuru's router gate.
+        const validatedRouter = validateRouterAddress(build_data.data.routerAddress, this.router, 'KyberSwap');
 
         // Validate that the API actually embedded the fee params we requested.
         // Without this, a misconfigured API response silently reverts on-chain.
         validateSwapCalldata(build_data.data.data, feeBps ?? 0n, feeReceiver);
 
         return {
-            to: build_data.data.routerAddress,
+            to: validatedRouter,
             calldata: build_data.data.data as bytes,
             min_out: min_out,
             out: amountOut,

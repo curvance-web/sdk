@@ -6,7 +6,11 @@ import Decimal from 'decimal.js';
 import { TestFramework } from './utils/TestFramework';
 import assert from 'node:assert';
 
-describe('Basic operations', () => {
+const FORK_SKIP = (!process.env.ARB_DEPLOYER_PRIVATE_KEY || !process.env.TEST_RPC)
+    ? 'Fork env not configured: set ARB_DEPLOYER_PRIVATE_KEY and TEST_RPC in .env. See tests/README.md.'
+    : undefined;
+
+describe('Basic operations', { skip: FORK_SKIP }, () => {
     let account: address;
     let target_market = 'Stable Market';
     let framework: TestFramework;

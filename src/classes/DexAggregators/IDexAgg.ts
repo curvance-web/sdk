@@ -1,4 +1,4 @@
-import { address, bytes, curvance_provider } from "../../types";
+import { address, bytes, curvance_read_provider } from "../../types";
 import { ZapToken } from "../CToken";
 import { Swap } from "../Zapper";
 
@@ -23,7 +23,7 @@ export type Quote = {
 export default interface IDexAgg {
     dao: address;
     router: address;
-    getAvailableTokens(provider: curvance_provider, query: string | null): Promise<ZapToken[]>;
+    getAvailableTokens(provider: curvance_read_provider, query: string | null, account?: address | null): Promise<ZapToken[]>;
     quoteAction(...args: QuoteArgs): Promise<{
         action: Swap;
         quote: Quote;

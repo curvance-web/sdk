@@ -7,7 +7,11 @@ import { TestFramework } from './utils/TestFramework';
 import { fastForwardTime, MARKET_HOLD_PERIOD_SECS } from './utils/helper';
 import assert from 'node:assert';
 
-describe('Leverage', () => {
+const FORK_SKIP = (!process.env.DEPLOYER_PRIVATE_KEY || !process.env.TEST_RPC)
+    ? 'Fork env not configured: set DEPLOYER_PRIVATE_KEY and TEST_RPC in .env. See tests/README.md.'
+    : undefined;
+
+describe('Leverage', { skip: FORK_SKIP }, () => {
     let account: address;
     let framework: TestFramework;
 

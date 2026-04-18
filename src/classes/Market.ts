@@ -1,12 +1,12 @@
-import { BPS, ChangeRate, contractSetup, EMPTY_ADDRESS, getRateSeconds, toBigInt, toDecimal, UINT256_MAX, validateProviderAsSigner, WAD, WAD_DECIMAL } from "../helpers";
+import { BPS, ChangeRate, contractSetup, EMPTY_ADDRESS, getRateSeconds, requireAccount, toBigInt, toDecimal, UINT256_MAX, WAD, WAD_DECIMAL } from "../helpers";
 import { Contract } from "ethers";
 import { DynamicMarketData, ProtocolReader, StaticMarketData, UserMarket } from "./ProtocolReader";
 import { AccountSnapshot, CToken } from "./CToken";
 import abi from '../abis/MarketManagerIsolated.json';
 import { Decimal } from "decimal.js";
-import { address, curvance_provider, Percentage, TokenInput, USD } from "../types";
+import { address, curvance_read_provider, curvance_signer, Percentage, TokenInput, USD } from "../types";
 import { OracleManager } from "./OracleManager";
-import { setup_config } from "../setup";
+import { setup_config, type SetupConfigSnapshot } from "../setup";
 import { fetchMerklOpportunities, MerklOpportunity } from "../integrations/merkl";
 import { BorrowableCToken } from "./BorrowableCToken";
 import FormatConverter from "./FormatConverter";
@@ -56,29 +56,38 @@ export interface IMarket {
 }
 
 export class Market {
-    provider: curvance_provider;
+    provider: curvance_read_provider;
+    signer: curvance_signer | null;
+    account: address | null;
     address: address;
     contract: Contract & IMarket;
     tokens: (CToken | BorrowableCToken)[] = [];
     oracle_manager: OracleManager;
     reader: ProtocolReader;
+    setup: SetupConfigSnapshot;
     cache: { static: StaticMarketData, dynamic: DynamicMarketData, user: UserMarket, deploy: DeployData };
     milestone: MilestoneResponse | null = null;
     incentives: Array<IncentiveResponse> = [];
 
     constructor(
-        provider: curvance_provider,
+        provider: curvance_read_provider,
+        signer: curvance_signer | null,
+        account: address | null,
         static_data: StaticMarketData,
         dynamic_data: DynamicMarketData,
         user_data: UserMarket,
         deploy_data: DeployData,
         oracle_manager: OracleManager,
-        reader: ProtocolReader
+        reader: ProtocolReader,
+        setup: SetupConfigSnapshot
     ) {
         this.provider = provider;
+        this.signer = signer;
+        this.account = account;
         this.address = static_data.address;
         this.oracle_manager = oracle_manager;
         this.reader = reader;
+        this.setup = setup;
         this.contract = contractSetup<IMarket>(provider, this.address, abi);
         this.cache = { static: static_data, dynamic: dynamic_data, user: user_data, deploy: deploy_data };
 
@@ -99,6 +108,10 @@ export class Market {
                 this.tokens.push(ctoken);
             }
         }
+    }
+
+    private getAccountOrThrow(): address {
+        return requireAccount(this.account, this.signer);
     }
 
     /** @returns {string} - The name of the market at deployment. */
@@ -320,35 +333,98 @@ export class Market {
      * @param account - Wallet address
      * @returns collateral, max debt, debt for the market
      */
-    async getSnapshots(account: address) {
-        let snapshots: Array<AccountSnapshot> = [];
-        for(const token of this.tokens) {
-            const snapshot = await token.getSnapshot(account);
-            snapshots.push(snapshot);
+    async getSnapshots(account: address): Promise<AccountSnapshot[]> {
+        // Each ctoken.getSnapshot is an independent view call — dispatch in
+        // parallel so N tokens is one round-trip latency, not N.
+        return Promise.all(this.tokens.map((token) => token.getSnapshot(account)));
+    }
+
+    hasUserActivity() {
+        return this.tokens.some((token) =>
+            token.cache.userAssetBalance > 0n ||
+            token.cache.userShareBalance > 0n ||
+            token.cache.userCollateral > 0n ||
+            token.cache.userDebt > 0n
+        );
+    }
+
+    applyState(dynamicData: DynamicMarketData, userData?: UserMarket) {
+        this.cache.dynamic = dynamicData;
+
+        if(userData != undefined) {
+            this.cache.user = userData;
         }
-        return snapshots;
+
+        for(const token of this.tokens) {
+            const nextDynamic = dynamicData.tokens.find((t) => t.address == token.address);
+            const nextUser = userData?.tokens.find((t) => t.address == token.address);
+            token.cache = {
+                ...token.cache,
+                ...(nextDynamic ?? {}),
+                ...(nextUser ?? {}),
+            };
+        }
     }
 
     async reloadMarketData() {
         const dynamic_data = await this.reader.getDynamicMarketData();
-        this.cache.dynamic = dynamic_data.find(m => m.address == this.address)!;
-
-        for(const token of this.tokens) {
-            const new_cache = this.cache.dynamic.tokens.find(t => t.address == token.address)!;
-            token.cache = {...token.cache, ...new_cache};
+        const dynamic = dynamic_data.find(m => m.address == this.address);
+        if(dynamic == undefined) {
+            throw new Error(`Could not find dynamic data for market ${this.address}.`);
         }
+        this.applyState(dynamic);
     }
 
     async reloadUserData(account: address) {
-        const data = (await this.reader.getUserData(account))
-            .markets.find(market => market.address == this.address)!;
+        const { dynamicMarkets, userMarkets } = await this.reader.getMarketStates([this.address], account);
+        const dynamic = dynamicMarkets[0];
+        const user = userMarkets[0];
 
-        this.cache.user = data;
-
-        for(const token of this.tokens) {
-            const new_cache = data.tokens.find(t => t.address == token.address)!;
-            token.cache = {...token.cache, ...new_cache};
+        if(dynamic == undefined || user == undefined) {
+            throw new Error(`Could not reload market state for ${this.address}.`);
         }
+
+        this.applyState(dynamic, user);
+    }
+
+    static getActiveUserMarkets(markets: Market[]): Market[] {
+        return markets.filter((market) => market.hasUserActivity());
+    }
+
+    static async reloadUserMarkets(markets: Market[], account: address): Promise<Market[]> {
+        if(markets.length === 0) {
+            return [];
+        }
+
+        const groups = new Map<ProtocolReader, Market[]>();
+        for(const market of markets) {
+            const existing = groups.get(market.reader);
+            if(existing) {
+                existing.push(market);
+            } else {
+                groups.set(market.reader, [market]);
+            }
+        }
+
+        for(const [reader, groupedMarkets] of groups) {
+            const addresses = groupedMarkets.map((market) => market.address);
+            const { dynamicMarkets, userMarkets } = await reader.getMarketStates(addresses, account);
+            const dynamicByAddress = new Map(dynamicMarkets.map((market) => [market.address, market]));
+            const userByAddress = new Map(userMarkets.map((market) => [market.address, market]));
+
+            for(const market of groupedMarkets) {
+                const dynamic = dynamicByAddress.get(market.address);
+                const user = userByAddress.get(market.address);
+
+                if(dynamic == undefined || user == undefined) {
+                    throw new Error(`Could not reload market state for ${market.address}.`);
+                }
+
+                market.applyState(dynamic, user);
+            }
+        }
+
+        return markets;
     }
 
     /**
@@ -482,8 +558,7 @@ export class Market {
         debt_amount: TokenInput = Decimal(0),
         bufferTime: bigint = 0n
     ) {
-        const provider = validateProviderAsSigner(this.provider);
-        const user = provider.address as address;
+        const user = this.getAccountOrThrow();
 
         // Pass underlying asset amounts — NOT shares.
         // The on-chain reader's _collateralValue calls previewDeposit(assets) internally,
@@ -528,8 +603,7 @@ export class Market {
      * @returns The new position health
      */
     async previewPositionHealthRedeem(ctoken: CToken, amount: TokenInput) {
-        const provider = validateProviderAsSigner(this.provider);
-        const user = provider.address as address;
+        const user = this.getAccountOrThrow();
         const redeem_amount = ctoken.convertTokenInputToShares(amount);
         const existing_collateral = ctoken.cache.userCollateral;
 
@@ -573,8 +647,7 @@ export class Market {
      * @returns The new position health
      */
     async previewPositionHealthBorrow(token: BorrowableCToken, amount: TokenInput) {
-        const provider = validateProviderAsSigner(this.provider);
-        const user = provider.address as address;
+        const user = this.getAccountOrThrow();
         const data = await this.reader.getPositionHealth(
             this.address,
             user,
@@ -601,8 +674,7 @@ export class Market {
      * @returns The new position health
      */
     async previewPositionHealthRepay(token: BorrowableCToken, amount: TokenInput) {
-        const provider = validateProviderAsSigner(this.provider);
-        const user = provider.address as address;
+        const user = this.getAccountOrThrow();
         const data = await this.reader.getPositionHealth(
             this.address,
             user,
@@ -653,13 +725,13 @@ export class Market {
      * @returns An object mapping market addresses to their cooldown expiration dates OR null if its not in cooldown
      */
     async multiHoldExpiresAt(markets: Market[]) {
-        const provider = validateProviderAsSigner(this.provider);
+        const account = this.getAccountOrThrow();
         if(markets.length == 0) {
             throw new Error("You can't fetch expirations for no markets.");
         }
 
         const marketAddresses = markets.map(market => market.address);
-        const cooldownTimestamps = await this.reader.marketMultiCooldown(marketAddresses, provider.address as address);
+        const cooldownTimestamps = await this.reader.marketMultiCooldown(marketAddresses, account);
 
         let cooldowns: { [address: address]: Date | null } = {};
         for(let i = 0; i < markets.length; i++) {
@@ -680,13 +752,21 @@ export class Market {
      * @param provider - The RPC provider
      * @returns An array of Market instances setup with protocol reader data
      */
-    static async getAll(reader: ProtocolReader, oracle_manager: OracleManager, provider: curvance_provider = setup_config.provider, milestones: Milestones = {}, incentives: Incentives = {}) {
-        const user = "address" in provider ? provider.address : EMPTY_ADDRESS;
-        const all_data = await reader.getAllMarketData(user as address);
-        const deploy_keys: string[] = Object.keys(setup_config.contracts.markets) as (keyof typeof setup_config.contracts.markets)[];
+    static async getAll(
+        reader: ProtocolReader,
+        oracle_manager: OracleManager,
+        provider: curvance_read_provider = setup_config.readProvider,
+        signer: curvance_signer | null = setup_config.signer,
+        account: address | null = setup_config.account,
+        milestones: Milestones = {},
+        incentives: Incentives = {},
+        setup: SetupConfigSnapshot = setup_config,
+    ) {
+        const all_data = await reader.getAllMarketData(account);
+        const deploy_keys: string[] = Object.keys(setup.contracts.markets) as (keyof typeof setup.contracts.markets)[];
         // Filter out USDC — DeFiLlama incorrectly returns YZM vault yield labeled as USDC
         const [yields, merklLendOpps, merklBorrowOpps] = await Promise.all([
-            Api.fetchNativeYields().then(y => y.filter(y => y.symbol.toUpperCase() !== 'USDC')),
+            Api.fetchNativeYields(setup).then(y => y.filter(y => y.symbol.toUpperCase() !== 'USDC')),
             fetchMerklOpportunities({ action: 'LEND' }).catch(() => [] as MerklOpportunity[]),
             fetchMerklOpportunities({ action: 'BORROW' }).catch(() => [] as MerklOpportunity[]),
         ]);
@@ -702,7 +782,7 @@ export class Market {
             let deploy_data: DeployData | undefined;
 
             for(const obj_key of deploy_keys) {
-                const data = (setup_config.contracts.markets as any)[obj_key];
+                const data = (setup.contracts.markets as any)[obj_key];
 
                 if(typeof data != 'object') {
                     continue;
@@ -737,7 +817,7 @@ export class Market {
                 continue;
             }
 
-            const market = new Market(provider, staticData, dynamicData, userData, deploy_data, oracle_manager, reader);
+            const market = new Market(provider, signer, account, staticData, dynamicData, userData, deploy_data, oracle_manager, reader, setup);
             if(milestones[market.address] != undefined) {
                 market.milestone = milestones[market.address]!;
             }
