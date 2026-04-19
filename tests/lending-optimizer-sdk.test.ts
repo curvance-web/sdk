@@ -73,7 +73,8 @@ describe('LendingOptimizer SDK — deposit + withdraw + redeem', { skip: FORK_SK
             'function approve(address,uint256) external returns (bool)',
         ], framework.signer);
         await (await usdcDirect.getFunction('approve')(optimizerAddress, ethers.MaxUint256)).wait();
-        await (await (deployed as any).initializeDeposits(0)).wait();
+        // Seeds _BASE_UNDERLYING_RESERVE dead shares into the chosen market.
+        await (await (deployed as any).initializeDeposits(APPROVED_CTOKENS[0])).wait();
 
         // Seed the vault with an initial deposit so totalSupply > 0 before
         // the SDK tests exercise the deposit path. Mirrors optimizer.test.ts.
@@ -166,6 +167,9 @@ describe('LendingOptimizer SDK — deposit + withdraw + redeem', { skip: FORK_SK
     });
 
     test('redeem(shares) with full balance zeros the share position', async () => {
+        // Proves the dust-free Max-withdraw rail: passing the exact bigint share
+        // balance (e.g. from OptimizerReader.getOptimizerUserData) through
+        // redeem(...) leaves zero share dust on a live fork.
         const shareBalance = await optimizer.balanceOf(account);
         assert(shareBalance > 0n, 'precondition: signer should hold shares');
 

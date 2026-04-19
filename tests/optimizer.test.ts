@@ -87,7 +87,7 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
         ], framework.signer);
         await (await usdc.getFunction('approve')(optimizerAddress, ethers.MaxUint256)).wait();
 
-        await (await optimizer.initializeDeposits(0)).wait();
+        await (await optimizer.initializeDeposits(APPROVED_CTOKENS[0])).wait();
 
         // Deposit 10,000 USDC
         await (await optimizer['deposit(uint256,address)'](DEPOSIT_AMOUNT, account)).wait();
@@ -122,36 +122,20 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
         assert(entry.redeemable > 0n, 'redeemable should be > 0 after deposit');
     });
 
-    test('optimalDeposit returns a valid cToken', async () => {
-        const target = await reader.optimalDeposit(optimizerAddress, 1_000n * 10n ** 6n);
-
-        assert(
-            APPROVED_CTOKENS.includes(target),
-            `optimalDeposit returned ${target}, expected one of ${APPROVED_CTOKENS}`,
-        );
-    });
-
-    test('optimalWithdrawal returns a valid cToken', async () => {
-        const target = await reader.optimalWithdrawal(optimizerAddress, 1_000n * 10n ** 6n);
-
-        assert(
-            APPROVED_CTOKENS.includes(target),
-            `optimalWithdrawal returned ${target}, expected one of ${APPROVED_CTOKENS}`,
-        );
-    });
-
-    test('optimalRebalance returns actions for all markets', async () => {
-        const actions = await reader.optimalRebalance(optimizerAddress);
+    test('optimalRebalance returns actions and bounds for all markets', async () => {
+        const { actions, bounds } = await reader.optimalRebalance(optimizerAddress, 100n);
 
         assert.strictEqual(actions.length, 3, 'Should return 3 rebalance actions');
+        assert.strictEqual(bounds.length, 3, 'Should return 3 allocation bounds');
 
         const actionAddresses = actions.map(a => a.cToken);
         for (const cToken of APPROVED_CTOKENS) {
             assert(actionAddresses.includes(cToken), `Missing action for cToken ${cToken}`);
         }
 
-        // Total deposits should approximately equal total withdrawals (net ~0)
-        const netFlow = actions.reduce((sum, a) => sum + a.assets, 0n);
+        // assetsOrBps is int256 (signed): positive = deposit, negative = withdraw.
+        // Net flow across all actions should be ~0 since rebalancing conserves totalAssets.
+        const netFlow = actions.reduce((sum, a) => sum + a.assetsOrBps, 0n);
         const totalAssetsVal: bigint = await optimizer.totalAssets();
         const tolerance = totalAssetsVal / 100n; // 1% tolerance
         assert(
@@ -161,19 +145,15 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
     });
 
     test('rebalance execution preserves totalAssets', async () => {
-        // Create imbalanced state: deposit everything to first market
-        await (await optimizer['deposit(uint256,address,address)'](
-            1_000n * 10n ** 6n, account, APPROVED_CTOKENS[0],
-        )).wait();
-
         const totalBefore: bigint = await optimizer.totalAssets();
 
-        // Get optimal rebalance actions
-        const actions = await reader.optimalRebalance(optimizerAddress);
+        // Get optimal rebalance actions and bounds (slippage = 100 bps / 1%).
+        const { actions, bounds } = await reader.optimalRebalance(optimizerAddress, 100n);
 
-        // Execute rebalance - should not revert
+        // Execute rebalance with both arguments (contract signature now requires bounds).
         await (await optimizer.rebalance(
-            actions.map(a => ({ cToken: a.cToken, assets: a.assets })),
+            actions.map(a => ({ cToken: a.cToken, assetsOrBps: a.assetsOrBps })),
+            bounds.map(b => ({ cToken: b.cToken, minBps: b.minBps, maxBps: b.maxBps })),
         )).wait();
 
         const totalAfter: bigint = await optimizer.totalAssets();

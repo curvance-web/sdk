@@ -315,35 +315,6 @@
         "name": "receiver",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "targetMarket",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "deposit",
-    "inputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
       }
     ],
     "outputs": [
@@ -426,8 +397,8 @@
     "inputs": [
       {
         "name": "targetMarket",
-        "type": "uint256",
-        "internalType": "uint256"
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "outputs": [],
@@ -520,35 +491,6 @@
       },
       {
         "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "mint",
-    "inputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "targetMarket",
         "type": "address",
         "internalType": "address"
       }
@@ -754,48 +696,36 @@
             "internalType": "contract IBorrowableCToken"
           },
           {
-            "name": "assets",
+            "name": "assetsOrBps",
             "type": "int256",
             "internalType": "int256"
+          }
+        ]
+      },
+      {
+        "name": "bounds",
+        "type": "tuple[]",
+        "internalType": "struct LendingOptimizer.AllocationBound[]",
+        "components": [
+          {
+            "name": "cToken",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "minBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxBps",
+            "type": "uint256",
+            "internalType": "uint256"
           }
         ]
       }
     ],
     "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "redeem",
-    "inputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "owner",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "targetMarket",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
     "stateMutability": "nonpayable"
   },
   {
@@ -832,9 +762,9 @@
     "name": "removeApprovedAsset",
     "inputs": [
       {
-        "name": "indexRemove",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "cTokenToRemove",
+        "type": "address",
+        "internalType": "address"
       },
       {
         "name": "removeActions",
@@ -847,9 +777,31 @@
             "internalType": "contract IBorrowableCToken"
           },
           {
-            "name": "assets",
+            "name": "assetsOrBps",
             "type": "int256",
             "internalType": "int256"
+          }
+        ]
+      },
+      {
+        "name": "bounds",
+        "type": "tuple[]",
+        "internalType": "struct LendingOptimizer.AllocationBound[]",
+        "components": [
+          {
+            "name": "cToken",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "minBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxBps",
+            "type": "uint256",
+            "internalType": "uint256"
           }
         ]
       }
@@ -882,6 +834,26 @@
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "skim",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "skimAvailable",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "excess",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -1030,40 +1002,6 @@
         "name": "owner",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "targetMarket",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "shares",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "withdraw",
-    "inputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "owner",
-        "type": "address",
-        "internalType": "address"
       }
     ],
     "outputs": [
@@ -1165,6 +1103,25 @@
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "ExcessRecovered",
+    "inputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "recipient",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
       }
     ],
     "anonymous": false
@@ -1357,6 +1314,11 @@
   },
   {
     "type": "error",
+    "name": "LendingOptimizer__AllocationOutOfBounds",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "LendingOptimizer__AlreadyInitialized",
     "inputs": []
   },
@@ -1433,6 +1395,11 @@
   {
     "type": "error",
     "name": "LendingOptimizer__Unauthorized",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "LendingOptimizer__ZeroAmount",
     "inputs": []
   },
   {

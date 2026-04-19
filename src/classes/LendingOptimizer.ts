@@ -20,8 +20,8 @@ export interface ILendingOptimizer {
     maxWithdraw(owner: address): Promise<bigint>;
     mintPaused(): Promise<bigint>;
     "deposit(uint256,address)"(assets: bigint, receiver: address): Promise<TransactionResponse>;
-    withdraw(assets: bigint, receiver: address, owner: address): Promise<TransactionResponse>;
-    redeem(shares: bigint, receiver: address, owner: address): Promise<TransactionResponse>;
+    "withdraw(uint256,address,address)"(assets: bigint, receiver: address, owner: address): Promise<TransactionResponse>;
+    "redeem(uint256,address,address)"(shares: bigint, receiver: address, owner: address): Promise<TransactionResponse>;
 }
 
 export class LendingOptimizer extends Calldata<ILendingOptimizer> {
@@ -115,7 +115,10 @@ export class LendingOptimizer extends Calldata<ILendingOptimizer> {
             throw new Error("LendingOptimizer.withdraw: amount resolves to zero");
         }
 
-        const calldata = this.getCallData("withdraw", [assets, receiver, owner]);
+        const calldata = this.contract.interface.encodeFunctionData(
+            "withdraw(uint256,address,address)",
+            [assets, receiver, owner],
+        ) as bytes;
         return this.executeCallData(calldata);
     }
 
@@ -139,7 +142,10 @@ export class LendingOptimizer extends Calldata<ILendingOptimizer> {
             throw new Error("LendingOptimizer.redeem: shares is zero");
         }
 
-        const calldata = this.getCallData("redeem", [shares, receiver, owner]);
+        const calldata = this.contract.interface.encodeFunctionData(
+            "redeem(uint256,address,address)",
+            [shares, receiver, owner],
+        ) as bytes;
         return this.executeCallData(calldata);
     }
 }
