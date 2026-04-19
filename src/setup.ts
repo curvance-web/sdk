@@ -127,6 +127,7 @@ export async function setupChain(
     const reader = new ProtocolReader(
         nextSetupConfig.contracts.ProtocolReader as address,
         nextSetupConfig.readProvider,
+        nextSetupConfig.chain,
     );
     const oracle_manager = new OracleManager(
         nextSetupConfig.contracts.OracleManager as address,
@@ -169,4 +170,11 @@ export async function refreshActiveUserMarkets(
     markets: Market[] = all_markets,
 ): Promise<Market[]> {
     return Market.reloadUserMarkets(getActiveUserMarkets(markets), account);
+}
+
+export async function refreshActiveUserMarketSummaries(
+    account: address,
+    markets: Market[] = all_markets,
+): Promise<Market[]> {
+    return Market.reloadUserMarketSummaries(getActiveUserMarkets(markets), account);
 }

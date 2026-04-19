@@ -23,6 +23,29 @@ function createReader(): ProtocolReader {
     return Object.create(ProtocolReader.prototype) as ProtocolReader;
 }
 
+function setReaderKeys(
+    reader: ProtocolReader,
+    readerAddress: string = MARKET,
+    namespace: string | null = null,
+) {
+    (reader as any).address = readerAddress as any;
+    (reader as any).batchKey =
+        namespace == null ? null : `${namespace}:${readerAddress.toLowerCase()}`;
+    (reader as any).probeCacheKey =
+        namespace == null ? readerAddress.toLowerCase() : `${namespace}:${readerAddress.toLowerCase()}`;
+    (reader as any).staticMarketCacheKey = (reader as any).batchKey;
+}
+
+function createMissingSelectorError(selector: string) {
+    const error: any = new Error("execution reverted (no data present; likely require(false) occurred)");
+    error.shortMessage = "execution reverted (no data present; likely require(false) occurred)";
+    error.reason = "require(false)";
+    error.transaction = {
+        data: `${selector}0000000000000000000000000000000000000000000000000000000000000000`,
+    };
+    return error;
+}
+
 function createDynamicMarket(
     marketAddress: string = MARKET,
     tokenAddress: string = TOKEN,
@@ -97,6 +120,57 @@ function createStaticMarket(
     };
 }
 
+function createRawStaticMarket(
+    marketAddress: string = MARKET,
+    tokenAddress: string = TOKEN,
+) {
+    const market = createStaticMarket(marketAddress, tokenAddress);
+    const token = market.tokens[0]!;
+
+    return {
+        _address: market.address,
+        adapters: market.adapters,
+        cooldownLength: market.cooldownLength,
+        tokens: [{
+            _address: token.address,
+            name: token.name,
+            symbol: token.symbol,
+            decimals: token.decimals,
+            asset: {
+                _address: token.asset.address,
+                name: token.asset.name,
+                symbol: token.asset.symbol,
+                decimals: token.asset.decimals,
+                totalSupply: token.asset.totalSupply,
+            },
+            adapters: token.adapters,
+            isBorrowable: token.isBorrowable,
+            borrowPaused: token.borrowPaused,
+            collateralizationPaused: token.collateralizationPaused,
+            mintPaused: token.mintPaused,
+            collateralCap: token.collateralCap,
+            debtCap: token.debtCap,
+            isListed: token.isListed,
+            collRatio: token.collRatio,
+            maxLeverage: token.maxLeverage,
+            collReqSoft: token.collReqSoft,
+            collReqHard: token.collReqHard,
+            liqIncBase: token.liqIncBase,
+            liqIncCurve: token.liqIncCurve,
+            liqIncMin: token.liqIncMin,
+            liqIncMax: token.liqIncMax,
+            closeFactorBase: token.closeFactorBase,
+            closeFactorCurve: token.closeFactorCurve,
+            closeFactorMin: token.closeFactorMin,
+            closeFactorMax: token.closeFactorMax,
+            irmTargetRate: token.irmTargetRate,
+            irmMaxRate: token.irmMaxRate,
+            irmTargetUtilization: token.irmTargetUtilization,
+            interestFee: token.interestFee,
+        }],
+    };
+}
+
 function createUserData(): UserData {
     return {
         locks: [{ lockIndex: 1n, amount: 2n, unlockTime: 3n }],
@@ -107,6 +181,7 @@ function createUserData(): UserData {
             debt: 0n,
             positionHealth: UINT256_MAX,
             cooldown: 1200n,
+            errorCodeHit: true,
             priceStale: true,
             tokens: [{
                 address: TOKEN as any,
@@ -163,6 +238,100 @@ test("public loads synthesize empty user state from static market data", async (
     assert.equal(data.userData.markets[0]?.tokens[0]?.liquidationPrice, UINT256_MAX);
     assert.equal(data.userData.markets[1]?.address, MARKET_B);
     assert.equal(data.userData.markets[1]?.tokens[0]?.address, TOKEN_B);
+});
+
+test("getStaticMarketData caches static market data within the reader namespace", async () => {
+    const reader = createReader();
+    let calls = 0;
+
+    setReaderKeys(reader, MARKET, "monad-mainnet");
+    reader.contract = {
+        getStaticMarketData: async () => {
+            calls += 1;
+            return [createRawStaticMarket()];
+        },
+    } as any;
+
+    const first = await reader.getStaticMarketData();
+    const second = await reader.getStaticMarketData();
+
+    assert.equal(calls, 1);
+    assert.equal(first[0]?.tokens[0]?.asset.totalSupply, 100n);
+    assert.deepEqual(second, first);
+});
+
+test("getStaticMarketData keeps caches isolated across namespaces", async () => {
+    let calls = 0;
+    const contract = {
+        getStaticMarketData: async () => {
+            calls += 1;
+            return [createRawStaticMarket()];
+        },
+    } as any;
+
+    const monadReader = createReader();
+    setReaderKeys(monadReader, MARKET, "monad-mainnet");
+    monadReader.contract = contract;
+
+    const arbitrumReader = createReader();
+    setReaderKeys(arbitrumReader, MARKET, "arbitrum-sepolia");
+    arbitrumReader.contract = contract;
+
+    await monadReader.getStaticMarketData();
+    await arbitrumReader.getStaticMarketData();
+
+    assert.equal(calls, 2);
+});
+
+test("getStaticMarketData forceRefresh bypasses the short-lived cache", async () => {
+    const reader = createReader();
+    let calls = 0;
+
+    setReaderKeys(reader, MARKET, "monad-mainnet");
+    reader.contract = {
+        getStaticMarketData: async () => {
+            calls += 1;
+            return [createRawStaticMarket()];
+        },
+    } as any;
+
+    await reader.getStaticMarketData();
+    await reader.getStaticMarketData({ forceRefresh: true });
+
+    assert.equal(calls, 2);
+});
+
+test("connected getAllMarketData reuses cached static market data between boots", async () => {
+    const reader = createReader();
+    const counters = {
+        static: 0,
+        combined: 0,
+    };
+
+    setReaderKeys(reader, MARKET, "monad-mainnet");
+    reader.contract = {
+        getStaticMarketData: async () => {
+            counters.static += 1;
+            return [createRawStaticMarket()];
+        },
+    } as any;
+    reader.getAllDynamicState = async () => {
+        counters.combined += 1;
+        return {
+            dynamicMarket: [createDynamicMarket()],
+            userData: createUserData(),
+        };
+    };
+
+    const first = await reader.getAllMarketData(ACCOUNT as any);
+    const second = await reader.getAllMarketData(ACCOUNT as any);
+
+    assert.deepEqual(counters, {
+        static: 1,
+        combined: 2,
+    });
+    assert.equal(first.staticMarket[0]?.tokens[0]?.symbol, "TOK");
+    assert.equal(second.userData.markets[0]?.tokens[0]?.userDebt, 5n);
 });
 
 test("account loads use static + combined dynamic state without separate dynamic/user reads", async () => {
@@ -258,6 +427,7 @@ test("getAllDynamicState normalizes combined market and user payloads", async ()
 
     assert.equal(data.dynamicMarket[0]?.tokens[0]?.exchangeRate, 2n);
     assert.equal(data.userData.locks[0]?.unlockTime, 3n);
+    assert.equal(data.userData.markets[0]?.errorCodeHit, true);
     assert.equal(data.userData.markets[0]?.priceStale, true);
     assert.equal(data.userData.markets[0]?.tokens[0]?.userDebt, 5n);
 });
@@ -314,8 +484,39 @@ test("getAllDynamicState normalizes tuple payloads from ethers result arrays", a
 
     assert.equal(data.dynamicMarket[0]?.tokens[0]?.totalAssets, 20n);
     assert.equal(data.userData.locks[0]?.lockIndex, 9n);
+    assert.equal(data.userData.markets[0]?.errorCodeHit, false);
     assert.equal(data.userData.markets[0]?.priceStale, false);
     assert.equal(data.userData.markets[0]?.tokens[0]?.liquidationPrice, 11n);
+});
+
+test("getMarketSummaries normalizes market-summary payloads", async () => {
+    const reader = createReader();
+    reader.contract = {
+        getMarketSummaries: async () => ({
+            userMarkets: [{
+                _address: MARKET,
+                collateral: 1n,
+                maxDebt: 2n,
+                debt: 3n,
+                positionHealth: 4n,
+                cooldown: 5n,
+                errorCodeHit: true,
+            }],
+        }),
+    } as any;
+
+    const data = await reader.getMarketSummaries([MARKET as any], ACCOUNT as any);
+
+    assert.deepEqual(data, [{
+        address: MARKET,
+        collateral: 1n,
+        maxDebt: 2n,
+        debt: 3n,
+        positionHealth: 4n,
+        cooldown: 5n,
+        errorCodeHit: true,
+        priceStale: true,
+    }]);
 });
 
 test("getMarketStates normalizes targeted refresh payloads", async () => {
@@ -367,6 +568,7 @@ test("getMarketStates normalizes targeted refresh payloads", async () => {
 
     assert.equal(data.dynamicMarkets[0]?.tokens[0]?.assetPrice, 6n);
     assert.equal(data.userMarkets[0]?.tokens[0]?.userCollateral, 9n);
+    assert.equal(data.userMarkets[0]?.errorCodeHit, false);
     assert.equal(data.userMarkets[0]?.priceStale, false);
 });
 
@@ -418,12 +620,70 @@ test("getMarketStates normalizes tuple payloads from ethers result arrays", asyn
     const data = await reader.getMarketStates([MARKET as any], ACCOUNT as any);
 
     assert.equal(data.dynamicMarkets[0]?.tokens[0]?.borrowRate, 9n);
+    assert.equal(data.userMarkets[0]?.errorCodeHit, true);
     assert.equal(data.userMarkets[0]?.priceStale, true);
     assert.equal(data.userMarkets[0]?.tokens[0]?.userAssetBalance, 6n);
 });
 
+test("getMarketSummaries falls back to getMarketStates when the selector is not deployed", async () => {
+    const reader = createReader();
+    setReaderKeys(reader, MARKET, "monad-mainnet");
+    let summaryCalls = 0;
+    let targetedCalls = 0;
+
+    reader.contract = {
+        getMarketSummaries: async () => {
+            summaryCalls += 1;
+            throw createMissingSelectorError("0x02230f46");
+        },
+    } as any;
+    reader.getMarketStates = async () => {
+        targetedCalls += 1;
+        return {
+            dynamicMarkets: [],
+            userMarkets: [{
+                address: MARKET as any,
+                collateral: 1n,
+                maxDebt: 2n,
+                debt: 3n,
+                positionHealth: 4n,
+                cooldown: 5n,
+                errorCodeHit: false,
+                priceStale: false,
+                tokens: [{
+                    address: TOKEN as any,
+                    userAssetBalance: 6n,
+                    userShareBalance: 7n,
+                    userUnderlyingBalance: 8n,
+                    userCollateral: 9n,
+                    userDebt: 10n,
+                    liquidationPrice: 11n,
+                }],
+            }],
+        };
+    };
+
+    const first = await reader.getMarketSummaries([MARKET as any], ACCOUNT as any);
+    const second = await reader.getMarketSummaries([MARKET as any], ACCOUNT as any);
+
+    assert.equal(summaryCalls, 1);
+    assert.equal(targetedCalls, 2);
+    assert.deepEqual(first, [{
+        address: MARKET,
+        collateral: 1n,
+        maxDebt: 2n,
+        debt: 3n,
+        positionHealth: 4n,
+        cooldown: 5n,
+        errorCodeHit: false,
+        priceStale: false,
+    }]);
+    assert.deepEqual(second, first);
+});
+
 test("getMarketStates falls back to legacy calls when the selector is not deployed", async () => {
     const reader = createReader();
+    setReaderKeys(reader, MARKET, "monad-mainnet");
     let targetedCalls = 0;
     let dynamicCalls = 0;
     let userCalls = 0;
@@ -431,13 +691,7 @@ test("getMarketStates falls back to legacy calls when the selector is not deploy
     reader.contract = {
         getMarketStates: async () => {
             targetedCalls += 1;
-            const error: any = new Error("execution reverted (no data present; likely require(false) occurred)");
-            error.shortMessage = "execution reverted (no data present; likely require(false) occurred)";
-            error.reason = "require(false)";
-            error.transaction = {
-                data: "0xaa78b4d400000000000000000000000000000000000000000000000000000000",
-            };
-            throw error;
+            throw createMissingSelectorError("0xaa78b4d4");
         },
     } as any;
 
@@ -461,6 +715,7 @@ test("getMarketStates falls back to legacy calls when the selector is not deploy
                     debt: 12n,
                     positionHealth: 13n,
                     cooldown: 14n,
+                    errorCodeHit: false,
                     priceStale: false,
                     tokens: [{
                         address: TOKEN_B as any,
@@ -580,18 +835,12 @@ test("getMarketStates selector-support probe caches across instances at the same
     const PROBE_ADDRESS = "0x00000000000000000000000000000000000000cc";
 
     const reader1 = createReader();
-    (reader1 as any).address = PROBE_ADDRESS;
+    setReaderKeys(reader1, PROBE_ADDRESS, "monad-mainnet");
     let reader1ProbeCount = 0;
     reader1.contract = {
         getMarketStates: async () => {
             reader1ProbeCount += 1;
-            const error: any = new Error("execution reverted (no data present; likely require(false) occurred)");
-            error.shortMessage = "execution reverted (no data present; likely require(false) occurred)";
-            error.reason = "require(false)";
-            error.transaction = {
-                data: "0xaa78b4d400000000000000000000000000000000000000000000000000000000",
-            };
-            throw error;
+            throw createMissingSelectorError("0xaa78b4d4");
         },
     } as any;
     reader1.getDynamicMarketData = async () => [];
@@ -601,7 +850,7 @@ test("getMarketStates selector-support probe caches across instances at the same
     assert.equal(reader1ProbeCount, 1, "first instance probes the contract");
 
     const reader2 = createReader();
-    (reader2 as any).address = PROBE_ADDRESS;
+    setReaderKeys(reader2, PROBE_ADDRESS, "monad-mainnet");
     let reader2ProbeCount = 0;
     reader2.contract = {
         getMarketStates: async () => {
@@ -618,6 +867,110 @@ test("getMarketStates selector-support probe caches across instances at the same
         0,
         "second instance at same address reuses cached probe result",
     );
+});
+
+test("getMarketStates selector-support cache stays isolated across namespaces", async () => {
+    const PROBE_ADDRESS = "0x00000000000000000000000000000000000000cc";
+
+    const monadReader = createReader();
+    setReaderKeys(monadReader, PROBE_ADDRESS, "monad-mainnet");
+    let monadProbeCount = 0;
+    monadReader.contract = {
+        getMarketStates: async () => {
+            monadProbeCount += 1;
+            throw createMissingSelectorError("0xaa78b4d4");
+        },
+    } as any;
+    monadReader.getDynamicMarketData = async () => [];
+    monadReader.getUserData = async () => ({ locks: [], markets: [] });
+
+    await monadReader.getMarketStates([], ACCOUNT as any);
+    assert.equal(monadProbeCount, 1);
+
+    const arbitrumReader = createReader();
+    setReaderKeys(arbitrumReader, PROBE_ADDRESS, "arbitrum-sepolia");
+    let arbitrumProbeCount = 0;
+    arbitrumReader.contract = {
+        getMarketStates: async () => {
+            arbitrumProbeCount += 1;
+            return {
+                dynamicMarkets: [],
+                userMarkets: [],
+            };
+        },
+    } as any;
+    arbitrumReader.getDynamicMarketData = async () => {
+        throw new Error("namespace-isolated selector cache should not force fallback");
+    };
+    arbitrumReader.getUserData = async () => {
+        throw new Error("namespace-isolated selector cache should not force fallback");
+    };
+
+    const result = await arbitrumReader.getMarketStates([], ACCOUNT as any);
+
+    assert.equal(arbitrumProbeCount, 1, "different namespace must probe independently");
+    assert.deepEqual(result, {
+        dynamicMarkets: [],
+        userMarkets: [],
+    });
+});
+
+test("getMarketSummaries selector-support cache stays isolated across namespaces", async () => {
+    const PROBE_ADDRESS = "0x00000000000000000000000000000000000000cc";
+
+    const monadReader = createReader();
+    setReaderKeys(monadReader, PROBE_ADDRESS, "monad-mainnet");
+    let monadProbeCount = 0;
+    monadReader.contract = {
+        getMarketSummaries: async () => {
+            monadProbeCount += 1;
+            throw createMissingSelectorError("0x02230f46");
+        },
+    } as any;
+    monadReader.getMarketStates = async () => ({
+        dynamicMarkets: [],
+        userMarkets: [],
+    });
+
+    await monadReader.getMarketSummaries([], ACCOUNT as any);
+    assert.equal(monadProbeCount, 1);
+
+    const arbitrumReader = createReader();
+    setReaderKeys(arbitrumReader, PROBE_ADDRESS, "arbitrum-sepolia");
+    let arbitrumProbeCount = 0;
+    arbitrumReader.contract = {
+        getMarketSummaries: async () => {
+            arbitrumProbeCount += 1;
+            return {
+                userMarkets: [{
+                    _address: PROBE_ADDRESS,
+                    collateral: 1n,
+                    maxDebt: 2n,
+                    debt: 3n,
+                    positionHealth: 4n,
+                    cooldown: 5n,
+                    errorCodeHit: false,
+                }],
+            };
+        },
+    } as any;
+    arbitrumReader.getMarketStates = async () => {
+        throw new Error("namespace-isolated selector cache should not force summary fallback");
+    };
+
+    const result = await arbitrumReader.getMarketSummaries([PROBE_ADDRESS as any], ACCOUNT as any);
+
+    assert.equal(arbitrumProbeCount, 1, "different namespace must probe independently");
+    assert.deepEqual(result, [{
+        address: PROBE_ADDRESS,
+        collateral: 1n,
+        maxDebt: 2n,
+        debt: 3n,
+        positionHealth: 4n,
+        cooldown: 5n,
+        errorCodeHit: false,
+        priceStale: false,
+    }]);
 });
 
 test("hypotheticalBorrowOf defaults bufferTime to 0n when not provided", async () => {

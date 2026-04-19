@@ -82,14 +82,14 @@ export class BorrowableCToken extends CToken {
     };
 
     override async depositAsCollateral(amount: TokenInput, zap: ZapperInstructions = 'none',  receiver: address | null = null) {
-        if(this.cache.userDebt > 0) {
+        if(this.readFreshUserCache("userDebt", "depositing as collateral") > 0n) {
             throw new Error("Cannot deposit as collateral when there is outstanding debt");
         }
         return super.depositAsCollateral(amount, zap, receiver);
     }
 
     override async postCollateral(amount: TokenInput) {
-        if(this.cache.userDebt > 0) {
+        if(this.readFreshUserCache("userDebt", "posting collateral") > 0n) {
             throw new Error("Cannot post collateral when there is outstanding debt");
         }
         return super.postCollateral(amount);

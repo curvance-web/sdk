@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Market } from "../src/classes/Market";
+import { CToken } from "../src/classes/CToken";
 
 const ACCOUNT = "0x00000000000000000000000000000000000000aa";
 const MARKET_A = "0x00000000000000000000000000000000000000a1";
 const MARKET_B = "0x00000000000000000000000000000000000000b2";
+const TOKEN_A = "0x00000000000000000000000000000000000000d1";
+const WAD = 10n ** 18n;
 
 function createMarket(tokenCache: Partial<{
     userAssetBalance: bigint;
@@ -25,6 +28,49 @@ function createMarket(tokenCache: Partial<{
         },
     }] as any;
     return market;
+}
+
+function createUserRefreshMarket() {
+    const market = Object.create(Market.prototype) as Market;
+    market.address = MARKET_A as any;
+    market.cache = {
+        static: {} as any,
+        dynamic: { address: MARKET_A as any, tokens: [] },
+        user: {
+            address: MARKET_A as any,
+            collateral: 1n,
+            maxDebt: 2n,
+            debt: 3n,
+            positionHealth: 4n,
+            cooldown: 5n,
+            errorCodeHit: false,
+            priceStale: false,
+            tokens: [],
+        },
+        deploy: {} as any,
+    };
+
+    const token = Object.create(CToken.prototype) as CToken;
+    token.address = TOKEN_A as any;
+    token.market = market;
+    token.cache = {
+        address: TOKEN_A as any,
+        decimals: 18n,
+        asset: {
+            address: TOKEN_A as any,
+            decimals: 18n,
+        },
+        userAssetBalance: 10n * WAD,
+        userShareBalance: 11n * WAD,
+        userUnderlyingBalance: 12n * WAD,
+        userCollateral: 13n * WAD,
+        userDebt: 14n * WAD,
+        liquidationPrice: 15n * WAD,
+    } as any;
+
+    market.tokens = [token] as any;
+
+    return { market, token };
 }
 
 test("getActiveUserMarkets ignores wallet-only balances", () => {
@@ -104,6 +150,7 @@ test("applyState preserves prior token cache when dynamic data omits a token", (
             debt: 0n,
             positionHealth: 0n,
             cooldown: 0n,
+            errorCodeHit: false,
             priceStale: false,
             tokens: [],
         },
@@ -127,6 +174,7 @@ test("applyState preserves prior token cache when dynamic data omits a token", (
             debt: 0n,
             positionHealth: 0n,
             cooldown: 0n,
+            errorCodeHit: false,
             priceStale: false,
             tokens: [{ address: TOKEN_A as any, userCollateral: 50n } as any],
         },
@@ -136,6 +184,101 @@ test("applyState preserves prior token cache when dynamic data omits a token", (
     assert.equal((market.tokens[0] as any).cache.userCollateral, 50n, "TOKEN_A user overlay");
     assert.equal((market.tokens[1] as any).cache.exchangeRate, 200n, "TOKEN_B dynamic preserved");
     assert.equal((market.tokens[1] as any).cache.userCollateral, 7n, "TOKEN_B user preserved");
+});
+
+test("summary-only user refresh invalidates token user getters until a full user refresh arrives", () => {
+    const { market, token } = createUserRefreshMarket();
+
+    market.applyUserSummary({
+        address: MARKET_A as any,
+        collateral: 21n,
+        maxDebt: 22n,
+        debt: 23n,
+        positionHealth: 24n,
+        cooldown: 25n,
+        errorCodeHit: false,
+        priceStale: false,
+    });
+
+    assert.equal(market.userDataScope, "summary");
+    assert.throws(
+        () => token.getUserCollateral(false),
+        /summary-only refresh on market/i,
+    );
+    assert.throws(
+        () => token.getUserDebt(false),
+        /Call market\.reloadUserData\(account\) or Market\.reloadUserMarkets/i,
+    );
+
+    market.applyState(
+        {
+            address: MARKET_A as any,
+            tokens: [],
+        },
+        {
+            address: MARKET_A as any,
+            collateral: 31n,
+            maxDebt: 32n,
+            debt: 33n,
+            positionHealth: 34n,
+            cooldown: 35n,
+            errorCodeHit: false,
+            priceStale: false,
+            tokens: [{
+                address: TOKEN_A as any,
+                userAssetBalance: 20n * WAD,
+                userShareBalance: 21n * WAD,
+                userUnderlyingBalance: 22n * WAD,
+                userCollateral: 23n * WAD,
+                userDebt: 24n * WAD,
+                liquidationPrice: 25n * WAD,
+            } as any],
+        } as any,
+    );
+
+    assert.equal(market.userDataScope, "full");
+    assert.equal(token.getUserCollateral(false).toString(), "23");
+    assert.equal(token.getUserDebt(false).toString(), "24");
+    assert.equal(token.liquidationPrice?.toString(), "25");
+});
+
+test("summary-only user refresh rejects market-level getters that depend on token user cache", () => {
+    const market = createMarket({ userAssetBalance: 1n, userDebt: 2n });
+    market.address = MARKET_A as any;
+    market.cache = {
+        static: {} as any,
+        dynamic: {} as any,
+        user: {
+            address: MARKET_A as any,
+            collateral: 11n,
+            maxDebt: 12n,
+            debt: 13n,
+            positionHealth: 14n,
+            cooldown: 15n,
+            errorCodeHit: false,
+            priceStale: false,
+            tokens: [],
+        },
+        deploy: {} as any,
+    };
+
+    market.applyUserSummary({
+        address: MARKET_A as any,
+        collateral: 21n,
+        maxDebt: 22n,
+        debt: 23n,
+        positionHealth: 24n,
+        cooldown: 25n,
+        errorCodeHit: false,
+        priceStale: false,
+    });
+
+    assert.throws(() => market.userDeposits, /summary-only refresh/i);
+    assert.throws(() => market.userNet, /summary-only refresh/i);
+    assert.throws(() => market.getBorrowableCTokens(), /summary-only refresh/i);
+    assert.throws(() => market.getUserDepositsChange("day"), /summary-only refresh/i);
+    assert.throws(() => market.getUserDebtChange("day"), /summary-only refresh/i);
+    assert.throws(() => market.getUserNetChange("day"), /summary-only refresh/i);
 });
 
 test("getSnapshots runs token queries concurrently and preserves order", async () => {

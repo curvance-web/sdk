@@ -1,6 +1,6 @@
 import { BPS, ChangeRate, contractSetup, EMPTY_ADDRESS, getRateSeconds, requireAccount, toBigInt, toDecimal, UINT256_MAX, WAD, WAD_DECIMAL } from "../helpers";
 import { Contract } from "ethers";
-import { DynamicMarketData, ProtocolReader, StaticMarketData, UserMarket } from "./ProtocolReader";
+import { DynamicMarketData, ProtocolReader, StaticMarketData, UserMarket, UserMarketSummary } from "./ProtocolReader";
 import { AccountSnapshot, CToken } from "./CToken";
 import abi from '../abis/MarketManagerIsolated.json';
 import { Decimal } from "decimal.js";
@@ -48,12 +48,16 @@ export interface HypotheticalLiquidityOf {
     oracleError: boolean;
 }
 
+export type UserDataScope = "full" | "summary";
+
 export interface IMarket {
     accountAssets(account: address): Promise<bigint>;
     MIN_HOLD_PERIOD(): Promise<bigint>;
     hypotheticalLiquidityOf(account: address, cTokenModified: address, redemptionShares: bigint, borrowAssets: bigint): Promise<HypotheticalLiquidityOf>;
     statusOf(account: address): Promise<StatusOf>;
 }
+
+type NativeYield = Awaited<ReturnType<typeof Api.fetchNativeYields>>[number];
 
 export class Market {
     provider: curvance_read_provider;
@@ -68,6 +72,7 @@ export class Market {
     cache: { static: StaticMarketData, dynamic: DynamicMarketData, user: UserMarket, deploy: DeployData };
     milestone: MilestoneResponse | null = null;
     incentives: Array<IncentiveResponse> = [];
+    private _userDataScope?: UserDataScope;
 
     constructor(
         provider: curvance_read_provider,
@@ -90,6 +95,7 @@ export class Market {
         this.setup = setup;
         this.contract = contractSetup<IMarket>(provider, this.address, abi);
         this.cache = { static: static_data, dynamic: dynamic_data, user: user_data, deploy: deploy_data };
+        this._userDataScope = "full";
 
         for(let i = 0; i < static_data.tokens.length; i++) {
             // @NOTE: Merged fields from the 3 types, so you wanna make sure there is no collisions
@@ -114,6 +120,17 @@ export class Market {
         return requireAccount(this.account, this.signer);
     }
 
+    private requireFullUserTokenData(accessLabel: string) {
+        if (this.userDataScope !== "summary") {
+            return;
+        }
+
+        throw new Error(
+            `Market-level token-derived user data is stale for ${this.address} after a summary-only refresh. ` +
+            `Call market.reloadUserData(account) or Market.reloadUserMarkets(...) before ${accessLabel}.`
+        );
+    }
+
     /** @returns {string} - The name of the market at deployment. */
     get name() { return this.cache.deploy.name; }
     /** @returns {Plugins} - The address of the market's plugins by deploy name. */
@@ -124,6 +141,8 @@ export class Market {
     get adapters() { return this.cache.static.adapters; }
     /** @returns {Date | null} - Market cooldown, activated by Collateralization or Borrowing. Lasts as long as {this.cooldownLength} which is currently 20mins */
     get cooldown() { return this.cache.user.cooldown == this.cooldownLength ? null : new Date(Number(this.cache.user.cooldown * 1000n)); }
+    /** @returns The scope of the latest whole-market user refresh. */
+    get userDataScope(): UserDataScope { return this._userDataScope ?? "full"; }
     /** @returns {Decimal} - The user's collateral in Shares. */
     get userCollateral() { return toDecimal(this.cache.user.collateral, 18n); }
     /** @returns {USD} - The user's debt in USD. */
@@ -153,6 +172,7 @@ export class Market {
      * @returns {USD} - The total user deposits in USD.
      */
     get userDeposits() {
+        this.requireFullUserTokenData("reading userDeposits");
         let total_deposits = Decimal(0);
         for(const token of this.tokens) {
             total_deposits = total_deposits.add(token.getUserAssetBalance(true));
@@ -166,6 +186,7 @@ export class Market {
      * @returns {USD} - The user's net position in USD.
      */
     get userNet() {
+        this.requireFullUserTokenData("reading userNet");
         return this.userDeposits.sub(this.userDebt);
     }
 
@@ -233,6 +254,7 @@ export class Market {
      * @returns What tokens can and cannot be borrowed from
      */
     getBorrowableCTokens() {
+        this.requireFullUserTokenData("reading borrowable token eligibility");
         const result: {
             eligible: BorrowableCToken[],
             ineligible: BorrowableCToken[]
@@ -262,6 +284,7 @@ export class Market {
      * @returns The total user deposits change (ex: 50, which would be $50/day)
      */
     getUserDepositsChange(rate: ChangeRate) {
+        this.requireFullUserTokenData(`reading user deposit change for rate ${rate}`);
         let total_change = Decimal(0);
         for(const token of this.tokens) {
             const amount = token.getUserAssetBalance(true);
@@ -278,6 +301,7 @@ export class Market {
      * @returns The total user debt change (ex: 50, which would be $50/day)
      */
     getUserDebtChange(rate: ChangeRate) {
+        this.requireFullUserTokenData(`reading user debt change for rate ${rate}`);
         let total_change = Decimal(0);
         for(const token of this.tokens) {
             if(!token.isBorrowable) {
@@ -297,6 +321,7 @@ export class Market {
      * @returns The total user net change (ex: 50, which would be $50/day)
      */
     getUserNetChange(rate: ChangeRate) {
+        this.requireFullUserTokenData(`reading user net change for rate ${rate}`);
         const earn = this.getUserDepositsChange(rate);
         const debt = this.getUserDebtChange(rate);
         return earn.sub(debt);
@@ -352,11 +377,23 @@ export class Market {
         );
     }
 
+    private hasCompleteUserTokenPayload(userData: UserMarket) {
+        if (userData.tokens.length !== this.tokens.length) {
+            return false;
+        }
+
+        const tokenAddresses = new Set(userData.tokens.map((token) => token.address));
+        return this.tokens.every((token) => tokenAddresses.has(token.address));
+    }
+
     applyState(dynamicData: DynamicMarketData, userData?: UserMarket) {
         this.cache.dynamic = dynamicData;
 
         if(userData != undefined) {
             this.cache.user = userData;
+            if (this.hasCompleteUserTokenPayload(userData)) {
+                this._userDataScope = "full";
+            }
         }
 
         for(const token of this.tokens) {
@@ -367,6 +404,22 @@ export class Market {
                 ...(nextDynamic ?? {}),
                 ...(nextUser ?? {}),
             };
+
+            if (nextUser != undefined) {
+                (token as any).markUserCacheFresh?.();
+            }
+        }
+    }
+
+    applyUserSummary(userData: UserMarketSummary) {
+        this.cache.user = {
+            ...this.cache.user,
+            ...userData,
+        };
+        this._userDataScope = "summary";
+
+        for (const token of this.tokens) {
+            (token as any).invalidateUserCache?.();
         }
     }
 
@@ -391,8 +444,38 @@ export class Market {
         this.applyState(dynamic, user);
     }
 
+    async reloadUserSummary(account: address) {
+        const userMarkets = await this.reader.getMarketSummaries([this.address], account);
+        const user = userMarkets[0];
+
+        if(user == undefined) {
+            throw new Error(`Could not reload market user summary for ${this.address}.`);
+        }
+
+        this.applyUserSummary(user);
+    }
+
     static getActiveUserMarkets(markets: Market[]): Market[] {
         return markets.filter((market) => market.hasUserActivity());
+    }
+
+    private static groupByReaderDeployment(markets: Market[]) {
+        const groups = new Map<string | ProtocolReader, { reader: ProtocolReader; markets: Market[] }>();
+
+        for (const market of markets) {
+            const groupKey = market.reader.batchKey ?? market.reader;
+            const existing = groups.get(groupKey);
+            if (existing) {
+                existing.markets.push(market);
+            } else {
+                groups.set(groupKey, {
+                    reader: market.reader,
+                    markets: [market],
+                });
+            }
+        }
+
+        return groups.values();
     }
 
     static async reloadUserMarkets(markets: Market[], account: address): Promise<Market[]> {
@@ -400,17 +483,7 @@ export class Market {
             return [];
         }
 
-        const groups = new Map<ProtocolReader, Market[]>();
-        for(const market of markets) {
-            const existing = groups.get(market.reader);
-            if(existing) {
-                existing.push(market);
-            } else {
-                groups.set(market.reader, [market]);
-            }
-        }
-
-        for(const [reader, groupedMarkets] of groups) {
+        for(const { reader, markets: groupedMarkets } of this.groupByReaderDeployment(markets)) {
             const addresses = groupedMarkets.map((market) => market.address);
             const { dynamicMarkets, userMarkets } = await reader.getMarketStates(addresses, account);
             const dynamicByAddress = new Map(dynamicMarkets.map((market) => [market.address, market]));
@@ -429,6 +502,77 @@ export class Market {
         }
 
         return markets;
+    }
+
+    static async reloadUserMarketSummaries(markets: Market[], account: address): Promise<Market[]> {
+        if(markets.length === 0) {
+            return [];
+        }
+
+        for(const { reader, markets: groupedMarkets } of this.groupByReaderDeployment(markets)) {
+            const addresses = groupedMarkets.map((market) => market.address);
+            const userMarkets = await reader.getMarketSummaries(addresses, account);
+            const userByAddress = new Map(userMarkets.map((market) => [market.address, market]));
+
+            for(const market of groupedMarkets) {
+                const user = userByAddress.get(market.address);
+
+                if(user == undefined) {
+                    throw new Error(`Could not reload market user summary for ${market.address}.`);
+                }
+
+                market.applyUserSummary(user);
+            }
+        }
+
+        return markets;
+    }
+
+    private static buildDeployDataIndex(setup: SetupConfigSnapshot): Map<string, DeployData> {
+        const index = new Map<string, DeployData>();
+        const deployments = setup.contracts.markets as Record<string, any>;
+
+        for (const [name, data] of Object.entries(deployments)) {
+            if (typeof data !== 'object' || data == null || typeof data.address !== 'string') {
+                continue;
+            }
+
+            const key = data.address.toLowerCase();
+            if (!index.has(key)) {
+                index.set(key, {
+                    name,
+                    plugins: 'plugins' in data ? data.plugins as { [key: string]: address } : {},
+                });
+            }
+        }
+
+        return index;
+    }
+
+    private static buildOpportunityIndex(opportunities: MerklOpportunity[]): Map<string, MerklOpportunity> {
+        const index = new Map<string, MerklOpportunity>();
+
+        for (const opportunity of opportunities) {
+            const key = opportunity.identifier.toLowerCase();
+            if (!index.has(key)) {
+                index.set(key, opportunity);
+            }
+        }
+
+        return index;
+    }
+
+    private static buildYieldIndex(yields: NativeYield[]): Map<string, NativeYield> {
+        const index = new Map<string, NativeYield>();
+
+        for (const yieldEntry of yields) {
+            const key = yieldEntry.symbol.toUpperCase();
+            if (!index.has(key)) {
+                index.set(key, yieldEntry);
+            }
+        }
+
+        return index;
     }
 
     /**
@@ -767,13 +911,16 @@ export class Market {
         setup: SetupConfigSnapshot = setup_config,
     ) {
         const all_data = await reader.getAllMarketData(account);
-        const deploy_keys: string[] = Object.keys(setup.contracts.markets) as (keyof typeof setup.contracts.markets)[];
         // Filter out USDC — DeFiLlama incorrectly returns YZM vault yield labeled as USDC
         const [yields, merklLendOpps, merklBorrowOpps] = await Promise.all([
             Api.fetchNativeYields(setup).then(y => y.filter(y => y.symbol.toUpperCase() !== 'USDC')),
             fetchMerklOpportunities({ action: 'LEND' }).catch(() => [] as MerklOpportunity[]),
             fetchMerklOpportunities({ action: 'BORROW' }).catch(() => [] as MerklOpportunity[]),
         ]);
+        const deployIndex = this.buildDeployDataIndex(setup);
+        const lendOppIndex = this.buildOpportunityIndex(merklLendOpps);
+        const borrowOppIndex = this.buildOpportunityIndex(merklBorrowOpps);
+        const yieldIndex = this.buildYieldIndex(yields);
 
         let markets: Market[] = [];
         for(let i = 0; i < all_data.staticMarket.length; i++) {
@@ -782,24 +929,7 @@ export class Market {
             const userData    = all_data.userData.markets[i]!;
 
             const market_address = staticData.address;
-
-            let deploy_data: DeployData | undefined;
-
-            for(const obj_key of deploy_keys) {
-                const data = (setup.contracts.markets as any)[obj_key];
-
-                if(typeof data != 'object') {
-                    continue;
-                }
-
-                if(market_address == data.address) {
-                    deploy_data = {
-                        name: obj_key,
-                        plugins: 'plugins' in data ? data.plugins as { [key: string]: address } : {}
-                    };
-                    break;
-                }
-            }
+            const deploy_data = deployIndex.get(market_address.toLowerCase());
 
             if(deploy_data == undefined) {
                 console.warn(`Could not find deploy data for market: ${market_address}, skipping...`);
@@ -830,17 +960,18 @@ export class Market {
             }
 
             for(const token of market.tokens) {
-                const lendOpp = merklLendOpps.find(o => o.identifier.toLowerCase() === token.address.toLowerCase());
+                const tokenKey = token.address.toLowerCase();
+                const lendOpp = lendOppIndex.get(tokenKey);
                 if(lendOpp != undefined) {
                     token.incentiveSupplyApy = new Decimal(lendOpp.apr / 100);
                 }
 
-                const borrowOpp = merklBorrowOpps.find(o => o.identifier.toLowerCase() === token.address.toLowerCase());
+                const borrowOpp = borrowOppIndex.get(tokenKey);
                 if(borrowOpp != undefined) {
                     token.incentiveBorrowApy = new Decimal(borrowOpp.apr / 100);
                 }
 
-                const api_yield = yields.find(y => y.symbol.toUpperCase() == token.asset.symbol.toUpperCase());
+                const api_yield = yieldIndex.get(token.asset.symbol.toUpperCase());
                 if(api_yield != undefined) {
                     token.nativeApy = new Decimal(api_yield.apy / 100);
                 }

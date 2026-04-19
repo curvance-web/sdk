@@ -44,6 +44,37 @@ export interface PortfolioSnapshot {
     markets: MarketSnapshot[];
 }
 
+export interface PortfolioSnapshotOptions {
+    refresh?: boolean;
+    markets?: Market[];
+    chain?: string;
+}
+
+function inferSnapshotChain(markets: Market[]): string {
+    if (markets.length === 0) {
+        return setup_config?.chain ?? "unknown";
+    }
+
+    const chains = new Set(markets.map((market) => market.setup.chain));
+    return chains.size === 1 ? markets[0]!.setup.chain : "multi";
+}
+
+function groupMarketsByReaderDeployment(markets: Market[]) {
+    const groups = new Map<string | Market["reader"], { reader: Market["reader"]; markets: Market[] }>();
+
+    for (const market of markets) {
+        const key = market.reader.batchKey ?? market.reader;
+        const existing = groups.get(key);
+        if (existing) {
+            existing.markets.push(market);
+        } else {
+            groups.set(key, { reader: market.reader, markets: [market] });
+        }
+    }
+
+    return groups.values();
+}
+
 // ── Functions ────────────────────────────────────────────────────────────────
 
 /**
@@ -97,18 +128,20 @@ export function snapshotMarket(market: Market): MarketSnapshot {
  */
 export async function takePortfolioSnapshot(
     account: address,
-    options?: { refresh?: boolean }
+    options: PortfolioSnapshotOptions = {},
 ): Promise<PortfolioSnapshot> {
-    if (options?.refresh && all_markets.length > 0) {
-        // Fetch all dynamic + user data in 1 combined ProtocolReader call.
-        const reader = all_markets[0]!.reader;
-        const { dynamicMarket, userData } = await reader.getAllDynamicState(account);
+    const markets = options.markets ?? all_markets;
 
-        for (const market of all_markets) {
-            const dynamic = dynamicMarket.find((m) => m.address === market.address);
-            const user = userData.markets.find((m) => m.address === market.address);
-            if (!dynamic || !user) continue;
-            market.applyState(dynamic, user);
+    if (options.refresh && markets.length > 0) {
+        for (const { reader, markets: groupedMarkets } of groupMarketsByReaderDeployment(markets)) {
+            const { dynamicMarket, userData } = await reader.getAllDynamicState(account);
+
+            for (const market of groupedMarkets) {
+                const dynamic = dynamicMarket.find((m) => m.address === market.address);
+                const user = userData.markets.find((m) => m.address === market.address);
+                if (!dynamic || !user) continue;
+                market.applyState(dynamic, user);
+            }
         }
     }
 
@@ -118,7 +151,7 @@ export async function takePortfolioSnapshot(
     let dailyEarnings = 0;
     let dailyCost = 0;
 
-    for (const market of all_markets) {
+    for (const market of markets) {
         const snap = snapshotMarket(market);
         marketSnapshots.push(snap);
         totalDepositsUSD += snap.totalDepositsUSD;
@@ -129,7 +162,7 @@ export async function takePortfolioSnapshot(
 
     return {
         account,
-        chain: setup_config.chain,
+        chain: options.chain ?? inferSnapshotChain(markets),
         timestamp: Date.now(),
         totalDepositsUSD,
         totalDebtUSD,

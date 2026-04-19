@@ -198,6 +198,36 @@ export interface ICToken {
     // More functions available
 }
 
+type UserCacheField =
+    | "userAssetBalance"
+    | "userShareBalance"
+    | "userUnderlyingBalance"
+    | "userCollateral"
+    | "userDebt"
+    | "liquidationPrice";
+
+type UserCacheFreshness = Record<UserCacheField, boolean>;
+
+const USER_CACHE_FIELDS: UserCacheField[] = [
+    "userAssetBalance",
+    "userShareBalance",
+    "userUnderlyingBalance",
+    "userCollateral",
+    "userDebt",
+    "liquidationPrice",
+];
+
+function createUserCacheFreshness(value: boolean): UserCacheFreshness {
+    return {
+        userAssetBalance: value,
+        userShareBalance: value,
+        userUnderlyingBalance: value,
+        userCollateral: value,
+        userDebt: value,
+        liquidationPrice: value,
+    };
+}
+
 export class CToken extends Calldata<ICToken> {
     provider: curvance_read_provider;
     address: address;
@@ -213,6 +243,7 @@ export class CToken extends Calldata<ICToken> {
     nativeApy = Decimal(0);
     incentiveSupplyApy = Decimal(0);
     incentiveBorrowApy = Decimal(0);
+    private userCacheFreshness?: UserCacheFreshness;
     get signer(): curvance_signer | null { return this.market.signer; }
     protected get account(): address | null { return this.market.account; }
 
@@ -250,6 +281,39 @@ export class CToken extends Calldata<ICToken> {
         this.zapTypes.push('simple');
     }
 
+    private getUserCacheFreshness(): UserCacheFreshness {
+        if (this.userCacheFreshness == undefined) {
+            this.userCacheFreshness = createUserCacheFreshness(true);
+        }
+
+        return this.userCacheFreshness;
+    }
+
+    markUserCacheFresh(fields: UserCacheField[] = USER_CACHE_FIELDS) {
+        const freshness = this.getUserCacheFreshness();
+        for (const field of fields) {
+            freshness[field] = true;
+        }
+    }
+
+    invalidateUserCache(fields: UserCacheField[] = USER_CACHE_FIELDS) {
+        const freshness = this.getUserCacheFreshness();
+        for (const field of fields) {
+            freshness[field] = false;
+        }
+    }
+
+    protected readFreshUserCache(field: UserCacheField, accessLabel: string): bigint {
+        if (!this.getUserCacheFreshness()[field]) {
+            throw new Error(
+                `Token-level user data is stale for ${this.address} after a summary-only refresh on market ${this.market.address}. ` +
+                `Call market.reloadUserData(account) or Market.reloadUserMarkets(...) before ${accessLabel}.`
+            );
+        }
+
+        return this.cache[field] as bigint;
+    }
+
     private get setup() { return this.market.setup; }
     private get currentChain() { return this.setup.chain; }
     private get currentChainConfig() { return getChainConfig(this.currentChain); }
@@ -285,8 +349,9 @@ export class CToken extends Calldata<ICToken> {
     get totalAssets() { return this.cache.totalAssets; }
     get totalSupply() { return this.cache.totalSupply; }
     get liquidationPrice(): USD | null {
-        if (this.cache.liquidationPrice == UINT256_MAX) return null;
-        return toDecimal(this.cache.liquidationPrice, 18n);
+        const liquidationPrice = this.readFreshUserCache("liquidationPrice", "reading token liquidationPrice");
+        if (liquidationPrice == UINT256_MAX) return null;
+        return toDecimal(liquidationPrice, 18n);
     }
     get irmTargetRate() { return Decimal(this.cache.irmTargetRate).div(WAD); }
     get irmMaxRate() { return Decimal(this.cache.irmMaxRate).div(WAD); }
@@ -414,21 +479,24 @@ export class CToken extends Calldata<ICToken> {
     getUserShareBalance(inUSD: true): USD;
     getUserShareBalance(inUSD: false): TokenInput;
     getUserShareBalance(inUSD: boolean): USD | TokenInput {
-        return inUSD ? this.convertTokensToUsd(this.cache.userShareBalance, false) : FormatConverter.bigIntToDecimal(this.cache.userShareBalance, this.decimals);
+        const userShareBalance = this.readFreshUserCache("userShareBalance", "reading token user share balance");
+        return inUSD ? this.convertTokensToUsd(userShareBalance, false) : FormatConverter.bigIntToDecimal(userShareBalance, this.decimals);
     }
 
     /** @returns User assets in USD (this is the raw balance that the token exchanges too) or token */
     getUserAssetBalance(inUSD: true): USD;
     getUserAssetBalance(inUSD: false): TokenInput;
     getUserAssetBalance(inUSD: boolean): USD | TokenInput {
-        return inUSD ? this.convertTokensToUsd(this.cache.userAssetBalance) : FormatConverter.bigIntToDecimal(this.cache.userAssetBalance, this.asset.decimals);
+        const userAssetBalance = this.readFreshUserCache("userAssetBalance", "reading token user asset balance");
+        return inUSD ? this.convertTokensToUsd(userAssetBalance) : FormatConverter.bigIntToDecimal(userAssetBalance, this.asset.decimals);
     }
 
     /** @returns User underlying assets in USD or token */
     getUserUnderlyingBalance(inUSD: true): USD;
     getUserUnderlyingBalance(inUSD: false): TokenInput;
     getUserUnderlyingBalance(inUSD: boolean): USD | TokenInput {
-        return inUSD ? this.convertTokensToUsd(this.cache.userUnderlyingBalance) : FormatConverter.bigIntToDecimal(this.cache.userUnderlyingBalance, this.decimals);
+        const userUnderlyingBalance = this.readFreshUserCache("userUnderlyingBalance", "reading token user underlying balance");
+        return inUSD ? this.convertTokensToUsd(userUnderlyingBalance) : FormatConverter.bigIntToDecimal(userUnderlyingBalance, this.decimals);
     }
 
     /** @returns Token Collateral Cap in USD or USD WAD */
@@ -463,7 +531,8 @@ export class CToken extends Calldata<ICToken> {
     getUserCollateral(inUSD: true): USD;
     getUserCollateral(inUSD: false): TokenInput;
     getUserCollateral(inUSD: boolean): USD | TokenInput {
-        return inUSD ? this.convertTokensToUsd(this.cache.userCollateral, false) : FormatConverter.bigIntToDecimal(this.cache.userCollateral, this.decimals);
+        const userCollateral = this.readFreshUserCache("userCollateral", "reading token user collateral");
+        return inUSD ? this.convertTokensToUsd(userCollateral, false) : FormatConverter.bigIntToDecimal(userCollateral, this.decimals);
     }
 
     fetchUserCollateral(): Promise<bigint>;
@@ -472,6 +541,7 @@ export class CToken extends Calldata<ICToken> {
     async fetchUserCollateral(formatted: boolean = false): Promise<bigint | TokenInput> {
         const collateral = await this.contract.collateralPosted(this.getAccountOrThrow());
         this.cache.userCollateral = collateral;
+        this.markUserCacheFresh(["userCollateral"]);
 
         return formatted ? toDecimal(collateral, this.decimals) : collateral;
     }
@@ -480,7 +550,8 @@ export class CToken extends Calldata<ICToken> {
     getUserDebt(inUSD: true): USD;
     getUserDebt(inUSD: false): TokenInput;
     getUserDebt(inUSD: boolean): USD | TokenInput {
-        return inUSD ? this.convertTokensToUsd(this.cache.userDebt) : FormatConverter.bigIntToDecimal(this.cache.userDebt, this.asset.decimals);
+        const userDebt = this.readFreshUserCache("userDebt", "reading token user debt");
+        return inUSD ? this.convertTokensToUsd(userDebt) : FormatConverter.bigIntToDecimal(userDebt, this.asset.decimals);
     }
 
     earnChange(amount: USD, rateType: ChangeRate) {
@@ -1185,7 +1256,7 @@ export class CToken extends Calldata<ICToken> {
             newLeverage = this.maxLeverage;
         }
 
-        const collateralAvail = this.cache.userCollateral + (depositAmount ? depositAmount : BigInt(0));
+        const collateralAvail = this.readFreshUserCache("userCollateral", "previewing leverage up") + (depositAmount ? depositAmount : BigInt(0));
         const collateralInUsd = this.convertTokensToUsd(collateralAvail, false);
         const currentDebt     = this.market.userDebt;
         const notional        = collateralInUsd.sub(currentDebt);
@@ -1234,7 +1305,7 @@ export class CToken extends Calldata<ICToken> {
         }
 
 
-        const collateralAvail = this.cache.userCollateral;
+        const collateralAvail = this.readFreshUserCache("userCollateral", "previewing leverage down");
         const collateralInUsd = this.convertTokensToUsd(collateralAvail, false);
         const currentDebt = this.market.userDebt;
         const equity = collateralInUsd.sub(currentDebt);
@@ -1464,7 +1535,9 @@ export class CToken extends Calldata<ICToken> {
                         const overheadBps = LEVERAGE.DELEVERAGE_OVERHEAD_BPS + feeBps;
                         swapCollateral = debtInCollateral * (10000n + overheadBps) / 10000n;
 
-                        const maxCollateral = this.virtualConvertToAssets(this.cache.userCollateral);
+                        const maxCollateral = this.virtualConvertToAssets(
+                            this.readFreshUserCache("userCollateral", "executing leverage down")
+                        );
                         if (swapCollateral > maxCollateral) {
                             swapCollateral = maxCollateral;
                         }
