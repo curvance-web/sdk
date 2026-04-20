@@ -64,7 +64,9 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
             OptimizerReaderArtifact.bytecode,
             framework.signer,
         );
-        const readerContract = await readerFactory.deploy();
+        // Reader constructor: (centralRegistry, guardConfigs[], stalenessMultiplierBps)
+        // Empty guardConfigs + 0 staleness multiplier → no guards, no staleness checks.
+        const readerContract = await readerFactory.deploy(CENTRAL_REGISTRY, [], 0);
         await readerContract.waitForDeployment();
         const readerAddress = (await readerContract.getAddress()) as address;
         reader = new OptimizerReader(readerAddress, framework.provider);
@@ -110,6 +112,7 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
         assert.strictEqual(entry.markets.length, 3, 'Should have 3 markets');
         assert(entry.sharePrice > 0n, 'sharePrice should be > 0');
         assert(entry.performanceFee > 0n, 'performanceFee should be > 0');
+        assert(entry.apy >= 0n, 'apy should be >= 0 (WAD)');
     });
 
     test('getOptimizerUserData returns correct data', async () => {

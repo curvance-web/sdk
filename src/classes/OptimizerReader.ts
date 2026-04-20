@@ -18,6 +18,8 @@ export interface OptimizerMarketData {
     totalLiquidity: bigint;
     sharePrice: bigint;
     performanceFee: bigint;
+    /** Pre-performance-fee weighted supply APY in WAD (1e18 = 100%). */
+    apy: bigint;
 }
 
 export interface OptimizerUserData {
@@ -68,7 +70,8 @@ export class OptimizerReader {
             })),
             totalLiquidity: BigInt(opt.totalLiquidity),
             sharePrice: BigInt(opt.sharePrice),
-            performanceFee: BigInt(opt.performanceFee)
+            performanceFee: BigInt(opt.performanceFee),
+            apy: BigInt(opt.apy)
         }));
     }
 

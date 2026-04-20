@@ -175,11 +175,16 @@
             "name": "performanceFee",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "apy",
+            "type": "uint256",
+            "internalType": "uint256"
           }
         ]
       }
     ],
-    "stateMutability": "nonpayable"
+    "stateMutability": "view"
   },
   {
     "type": "function",
