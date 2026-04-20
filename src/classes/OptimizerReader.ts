@@ -2,7 +2,10 @@ import { Contract } from "ethers";
 import { contractSetup } from "../helpers";
 import abi from '../abis/OptimizerReader.json'
 import { address, curvance_read_provider } from "../types";
-import { setup_config } from "../setup";
+
+function resolveDefaultReadProvider(): curvance_read_provider | undefined {
+    return (require("../setup") as typeof import("../setup")).setup_config?.readProvider;
+}
 
 export interface OptimizerCTokenData {
     address: address;
@@ -44,10 +47,18 @@ export class OptimizerReader {
     address: address;
     contract: Contract & IOptimizerReader;
 
-    constructor(address: address, provider: curvance_read_provider = setup_config.readProvider) {
-        this.provider = provider;
+    constructor(address: address, provider?: curvance_read_provider) {
+        const resolvedProvider = provider ?? resolveDefaultReadProvider();
+        if (resolvedProvider == undefined) {
+            throw new Error(
+                `Read provider is not configured for OptimizerReader ${address}. ` +
+                `Pass a provider explicitly or initialize setupChain() first.`
+            );
+        }
+
+        this.provider = resolvedProvider;
         this.address = address;
-        this.contract = contractSetup<IOptimizerReader>(provider, address, abi);
+        this.contract = contractSetup<IOptimizerReader>(resolvedProvider, address, abi);
     }
 
     async getOptimizerMarketData(optimizers: address[]): Promise<OptimizerMarketData[]> {

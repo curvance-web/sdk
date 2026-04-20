@@ -1,12 +1,23 @@
 import { TransactionResponse } from "ethers";
 import { contractSetup, requireSigner, toBigInt, toDecimal, UINT256_MAX, WAD } from "../helpers";
 import { Contract } from "ethers";
-import { StaticMarketAsset } from "./ProtocolReader";
+import type { StaticMarketAsset } from "./ProtocolReader";
 import { address, curvance_read_provider, curvance_signer, TokenInput, USD } from "../types";
-import { setup_config } from "../setup";
 import { OracleManager } from "./OracleManager";
 import Decimal from "decimal.js";
 import FormatConverter from "./FormatConverter";
+
+function getSetupConfig() {
+    return (require("../setup") as typeof import("../setup")).setup_config;
+}
+
+function resolveDefaultOracleManagerAddress(): address | undefined {
+    return (getSetupConfig() as any)?.contracts?.OracleManager as address | undefined;
+}
+
+function resolveDefaultSigner(): curvance_signer | null {
+    return (getSetupConfig() as any)?.signer ?? null;
+}
 
 export interface IERC20 {
     balanceOf(account: address): Promise<bigint>;
@@ -41,14 +52,14 @@ export class ERC20 {
         provider: curvance_read_provider,
         address: address,
         cache: StaticMarketAsset | undefined = undefined,
-        oracleManagerAddress: address | undefined = undefined,
-        signer: curvance_signer | null = setup_config.signer,
+        oracleManagerAddress?: address,
+        signer?: curvance_signer | null,
     ) {
         this.provider = provider;
-        this.signer = signer;
+        this.signer = signer ?? resolveDefaultSigner();
         this.address = address;
         this.cache = cache;
-        this.oracleManagerAddress = oracleManagerAddress;
+        this.oracleManagerAddress = oracleManagerAddress ?? resolveDefaultOracleManagerAddress();
         this.contract = contractSetup<IERC20>(provider, address, ERC20_ABI);
     }
 
@@ -117,8 +128,14 @@ export class ERC20 {
     async getPrice(inTokenInput: true, inUSD: boolean, getLower: boolean): Promise<USD>
     async getPrice(inTokenInput: false, inUSD: boolean, getLower: boolean): Promise<bigint>
     async getPrice(inTokenInput: boolean, inUSD = true, getLower = false): Promise<USD | bigint> {
-        const oracleManagerAddress =
-            this.oracleManagerAddress ?? (setup_config.contracts.OracleManager as address);
+        const oracleManagerAddress = this.oracleManagerAddress;
+        if (oracleManagerAddress == undefined) {
+            throw new Error(
+                `OracleManager address is not configured for ERC20 ${this.address}. ` +
+                `Pass oracleManagerAddress explicitly or initialize setupChain() before constructing this token.`
+            );
+        }
+
         const oracle_manager = new OracleManager(oracleManagerAddress, this.provider);
         const price = await oracle_manager.getPrice(this.address, inUSD, getLower);
 

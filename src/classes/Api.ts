@@ -1,4 +1,4 @@
-import { setup_config, type SetupConfigSnapshot } from "../setup";
+import type { SetupConfigSnapshot } from "../setup";
 import { address } from "../types";
 import { fetchWithTimeout } from "../validation";
 
@@ -23,17 +23,29 @@ export type MilestoneResponse = {
 export type Milestones = { [key: string]: MilestoneResponse };
 export type Incentives = { [key: address]: Array<IncentiveResponse> };
 
+function resolveDefaultSetupConfig(context: string): SetupConfigSnapshot {
+    const config = (require("../setup") as typeof import("../setup")).setup_config;
+    if (config == undefined) {
+        throw new Error(
+            `Setup config is not configured for ${context}. ` +
+            `Pass config explicitly or initialize setupChain() first.`
+        );
+    }
+
+    return config;
+}
 
 export class Api {
     private url: string;
     
-    public constructor(config: SetupConfigSnapshot = setup_config) {
-        this.url = config.api_url!;
+    public constructor(config?: SetupConfigSnapshot) {
+        this.url = (config ?? resolveDefaultSetupConfig("Api")).api_url!;
     }
 
-    static async fetchNativeYields(config: SetupConfigSnapshot = setup_config): Promise<{ symbol: string, apy: number }[]> {
-        const { api_url } = config;
-        let chain: string = config.chain;
+    static async fetchNativeYields(config?: SetupConfigSnapshot): Promise<{ symbol: string, apy: number }[]> {
+        const resolvedConfig = config ?? resolveDefaultSetupConfig("Api.fetchNativeYields");
+        const { api_url } = resolvedConfig;
+        let chain: string = resolvedConfig.chain;
 
         if(api_url == null) {
             console.error("You must have an API URL setup to fetch native yields.");
@@ -70,8 +82,8 @@ export class Api {
         }
     }
 
-    static async getRewards(config: SetupConfigSnapshot = setup_config) {
-        const { chain, api_url } = config
+    static async getRewards(config?: SetupConfigSnapshot) {
+        const { chain, api_url } = config ?? resolveDefaultSetupConfig("Api.getRewards");
 
         let milestones: Milestones = {};
         let incentives: Incentives = {};

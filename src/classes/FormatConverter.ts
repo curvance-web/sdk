@@ -1,6 +1,5 @@
 import Decimal from "decimal.js";
 import { Percentage, TokenInput, USD } from "../types";
-import { CToken } from "./CToken";
 
 export default class FormatConverter {
     /**

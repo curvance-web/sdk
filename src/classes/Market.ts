@@ -6,7 +6,7 @@ import abi from '../abis/MarketManagerIsolated.json';
 import { Decimal } from "decimal.js";
 import { address, curvance_read_provider, curvance_signer, Percentage, TokenInput, USD } from "../types";
 import { OracleManager } from "./OracleManager";
-import { setup_config, type SetupConfigSnapshot } from "../setup";
+import type { SetupConfigSnapshot } from "../setup";
 import { fetchMerklOpportunities, MerklOpportunity } from "../integrations/merkl";
 import { BorrowableCToken } from "./BorrowableCToken";
 import FormatConverter from "./FormatConverter";
@@ -58,6 +58,18 @@ export interface IMarket {
 }
 
 type NativeYield = Awaited<ReturnType<typeof Api.fetchNativeYields>>[number];
+
+function resolveDefaultSetupConfig(context: string): SetupConfigSnapshot {
+    const config = (require("../setup") as typeof import("../setup")).setup_config;
+    if (config == undefined) {
+        throw new Error(
+            `Setup config is not configured for ${context}. ` +
+            `Pass setup/provider context explicitly or initialize setupChain() first.`
+        );
+    }
+
+    return config;
+}
 
 export class Market {
     provider: curvance_read_provider;
@@ -903,21 +915,26 @@ export class Market {
     static async getAll(
         reader: ProtocolReader,
         oracle_manager: OracleManager,
-        provider: curvance_read_provider = setup_config.readProvider,
-        signer: curvance_signer | null = setup_config.signer,
-        account: address | null = setup_config.account,
+        provider?: curvance_read_provider,
+        signer?: curvance_signer | null,
+        account?: address | null,
         milestones: Milestones = {},
         incentives: Incentives = {},
-        setup: SetupConfigSnapshot = setup_config,
+        setup?: SetupConfigSnapshot,
     ) {
-        const all_data = await reader.getAllMarketData(account);
+        const resolvedSetup = setup ?? resolveDefaultSetupConfig("Market.getAll");
+        const resolvedProvider = provider ?? resolvedSetup.readProvider;
+        const resolvedSigner = signer === undefined ? resolvedSetup.signer : signer;
+        const resolvedAccount = account === undefined ? resolvedSetup.account : account;
+
+        const all_data = await reader.getAllMarketData(resolvedAccount);
         // Filter out USDC — DeFiLlama incorrectly returns YZM vault yield labeled as USDC
         const [yields, merklLendOpps, merklBorrowOpps] = await Promise.all([
-            Api.fetchNativeYields(setup).then(y => y.filter(y => y.symbol.toUpperCase() !== 'USDC')),
+            Api.fetchNativeYields(resolvedSetup).then(y => y.filter(y => y.symbol.toUpperCase() !== 'USDC')),
             fetchMerklOpportunities({ action: 'LEND' }).catch(() => [] as MerklOpportunity[]),
             fetchMerklOpportunities({ action: 'BORROW' }).catch(() => [] as MerklOpportunity[]),
         ]);
-        const deployIndex = this.buildDeployDataIndex(setup);
+        const deployIndex = this.buildDeployDataIndex(resolvedSetup);
         const lendOppIndex = this.buildOpportunityIndex(merklLendOpps);
         const borrowOppIndex = this.buildOpportunityIndex(merklBorrowOpps);
         const yieldIndex = this.buildYieldIndex(yields);
@@ -951,7 +968,18 @@ export class Market {
                 continue;
             }
 
-            const market = new Market(provider, signer, account, staticData, dynamicData, userData, deploy_data, oracle_manager, reader, setup);
+            const market = new Market(
+                resolvedProvider,
+                resolvedSigner,
+                resolvedAccount,
+                staticData,
+                dynamicData,
+                userData,
+                deploy_data,
+                oracle_manager,
+                reader,
+                resolvedSetup,
+            );
             if(milestones[market.address] != undefined) {
                 market.milestone = milestones[market.address]!;
             }

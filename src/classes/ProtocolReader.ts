@@ -3,7 +3,6 @@ import { contractSetup, EMPTY_ADDRESS, toDecimal, UINT256_MAX, WAD } from "../he
 import abi from '../abis/ProtocolReader.json'
 import { address, curvance_read_provider, TokenInput, TypeBPS } from "../types";
 import Decimal from "decimal.js";
-import { setup_config } from "../setup";
 import { MarketToken } from "./Market";
 import { BorrowableCToken } from "./BorrowableCToken";
 import { CToken } from "./CToken";
@@ -307,6 +306,10 @@ const PROTOCOL_READER_SUMMARY_SELECTOR_SUPPORT = new Map<string, boolean>();
 const PROTOCOL_READER_SUMMARY_FALLBACK_WARNED = new Set<string>();
 const STATIC_MARKET_DATA_CACHE = new Map<string, StaticMarketCacheEntry>();
 
+function resolveDefaultReadProvider(): curvance_read_provider | undefined {
+    return (require("../setup") as typeof import("../setup")).setup_config?.readProvider;
+}
+
 /** Test-only: reset the module-level probe cache so tests can validate
  *  probe-path behavior in isolation. Not part of the public runtime API. */
 export function __resetProtocolReaderCache(): void {
@@ -327,12 +330,20 @@ export class ProtocolReader {
 
     constructor(
         address: address,
-        provider: curvance_read_provider = setup_config.readProvider,
+        provider?: curvance_read_provider,
         cacheNamespace: string | null = null,
     ) {
-        this.provider = provider;
+        const resolvedProvider = provider ?? resolveDefaultReadProvider();
+        if (resolvedProvider == undefined) {
+            throw new Error(
+                `Read provider is not configured for ProtocolReader ${address}. ` +
+                `Pass a provider explicitly or initialize setupChain() first.`
+            );
+        }
+
+        this.provider = resolvedProvider;
         this.address = address;
-        this.contract = contractSetup<IProtocolReader>(provider, address, [...abi, ...PROTOCOL_READER_EXTRA_ABI]);
+        this.contract = contractSetup<IProtocolReader>(resolvedProvider, address, [...abi, ...PROTOCOL_READER_EXTRA_ABI]);
         const normalizedAddress = address.toLowerCase();
         this.batchKey =
             cacheNamespace == null ? null : `${cacheNamespace}:${normalizedAddress}`;

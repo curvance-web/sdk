@@ -2,9 +2,7 @@ import { Contract, parseUnits } from "ethers";
 import { Decimal } from "decimal.js";
 import { address, bytes, curvance_provider, curvance_signer, Percentage } from "./types";
 import { chains } from "./contracts";
-import { setup_config } from "./setup";
 import FormatConverter from "./classes/FormatConverter";
-import { chain_config } from "./chains";
 
 // Set Decimal.js precision to handle large numbers
 Decimal.set({ precision: 50 });
@@ -33,6 +31,14 @@ export const UINT256_MAX_DECIMAL = Decimal(UINT256_MAX);
 export const EMPTY_ADDRESS = "0x0000000000000000000000000000000000000000" as address;
 export const NATIVE_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" as address;
 export const EMPTY_BYTES = "0x" as bytes;
+
+function getSetupConfig() {
+    return (require("./setup") as typeof import("./setup")).setup_config;
+}
+
+function getChainConfigMap() {
+    return (require("./chains") as typeof import("./chains")).chain_config;
+}
 
 export function getRateSeconds(rate: ChangeRate): bigint {
     switch (rate) {
@@ -162,10 +168,17 @@ export function toContractSwapSlippage(userSlippage: bigint, feeBps?: bigint): b
     return effective ? FormatConverter.bpsToBpsWad(effective) : 0n;
 }
 
-export function getChainConfig(chain: ChainRpcPrefix = setup_config.chain) {
-    const config = chain_config[chain];
+export function getChainConfig(chain?: ChainRpcPrefix) {
+    const resolvedChain = chain ?? getSetupConfig()?.chain;
+    if (!resolvedChain) {
+        throw new Error(
+            "Chain is not configured. Pass a chain explicitly or initialize setupChain() first.",
+        );
+    }
+
+    const config = getChainConfigMap()[resolvedChain];
     if (!config) {
-        throw new Error(`No configuration found for chain ${chain}`);
+        throw new Error(`No configuration found for chain ${resolvedChain}`);
     }
     return config;
 }
