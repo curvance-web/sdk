@@ -49,31 +49,6 @@ export interface SetupChainResult {
     global_milestone: any | null;
 }
 
-function normalizeSetupChainArgs(
-    apiUrlOrLegacy: string | boolean | undefined,
-    optionsOrApiUrl: SetupChainOptions | string | undefined,
-    legacyOptions: SetupChainOptions | undefined,
-): { api_url: string; options: SetupChainOptions } {
-    if (typeof apiUrlOrLegacy === "string") {
-        return {
-            api_url: apiUrlOrLegacy,
-            options: typeof optionsOrApiUrl === "object" && optionsOrApiUrl != null ? optionsOrApiUrl : {},
-        };
-    }
-
-    if (typeof optionsOrApiUrl === "string") {
-        return {
-            api_url: optionsOrApiUrl,
-            options: legacyOptions ?? {},
-        };
-    }
-
-    return {
-        api_url: "https://api.curvance.com",
-        options: typeof optionsOrApiUrl === "object" && optionsOrApiUrl != null ? optionsOrApiUrl : {},
-    };
-}
-
 function createSetupConfig(
     chain: ChainRpcPrefix,
     readProvider: curvance_read_provider,
@@ -170,30 +145,15 @@ export function setupChain(
     api_url?: string,
     options?: SetupChainOptions,
 ): Promise<SetupChainResult>;
-/** @deprecated Legacy shape retained for package-boundary compatibility. */
-export function setupChain(
-    chain: ChainRpcPrefix,
-    provider: curvance_provider | null,
-    approvalProtection: boolean | undefined,
-    api_url?: string,
-    options?: SetupChainOptions,
-): Promise<SetupChainResult>;
 export async function setupChain(
     chain: ChainRpcPrefix,
     provider: curvance_provider | null = null,
-    apiUrlOrLegacy?: string | boolean,
-    optionsOrApiUrl?: SetupChainOptions | string,
-    legacyOptions?: SetupChainOptions,
+    api_url: string = "https://api.curvance.com",
+    options: SetupChainOptions = {},
 ) {
     if(!(chain in chain_config)) {
         throw new Error("Chain does not have a corresponding config");
     }
-
-    const { api_url, options } = normalizeSetupChainArgs(
-        apiUrlOrLegacy,
-        optionsOrApiUrl,
-        legacyOptions,
-    );
 
     // Validate api_url scheme before any network calls
     validateApiUrl(api_url);

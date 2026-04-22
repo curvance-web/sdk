@@ -1,10 +1,10 @@
 const assert = require("node:assert/strict");
 const sdk = require("../dist/index.js");
 
-class LegacyProviderBackedCalldata extends sdk.Calldata {
-    constructor(provider) {
+class SignerBackedCalldata extends sdk.Calldata {
+    constructor(signer) {
         super();
-        this.provider = provider;
+        this.signer = signer;
         this.address = "0x00000000000000000000000000000000000000cc";
         this.contract = {
             interface: {
@@ -33,7 +33,7 @@ async function main() {
     );
 
     const calls = [];
-    const legacySigner = {
+    const signer = {
         address: "0x00000000000000000000000000000000000000aa",
         async sendTransaction(tx) {
             calls.push({ kind: "send", tx });
@@ -45,14 +45,14 @@ async function main() {
         },
     };
 
-    const calldata = new LegacyProviderBackedCalldata(legacySigner);
+    const calldata = new SignerBackedCalldata(signer);
     const tx = await calldata.executeCallData("0x1234");
     assert.equal(tx.hash, "0xlegacy");
 
     const simulation = await calldata.simulateCallData("0x1234");
     assert.deepEqual(simulation, { success: true });
 
-    assert.equal(calls.length, 2, "expected one send and one call through the legacy provider path");
+    assert.equal(calls.length, 2, "expected one send and one call through the signer path");
     assert.deepEqual(calls[0], {
         kind: "send",
         tx: {
@@ -65,7 +65,7 @@ async function main() {
         tx: {
             to: "0x00000000000000000000000000000000000000cc",
             data: "0x1234",
-            from: "0x00000000000000000000000000000000000000aa",
+            from: signer.address,
         },
     });
 }

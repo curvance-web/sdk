@@ -247,65 +247,6 @@ test("setupChain wraps explicit read-provider overrides with chain fallbacks", a
     }
 });
 
-test("setupChain preserves options under the legacy approval slot argument order", async (t) => {
-    const originalGetRewards = Api.getRewards;
-    const originalGetAll = Market.getAll;
-    const fakeSigner = {
-        address: "0x000000000000000000000000000000000000dEaD",
-    } as any;
-    const customReadProvider = new JsonRpcProvider("https://legacy-rpc.example");
-
-    let captured: {
-        provider: any;
-        signer: any;
-        account: any;
-        setup: typeof setup_config | null;
-    } = {
-        provider: null,
-        signer: null,
-        account: null,
-        setup: null,
-    };
-
-    resetRpcDebugState();
-    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
-    Market.getAll = (async (_reader, _oracleManager, provider, signer, account, _milestones, _incentives, setup) => {
-        captured = {
-            provider,
-            signer,
-            account,
-            setup: setup ?? null,
-        };
-        return [] as any;
-    }) as typeof Market.getAll;
-
-    t.after(() => {
-        Api.getRewards = originalGetRewards;
-        Market.getAll = originalGetAll;
-        resetRpcDebugState();
-    });
-
-    await setupChain(
-        "monad-mainnet",
-        fakeSigner,
-        undefined,
-        "https://api.legacy.example",
-        {
-            account: fakeSigner.address as any,
-            readProvider: customReadProvider,
-        },
-    );
-
-    assert.equal(setup_config.api_url, "https://api.legacy.example");
-    assert.equal(setup_config.signer, fakeSigner);
-    assert.equal(setup_config.account, fakeSigner.address);
-    assert.notEqual(setup_config.readProvider, customReadProvider);
-    assert.equal(captured.signer, fakeSigner);
-    assert.equal(captured.account, fakeSigner.address);
-    assert.equal(captured.setup, setup_config);
-    assert.equal(captured.provider, setup_config.readProvider);
-});
-
 test("setupChain rejects mismatched signer and explicit account", async (t) => {
     const originalGetRewards = Api.getRewards;
     const originalGetAll = Market.getAll;

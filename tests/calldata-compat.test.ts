@@ -4,24 +4,24 @@ import { Calldata } from "../src/classes/Calldata";
 
 const ADDRESS = "0x00000000000000000000000000000000000000aa";
 
-class LegacyProviderBackedCalldata extends Calldata<{}> {
+class SignerBackedCalldata extends Calldata<{}> {
     address = ADDRESS as any;
-    override provider: any;
+    signer: any;
     contract = {
         interface: {
             encodeFunctionData: () => "0xdeadbeef",
         },
     } as any;
 
-    constructor(provider: any) {
+    constructor(signer: any) {
         super();
-        this.provider = provider;
+        this.signer = signer;
     }
 }
 
-test("Calldata preserves legacy provider-as-signer subclasses", async () => {
+test("Calldata executes through signer-backed subclasses", async () => {
     const calls: any[] = [];
-    const legacySigner = {
+    const signer = {
         address: "0x0000000000000000000000000000000000000abc",
         sendTransaction: async (tx: any) => {
             calls.push(tx);
@@ -33,7 +33,7 @@ test("Calldata preserves legacy provider-as-signer subclasses", async () => {
         },
     };
 
-    const calldata = new LegacyProviderBackedCalldata(legacySigner);
+    const calldata = new SignerBackedCalldata(signer);
     const tx = await calldata.executeCallData("0xfeed" as any, { value: 123n });
     const simulation = await calldata.simulateCallData("0xfeed" as any, { value: 456n });
 
@@ -49,7 +49,7 @@ test("Calldata preserves legacy provider-as-signer subclasses", async () => {
             simulated: true,
             to: ADDRESS,
             data: "0xfeed",
-            from: legacySigner.address,
+            from: signer.address,
             value: 456n,
         },
     ]);
