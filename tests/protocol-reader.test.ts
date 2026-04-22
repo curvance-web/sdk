@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import Decimal from "decimal.js";
 import { UINT256_MAX } from "../src/helpers";
+import protocolReaderAbi from "../src/abis/ProtocolReader.json";
 import {
     ProtocolReader,
     __resetProtocolReaderCache,
@@ -32,19 +33,7 @@ function setReaderKeys(
     (reader as any).address = readerAddress as any;
     (reader as any).batchKey =
         namespace == null ? null : `${namespace}:${readerAddress.toLowerCase()}`;
-    (reader as any).probeCacheKey =
-        namespace == null ? readerAddress.toLowerCase() : `${namespace}:${readerAddress.toLowerCase()}`;
     (reader as any).staticMarketCacheKey = (reader as any).batchKey;
-}
-
-function createMissingSelectorError(selector: string) {
-    const error: any = new Error("execution reverted (no data present; likely require(false) occurred)");
-    error.shortMessage = "execution reverted (no data present; likely require(false) occurred)";
-    error.reason = "require(false)";
-    error.transaction = {
-        data: `${selector}0000000000000000000000000000000000000000000000000000000000000000`,
-    };
-    return error;
 }
 
 function createDynamicMarket(
@@ -196,6 +185,17 @@ function createUserData(): UserData {
         }],
     };
 }
+
+test("ProtocolReader ABI exposes targeted refresh methods", () => {
+    const functionNames = new Set(
+        (protocolReaderAbi as Array<{ type: string; name?: string }>)
+            .filter((item) => item.type === "function")
+            .map((item) => item.name),
+    );
+
+    assert.equal(functionNames.has("getMarketStates"), true);
+    assert.equal(functionNames.has("getMarketSummaries"), true);
+});
 
 test("public loads synthesize empty user state from static market data", async () => {
     const reader = createReader();
@@ -520,6 +520,34 @@ test("getMarketSummaries normalizes market-summary payloads", async () => {
     }]);
 });
 
+test("getMarketSummaries normalizes direct array payloads", async () => {
+    const reader = createReader();
+    reader.contract = {
+        getMarketSummaries: async () => [{
+            _address: MARKET,
+            collateral: 1n,
+            maxDebt: 2n,
+            debt: 3n,
+            positionHealth: 4n,
+            cooldown: 5n,
+            errorCodeHit: false,
+        }],
+    } as any;
+
+    const data = await reader.getMarketSummaries([MARKET as any], ACCOUNT as any);
+
+    assert.deepEqual(data, [{
+        address: MARKET,
+        collateral: 1n,
+        maxDebt: 2n,
+        debt: 3n,
+        positionHealth: 4n,
+        cooldown: 5n,
+        errorCodeHit: false,
+        priceStale: false,
+    }]);
+});
+
 test("getMarketStates normalizes targeted refresh payloads", async () => {
     const reader = createReader();
     reader.contract = {
@@ -626,122 +654,38 @@ test("getMarketStates normalizes tuple payloads from ethers result arrays", asyn
     assert.equal(data.userMarkets[0]?.tokens[0]?.userAssetBalance, 6n);
 });
 
-test("getMarketSummaries falls back to getMarketStates when the selector is not deployed", async () => {
+test("getMarketSummaries surfaces contract errors when targeted refresh is unavailable", async () => {
     const reader = createReader();
-    setReaderKeys(reader, MARKET, "monad-mainnet");
-    let summaryCalls = 0;
-    let targetedCalls = 0;
-
     reader.contract = {
         getMarketSummaries: async () => {
-            summaryCalls += 1;
-            throw createMissingSelectorError("0x02230f46");
+            throw new Error("targeted refresh unavailable");
         },
     } as any;
-    reader.getMarketStates = async () => {
-        targetedCalls += 1;
-        return {
-            dynamicMarkets: [],
-            userMarkets: [{
-                address: MARKET as any,
-                collateral: 1n,
-                maxDebt: 2n,
-                debt: 3n,
-                positionHealth: 4n,
-                cooldown: 5n,
-                errorCodeHit: false,
-                priceStale: false,
-                tokens: [{
-                    address: TOKEN as any,
-                    userAssetBalance: 6n,
-                    userShareBalance: 7n,
-                    userUnderlyingBalance: 8n,
-                    userCollateral: 9n,
-                    userDebt: 10n,
-                    liquidationPrice: 11n,
-                }],
-            }],
-        };
-    };
 
-    const first = await reader.getMarketSummaries([MARKET as any], ACCOUNT as any);
-    const second = await reader.getMarketSummaries([MARKET as any], ACCOUNT as any);
-
-    assert.equal(summaryCalls, 1);
-    assert.equal(targetedCalls, 2);
-    assert.deepEqual(first, [{
-        address: MARKET,
-        collateral: 1n,
-        maxDebt: 2n,
-        debt: 3n,
-        positionHealth: 4n,
-        cooldown: 5n,
-        errorCodeHit: false,
-        priceStale: false,
-    }]);
-    assert.deepEqual(second, first);
+    await assert.rejects(
+        reader.getMarketSummaries([MARKET as any], ACCOUNT as any),
+        /targeted refresh unavailable/,
+    );
 });
 
-test("getMarketStates falls back to legacy calls when the selector is not deployed", async () => {
+test("getMarketStates surfaces contract errors when targeted refresh is unavailable", async () => {
     const reader = createReader();
-    setReaderKeys(reader, MARKET, "monad-mainnet");
-    let targetedCalls = 0;
-    let dynamicCalls = 0;
-    let userCalls = 0;
-
     reader.contract = {
         getMarketStates: async () => {
-            targetedCalls += 1;
-            throw createMissingSelectorError("0xaa78b4d4");
+            throw new Error("targeted refresh unavailable");
         },
     } as any;
-
     reader.getDynamicMarketData = async () => {
-        dynamicCalls += 1;
-        return [
-            createDynamicMarket(MARKET, TOKEN),
-            createDynamicMarket(MARKET_B, TOKEN_B),
-        ];
+        throw new Error("legacy fallback must stay dead");
     };
     reader.getUserData = async () => {
-        userCalls += 1;
-        return {
-            locks: [],
-            markets: [
-                createUserData().markets[0]!,
-                {
-                    address: MARKET_B as any,
-                    collateral: 10n,
-                    maxDebt: 11n,
-                    debt: 12n,
-                    positionHealth: 13n,
-                    cooldown: 14n,
-                    errorCodeHit: false,
-                    priceStale: false,
-                    tokens: [{
-                        address: TOKEN_B as any,
-                        userAssetBalance: 15n,
-                        userShareBalance: 16n,
-                        userUnderlyingBalance: 17n,
-                        userCollateral: 18n,
-                        userDebt: 19n,
-                        liquidationPrice: 20n,
-                    }],
-                },
-            ],
-        };
+        throw new Error("legacy fallback must stay dead");
     };
 
-    const first = await reader.getMarketStates([MARKET_B as any], ACCOUNT as any);
-    const second = await reader.getMarketStates([MARKET as any], ACCOUNT as any);
-
-    assert.equal(targetedCalls, 1);
-    assert.equal(dynamicCalls, 2);
-    assert.equal(userCalls, 2);
-    assert.equal(first.dynamicMarkets[0]?.address, MARKET_B);
-    assert.equal(first.userMarkets[0]?.tokens[0]?.userDebt, 19n);
-    assert.equal(second.dynamicMarkets[0]?.address, MARKET);
-    assert.equal(second.userMarkets[0]?.tokens[0]?.userDebt, 5n);
+    await assert.rejects(
+        reader.getMarketStates([MARKET as any], ACCOUNT as any),
+        /targeted refresh unavailable/,
+    );
 });
 
 // ---------------------------------------------------------------------------
@@ -801,6 +745,25 @@ test("hypotheticalRedemptionOf defaults bufferTime to 0n when not provided", asy
     assert.equal(captured.bufferTime, 0n, "default must remain 0n for backward compatibility");
 });
 
+test("hypotheticalRedemptionOf preserves oracleError and the priceStale alias", async () => {
+    const reader = createReader();
+
+    reader.contract = {
+        hypotheticalRedemptionOf: async () => [11n, 22n, true, true],
+    } as any;
+
+    const ctoken = { address: TOKEN } as any;
+    const result = await reader.hypotheticalRedemptionOf(ACCOUNT as any, ctoken, 1_000n, 60n);
+
+    assert.deepEqual(result, {
+        excess: 11n,
+        deficit: 22n,
+        isPossible: true,
+        oracleError: true,
+        priceStale: true,
+    });
+});
+
 test("hypotheticalBorrowOf forwards bufferTime to the contract call", async () => {
     const reader = createReader();
     let captured: { bufferTime: bigint | null } = { bufferTime: null };
@@ -845,153 +808,6 @@ test("hypotheticalBorrowOf decodes loanSizeError separately from oracleError", a
         oracleError: false,
         priceStale: false,
     });
-});
-
-test("getMarketStates selector-support probe caches across instances at the same address", async () => {
-    // Every setupChain() constructs a fresh ProtocolReader. If selector-support
-    // is per-instance, each chain-switch (or re-setup) re-probes — and after
-    // the retry-provider's unknown-error cascade fix, one probe costs primary
-    // + every fallback provider. Cache by address so the second instance
-    // short-circuits straight to the legacy path.
-    const PROBE_ADDRESS = "0x00000000000000000000000000000000000000cc";
-
-    const reader1 = createReader();
-    setReaderKeys(reader1, PROBE_ADDRESS, "monad-mainnet");
-    let reader1ProbeCount = 0;
-    reader1.contract = {
-        getMarketStates: async () => {
-            reader1ProbeCount += 1;
-            throw createMissingSelectorError("0xaa78b4d4");
-        },
-    } as any;
-    reader1.getDynamicMarketData = async () => [];
-    reader1.getUserData = async () => ({ locks: [], markets: [] });
-
-    await reader1.getMarketStates([], ACCOUNT as any);
-    assert.equal(reader1ProbeCount, 1, "first instance probes the contract");
-
-    const reader2 = createReader();
-    setReaderKeys(reader2, PROBE_ADDRESS, "monad-mainnet");
-    let reader2ProbeCount = 0;
-    reader2.contract = {
-        getMarketStates: async () => {
-            reader2ProbeCount += 1;
-            throw new Error("probe should be cached; contract.getMarketStates must not be called again");
-        },
-    } as any;
-    reader2.getDynamicMarketData = async () => [];
-    reader2.getUserData = async () => ({ locks: [], markets: [] });
-
-    await reader2.getMarketStates([], ACCOUNT as any);
-    assert.equal(
-        reader2ProbeCount,
-        0,
-        "second instance at same address reuses cached probe result",
-    );
-});
-
-test("getMarketStates selector-support cache stays isolated across namespaces", async () => {
-    const PROBE_ADDRESS = "0x00000000000000000000000000000000000000cc";
-
-    const monadReader = createReader();
-    setReaderKeys(monadReader, PROBE_ADDRESS, "monad-mainnet");
-    let monadProbeCount = 0;
-    monadReader.contract = {
-        getMarketStates: async () => {
-            monadProbeCount += 1;
-            throw createMissingSelectorError("0xaa78b4d4");
-        },
-    } as any;
-    monadReader.getDynamicMarketData = async () => [];
-    monadReader.getUserData = async () => ({ locks: [], markets: [] });
-
-    await monadReader.getMarketStates([], ACCOUNT as any);
-    assert.equal(monadProbeCount, 1);
-
-    const arbitrumReader = createReader();
-    setReaderKeys(arbitrumReader, PROBE_ADDRESS, "arbitrum-sepolia");
-    let arbitrumProbeCount = 0;
-    arbitrumReader.contract = {
-        getMarketStates: async () => {
-            arbitrumProbeCount += 1;
-            return {
-                dynamicMarkets: [],
-                userMarkets: [],
-            };
-        },
-    } as any;
-    arbitrumReader.getDynamicMarketData = async () => {
-        throw new Error("namespace-isolated selector cache should not force fallback");
-    };
-    arbitrumReader.getUserData = async () => {
-        throw new Error("namespace-isolated selector cache should not force fallback");
-    };
-
-    const result = await arbitrumReader.getMarketStates([], ACCOUNT as any);
-
-    assert.equal(arbitrumProbeCount, 1, "different namespace must probe independently");
-    assert.deepEqual(result, {
-        dynamicMarkets: [],
-        userMarkets: [],
-    });
-});
-
-test("getMarketSummaries selector-support cache stays isolated across namespaces", async () => {
-    const PROBE_ADDRESS = "0x00000000000000000000000000000000000000cc";
-
-    const monadReader = createReader();
-    setReaderKeys(monadReader, PROBE_ADDRESS, "monad-mainnet");
-    let monadProbeCount = 0;
-    monadReader.contract = {
-        getMarketSummaries: async () => {
-            monadProbeCount += 1;
-            throw createMissingSelectorError("0x02230f46");
-        },
-    } as any;
-    monadReader.getMarketStates = async () => ({
-        dynamicMarkets: [],
-        userMarkets: [],
-    });
-
-    await monadReader.getMarketSummaries([], ACCOUNT as any);
-    assert.equal(monadProbeCount, 1);
-
-    const arbitrumReader = createReader();
-    setReaderKeys(arbitrumReader, PROBE_ADDRESS, "arbitrum-sepolia");
-    let arbitrumProbeCount = 0;
-    arbitrumReader.contract = {
-        getMarketSummaries: async () => {
-            arbitrumProbeCount += 1;
-            return {
-                userMarkets: [{
-                    _address: PROBE_ADDRESS,
-                    collateral: 1n,
-                    maxDebt: 2n,
-                    debt: 3n,
-                    positionHealth: 4n,
-                    cooldown: 5n,
-                    errorCodeHit: false,
-                }],
-            };
-        },
-    } as any;
-    arbitrumReader.getMarketStates = async () => {
-        throw new Error("namespace-isolated selector cache should not force summary fallback");
-    };
-
-    const result = await arbitrumReader.getMarketSummaries([PROBE_ADDRESS as any], ACCOUNT as any);
-
-    assert.equal(arbitrumProbeCount, 1, "different namespace must probe independently");
-    assert.deepEqual(result, [{
-        address: PROBE_ADDRESS,
-        collateral: 1n,
-        maxDebt: 2n,
-        debt: 3n,
-        positionHealth: 4n,
-        cooldown: 5n,
-        errorCodeHit: false,
-        priceStale: false,
-    }]);
 });
 
 test("hypotheticalBorrowOf defaults bufferTime to 0n when not provided", async () => {
@@ -1053,6 +869,55 @@ test("hypotheticalLeverageOf preserves loanSizeError and oracleError flags", asy
     assert.equal(result.maxDebtBorrowable.toString(), "4");
     assert.equal(result.loanSizeError, true);
     assert.equal(result.oracleError, false);
+});
+
+test("hypotheticalLiquidityOf forwards the market address and normalizes struct output", async () => {
+    const reader = createReader();
+    let captured: unknown[] | null = null;
+
+    reader.contract = {
+        hypotheticalLiquidityOf: async (...args: unknown[]) => {
+            captured = args;
+            return {
+                result: {
+                    collateral: 1n,
+                    maxDebt: 2n,
+                    debt: 3n,
+                    collateralSurplus: 4n,
+                    liquidityDeficit: 5n,
+                    loanSizeError: true,
+                    oracleError: false,
+                },
+            };
+        },
+    } as any;
+
+    const result = await reader.hypotheticalLiquidityOf(
+        MARKET as any,
+        ACCOUNT as any,
+        TOKEN as any,
+        100n,
+        200n,
+        300n,
+    );
+
+    assert.deepEqual(captured, [
+        MARKET,
+        ACCOUNT,
+        TOKEN,
+        100n,
+        200n,
+        300n,
+    ]);
+    assert.deepEqual(result, {
+        collateral: 1n,
+        maxDebt: 2n,
+        debt: 3n,
+        collateralSurplus: 4n,
+        liquidityDeficit: 5n,
+        loanSizeError: true,
+        oracleError: false,
+    });
 });
 
 test("maxRedemptionOf forwards bufferTime to the contract call", async () => {

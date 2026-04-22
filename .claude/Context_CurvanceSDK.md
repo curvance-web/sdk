@@ -363,9 +363,10 @@ interface IDynamicIRM {
 | `getAllDynamicState(account)` | `address` | `(DynamicMarketData[], UserData)` — combined call |
 | `getOptimizerMarketData(optimizers)` | `address[]` | `OptimizerMarketData[]` |
 | `getOptimizerUserData(optimizers, account)` | `address[], address` | `OptimizerUserData[]` |
+| `getOptimizerAPY(optimizer)` | `address` | `uint256` WAD APY |
 | `optimalDeposit(optimizer, assets)` | `address, uint256` | `address` — best cToken market |
 | `optimalWithdrawal(optimizer, assets)` | `address, uint256` | `address` — best cToken market |
-| `optimalRebalance(optimizer)` | `address` | `ReallocationAction[]` — 20-chunk greedy allocation |
+| `optimalRebalance(optimizer, slippageBps)` | `address, uint256` | `{ actions: ReallocationAction[], bounds: AllocationBound[] }` — 20-chunk greedy allocation + per-market tolerance bounds |
 
 #### On-Chain Calculation Details
 
@@ -408,7 +409,8 @@ SDK converts: `Decimal(cache.maxLeverage).div(BPS)`
 **LendingOptimizer system** (new in this version):
 - `optimalDeposit(optimizer, assets)`: finds cToken with highest projected supply rate after deposit
 - `optimalWithdrawal(optimizer, assets)`: finds cToken with lowest projected supply rate after withdrawal
-- `optimalRebalance(optimizer)`: 20-chunk greedy allocation across approved markets, respecting allocation caps and pause states
+- `getOptimizerAPY(optimizer)`: weighted-average optimizer APY in WAD
+- `optimalRebalance(optimizer, slippageBps)`: 20-chunk greedy allocation across approved markets, respecting allocation caps and pause states, plus per-market allocation bounds
 
 **Liquidation values** (`liquidationValuesOf`):
 - `cSoft` = sum of (collateral × BPS / collReqSoft) — soft liquidation threshold
@@ -2892,8 +2894,14 @@ class OptimizerReader {
     async optimalWithdrawal(optimizer: address, assets: bigint): Promise<address>
     // Returns the cToken address for optimal withdrawal routing
 
-    async optimalRebalance(optimizer: address): Promise<ReallocationAction[]>
-    // Returns { cToken, assets }[] rebalance actions
+    async getOptimizerAPY(optimizer: address): Promise<bigint>
+    // Returns weighted-average APY in WAD
+
+    async optimalRebalance(
+        optimizer: address,
+        slippageBps?: bigint
+    ): Promise<{ actions: ReallocationAction[]; bounds: AllocationBound[] }>
+    // Returns rebalance actions plus per-market allocation bounds
 }
 ```
 

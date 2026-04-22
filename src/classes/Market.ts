@@ -53,7 +53,6 @@ export type UserDataScope = "full" | "summary";
 export interface IMarket {
     accountAssets(account: address): Promise<bigint>;
     MIN_HOLD_PERIOD(): Promise<bigint>;
-    hypotheticalLiquidityOf(account: address, cTokenModified: address, redemptionShares: bigint, borrowAssets: bigint): Promise<HypotheticalLiquidityOf>;
     statusOf(account: address): Promise<StatusOf>;
 }
 
@@ -587,6 +586,10 @@ export class Market {
         return index;
     }
 
+    private static buildMarketPayloadIndex<T extends { address: address }>(entries: T[]): Map<string, T> {
+        return new Map(entries.map((entry) => [entry.address.toLowerCase(), entry]));
+    }
+
     /**
      * Preview the impact of the user descision for their deposit/borrow/leverage
      * @param user - Wallet address
@@ -880,8 +883,21 @@ export class Market {
      * @param borrowAssets - Amount of assets being borrowed
      * @returns An object containing the hypothetical liquidity values
      */
-    async hypotheticalLiquidityOf(account: address, cTokenModified: address = EMPTY_ADDRESS, redemptionShares: bigint = 0n, borrowAssets: bigint = 0n) {
-        return this.contract.hypotheticalLiquidityOf(account, cTokenModified, redemptionShares, borrowAssets);
+    async hypotheticalLiquidityOf(
+        account: address,
+        cTokenModified: address = EMPTY_ADDRESS,
+        redemptionShares: bigint = 0n,
+        borrowAssets: bigint = 0n,
+        bufferTime: bigint = 0n,
+    ) {
+        return this.reader.hypotheticalLiquidityOf(
+            this.address,
+            account,
+            cTokenModified,
+            redemptionShares,
+            borrowAssets,
+            bufferTime,
+        );
     }
 
     /**
@@ -956,34 +972,27 @@ export class Market {
         const lendOppIndex = this.buildOpportunityIndex(merklLendOpps);
         const borrowOppIndex = this.buildOpportunityIndex(merklBorrowOpps);
         const yieldIndex = this.buildYieldIndex(yields);
+        const dynamicByAddress = this.buildMarketPayloadIndex(all_data.dynamicMarket);
+        const userByAddress = this.buildMarketPayloadIndex(all_data.userData.markets);
 
         let markets: Market[] = [];
-        for(let i = 0; i < all_data.staticMarket.length; i++) {
-            const staticData  = all_data.staticMarket[i]!;
-            const dynamicData = all_data.dynamicMarket[i]!;
-            const userData    = all_data.userData.markets[i]!;
-
+        for(const staticData of all_data.staticMarket) {
             const market_address = staticData.address;
             const deploy_data = deployIndex.get(market_address.toLowerCase());
+            const dynamicData = dynamicByAddress.get(market_address.toLowerCase());
+            const userData = userByAddress.get(market_address.toLowerCase());
 
             if(deploy_data == undefined) {
                 console.warn(`Could not find deploy data for market: ${market_address}, skipping...`);
                 continue;
             }
 
-            if(staticData == undefined) {
-                console.warn(`Could not find static market data for index: ${i}`);
-                continue;
-            }
-
             if(dynamicData == undefined) {
-                console.warn(`Could not find dynamic market data for index: ${i}`);
-                continue;
+                throw new Error(`Missing dynamic market data for ${market_address} during Market.getAll boot.`);
             }
 
             if(userData == undefined) {
-                console.warn(`Could not find user market data for index: ${i}`);
-                continue;
+                throw new Error(`Missing user market data for ${market_address} during Market.getAll boot.`);
             }
 
             const market = new Market(

@@ -137,6 +137,7 @@ export const LEVERAGE = {
 
 export interface AccountSnapshot {
     asset: address;
+    underlying: address;
     decimals: bigint;
     isCollateral: boolean;
     collateralPosted: bigint;
@@ -2114,6 +2115,7 @@ export class CToken extends Calldata<ICToken> {
         const snapshot = await this.contract.getSnapshot(account);
         return {
             asset: snapshot.asset,
+            underlying: snapshot.underlying,
             decimals: BigInt(snapshot.decimals),
             isCollateral: snapshot.isCollateral,
             collateralPosted: BigInt(snapshot.collateralPosted),

@@ -584,7 +584,10 @@ The `OptimizerReader` reads yield-rebalancing vaults that allocate across market
 ```ts
 import { OptimizerReader } from "curvance"
 
-const optimizer = new OptimizerReader(provider)
+const optimizer = new OptimizerReader(optimizerReaderAddress, provider)
+
+await optimizer.getOptimizerAPY(optimizerAddress)
+// Returns: weighted-average optimizer APY in WAD
 
 await optimizer.getOptimizerMarketData(optimizerAddresses)
 // Returns: { totalAssets, sharePrice, performanceFee, markets[] }
@@ -594,7 +597,8 @@ await optimizer.getOptimizerUserData(optimizerAddresses, account)
 
 await optimizer.optimalDeposit(optimizer, assets)    // best market to deposit into
 await optimizer.optimalWithdrawal(optimizer, assets) // best market to withdraw from
-await optimizer.optimalRebalance(optimizer)          // suggested reallocations: { cToken, assets }[]
+await optimizer.optimalRebalance(optimizer, 100n)
+// Returns: { actions: { cToken, assetsOrBps }[], bounds: { cToken, minBps, maxBps }[] }
 ```
 
 ## ❯ TypeScript Types

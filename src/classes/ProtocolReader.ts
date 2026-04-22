@@ -1,4 +1,4 @@
-import { Contract } from "ethers";
+﻿import { Contract } from "ethers";
 import { contractSetup, EMPTY_ADDRESS, toDecimal, UINT256_MAX, WAD } from "../helpers";
 import abi from '../abis/ProtocolReader.json'
 import { address, curvance_read_provider, TokenInput, TypeBPS } from "../types";
@@ -137,18 +137,13 @@ export interface IProtocolReader {
     getPositionHealth(market: address, account: address, ctoken: address, borrowableCToken: address, isDeposit: boolean, collateralAssets: bigint, isRepayment: boolean, debtAssets: bigint, bufferTime: bigint): Promise<[bigint, boolean]>;
     hypotheticalRedemptionOf(account: address, ctoken: address, redeemShares: bigint, bufferTime: bigint): Promise<[bigint, bigint, boolean, boolean]>;
     hypotheticalBorrowOf(account: address, borrowableCToken: address, borrowAssets: bigint, bufferTime: bigint): Promise<[bigint, bigint, boolean, boolean, boolean]>;
+    hypotheticalLiquidityOf(market: address, account: address, cTokenModified: address, redemptionShares: bigint, borrowAssets: bigint, bufferTime: bigint): Promise<any>;
     maxRedemptionOf(account: address, ctoken: address, bufferTime: bigint): Promise<[bigint, bigint, boolean]>;
     debtBalanceAtTimestamp(account: address, borrowableCtoken: address, timestamp: bigint): Promise<bigint>;
     getBalancesOf(tokens: address[], account: address): Promise<bigint[]>;
     getLeverageSnapshot(account: address, cToken: address, borrowableCToken: address, bufferTime: bigint): Promise<[bigint, bigint, bigint, bigint, bigint, bigint, boolean]>;
 }
 
-const PROTOCOL_READER_EXTRA_ABI = [
-    "function getMarketSummaries(address[] markets, address account) view returns ((address _address,uint256 collateral,uint256 maxDebt,uint256 debt,uint256 positionHealth,uint256 cooldown,bool errorCodeHit)[] userMarkets)",
-    "function getMarketStates(address[] markets, address account) view returns ((address _address,(address _address,uint256 totalSupply,uint256 exchangeRate,uint256 totalAssets,uint256 collateral,uint256 debt,uint256 sharePrice,uint256 assetPrice,uint256 sharePriceLower,uint256 assetPriceLower,uint256 borrowRate,uint256 predictedBorrowRate,uint256 utilizationRate,uint256 supplyRate,uint256 liquidity)[] tokens)[] dynamicMarkets,(address _address,uint256 collateral,uint256 maxDebt,uint256 debt,uint256 positionHealth,uint256 cooldown,bool errorCodeHit,(address _address,uint256 userAssetBalance,uint256 userShareBalance,uint256 userUnderlyingBalance,uint256 userCollateral,uint256 userDebt,uint256 liquidationPrice)[] tokens)[] userMarkets)",
-] as const;
-const GET_MARKET_SUMMARIES_SELECTOR = "0x02230f46";
-const GET_MARKET_STATES_SELECTOR = "0xaa78b4d4";
 const STATIC_MARKET_CACHE_TTL_MS = 60_000;
 
 type StaticMarketCacheEntry = {
@@ -294,29 +289,15 @@ function normalizeStaticMarketData(data: any[]): StaticMarketData[] {
     }));
 }
 
-// Module-level cache: reader address → whether the new getMarketStates
-// selector is deployed on that contract. Every setupChain() constructs a
-// fresh ProtocolReader, so a per-instance flag would re-probe on every
-// chain switch. After the retry-provider unknown-error cascade fix, one
-// probe costs primary + every configured fallback RPC, making the re-probe
-// observable cost rather than a silent waste.
-const PROTOCOL_READER_SELECTOR_SUPPORT = new Map<string, boolean>();
-const PROTOCOL_READER_FALLBACK_WARNED = new Set<string>();
-const PROTOCOL_READER_SUMMARY_SELECTOR_SUPPORT = new Map<string, boolean>();
-const PROTOCOL_READER_SUMMARY_FALLBACK_WARNED = new Set<string>();
+// Module-level cache: namespace-qualified reader address -> static market data.
 const STATIC_MARKET_DATA_CACHE = new Map<string, StaticMarketCacheEntry>();
 
 function resolveDefaultReadProvider(): curvance_read_provider | undefined {
     return (require("../setup") as typeof import("../setup")).setup_config?.readProvider;
 }
 
-/** Test-only: reset the module-level probe cache so tests can validate
- *  probe-path behavior in isolation. Not part of the public runtime API. */
+/** Test-only: reset the module-level static market cache. */
 export function __resetProtocolReaderCache(): void {
-    PROTOCOL_READER_SELECTOR_SUPPORT.clear();
-    PROTOCOL_READER_FALLBACK_WARNED.clear();
-    PROTOCOL_READER_SUMMARY_SELECTOR_SUPPORT.clear();
-    PROTOCOL_READER_SUMMARY_FALLBACK_WARNED.clear();
     STATIC_MARKET_DATA_CACHE.clear();
 }
 
@@ -326,7 +307,6 @@ export class ProtocolReader {
     contract: Contract & IProtocolReader;
     readonly batchKey: string | null;
     private readonly staticMarketCacheKey: string | null;
-    private readonly probeCacheKey: string;
 
     constructor(
         address: address,
@@ -343,96 +323,11 @@ export class ProtocolReader {
 
         this.provider = resolvedProvider;
         this.address = address;
-        this.contract = contractSetup<IProtocolReader>(resolvedProvider, address, [...abi, ...PROTOCOL_READER_EXTRA_ABI]);
+        this.contract = contractSetup<IProtocolReader>(resolvedProvider, address, abi);
         const normalizedAddress = address.toLowerCase();
         this.batchKey =
             cacheNamespace == null ? null : `${cacheNamespace}:${normalizedAddress}`;
         this.staticMarketCacheKey = this.batchKey;
-        this.probeCacheKey =
-            this.batchKey ?? normalizedAddress;
-    }
-
-    private isMissingSelector(error: any, selector: string): boolean {
-        const message = String(error?.message ?? "").toLowerCase();
-        const shortMessage = String(error?.shortMessage ?? "").toLowerCase();
-        const revertReason = String(error?.reason ?? "").toLowerCase();
-        const txData = String(error?.transaction?.data ?? "").toLowerCase();
-
-        const looksLikeSelectorMiss =
-            txData.startsWith(selector) &&
-            (
-                shortMessage.includes("no data present") ||
-                shortMessage.includes("missing revert data") ||
-                message.includes("no data present") ||
-                message.includes("missing revert data") ||
-                revertReason === "require(false)"
-            );
-
-        return looksLikeSelectorMiss;
-    }
-
-    private isMissingGetMarketSummaries(error: any): boolean {
-        return this.isMissingSelector(error, GET_MARKET_SUMMARIES_SELECTOR);
-    }
-
-    private isMissingGetMarketStates(error: any): boolean {
-        return this.isMissingSelector(error, GET_MARKET_STATES_SELECTOR);
-    }
-
-    private async getMarketSummariesFallback(markets: address[], account: address) {
-        if (!PROTOCOL_READER_SUMMARY_FALLBACK_WARNED.has(this.probeCacheKey)) {
-            PROTOCOL_READER_SUMMARY_FALLBACK_WARNED.add(this.probeCacheKey);
-            console.warn(
-                "[ProtocolReader] getMarketSummaries is not available on this deployment yet. " +
-                "Falling back to getMarketStates for summary refreshes."
-            );
-        }
-
-        const { userMarkets } = await this.getMarketStates(markets, account);
-        return userMarkets.map(({ tokens: _tokens, ...summary }) => summary);
-    }
-
-    private async getMarketStatesFallback(markets: address[], account: address) {
-        // Compatibility fallback: keep this path until every environment that
-        // runs the SDK (main deployment, staging, forks, local Anvil) has a
-        // ProtocolReader with getMarketStates deployed. Removing it right after
-        // a single deployment upgrade will break older forks and stale test envs.
-        if (!PROTOCOL_READER_FALLBACK_WARNED.has(this.probeCacheKey)) {
-            PROTOCOL_READER_FALLBACK_WARNED.add(this.probeCacheKey);
-            console.warn(
-                "[ProtocolReader] getMarketStates is not available on this deployment yet. " +
-                "Falling back to getDynamicMarketData + getUserData for targeted refreshes."
-            );
-        }
-
-        const [allDynamicMarkets, userData] = await Promise.all([
-            this.getDynamicMarketData(),
-            this.getUserData(account),
-        ]);
-
-        const dynamicByAddress = new Map(allDynamicMarkets.map((market) => [market.address, market] as const));
-        const userByAddress = new Map(userData.markets.map((market) => [market.address, market] as const));
-
-        const dynamicMarkets = markets.map((marketAddress) => {
-            const dynamicMarket = dynamicByAddress.get(marketAddress);
-            if (!dynamicMarket) {
-                throw new Error(`Fallback could not find dynamic market state for ${marketAddress}.`);
-            }
-            return dynamicMarket;
-        });
-
-        const userMarkets = markets.map((marketAddress) => {
-            const userMarket = userByAddress.get(marketAddress);
-            if (!userMarket) {
-                throw new Error(`Fallback could not find user market state for ${marketAddress}.`);
-            }
-            return userMarket;
-        });
-
-        return {
-            dynamicMarkets,
-            userMarkets,
-        };
     }
 
     async getAllMarketData(account: address | null = null) {
@@ -476,6 +371,7 @@ export class ProtocolReader {
             excess: BigInt(data[0]),
             deficit: BigInt(data[1]),
             isPossible: data[2],
+            oracleError: data[3],
             priceStale: data[3]
         }
     }
@@ -492,6 +388,35 @@ export class ProtocolReader {
             oracleError,
             priceStale: oracleError,
         }
+    }
+
+    async hypotheticalLiquidityOf(
+        market: address,
+        account: address,
+        cTokenModified: address = EMPTY_ADDRESS,
+        redemptionShares: bigint = 0n,
+        borrowAssets: bigint = 0n,
+        bufferTime: bigint = 0n,
+    ) {
+        const data = await this.contract.hypotheticalLiquidityOf(
+            market,
+            account,
+            cTokenModified,
+            redemptionShares,
+            borrowAssets,
+            bufferTime,
+        );
+        const result = data.result ?? data;
+
+        return {
+            collateral: BigInt(result.collateral ?? result[0]),
+            maxDebt: BigInt(result.maxDebt ?? result[1]),
+            debt: BigInt(result.debt ?? result[2]),
+            collateralSurplus: BigInt(result.collateralSurplus ?? result[3]),
+            liquidityDeficit: BigInt(result.liquidityDeficit ?? result[4]),
+            loanSizeError: Boolean(result.loanSizeError ?? result[5]),
+            oracleError: Boolean(result.oracleError ?? result[6]),
+        };
     }
 
     async getPositionHealth(
@@ -531,44 +456,16 @@ export class ProtocolReader {
     }
 
     async getMarketSummaries(markets: address[], account: address) {
-        if (PROTOCOL_READER_SUMMARY_SELECTOR_SUPPORT.get(this.probeCacheKey) === false) {
-            return this.getMarketSummariesFallback(markets, account);
-        }
-
-        try {
-            const data = await this.contract.getMarketSummaries(markets, account);
-            PROTOCOL_READER_SUMMARY_SELECTOR_SUPPORT.set(this.probeCacheKey, true);
-            return normalizeUserMarketSummaries(Array.isArray(data) ? data : data.userMarkets ?? data[0] ?? []);
-        } catch (error: any) {
-            if (!this.isMissingGetMarketSummaries(error)) {
-                throw error;
-            }
-
-            PROTOCOL_READER_SUMMARY_SELECTOR_SUPPORT.set(this.probeCacheKey, false);
-            return this.getMarketSummariesFallback(markets, account);
-        }
+        const data = await this.contract.getMarketSummaries(markets, account);
+        return normalizeUserMarketSummaries(Array.isArray(data) ? data : data.userMarkets ?? data[0] ?? []);
     }
 
     async getMarketStates(markets: address[], account: address) {
-        if (PROTOCOL_READER_SELECTOR_SUPPORT.get(this.probeCacheKey) === false) {
-            return this.getMarketStatesFallback(markets, account);
-        }
-
-        try {
-            const data = await this.contract.getMarketStates(markets, account);
-            PROTOCOL_READER_SELECTOR_SUPPORT.set(this.probeCacheKey, true);
-            return {
-                dynamicMarkets: normalizeDynamicMarketData(data.dynamicMarkets ?? data[0] ?? []),
-                userMarkets: normalizeUserMarkets(data.userMarkets ?? data[1] ?? []),
-            };
-        } catch (error: any) {
-            if (!this.isMissingGetMarketStates(error)) {
-                throw error;
-            }
-
-            PROTOCOL_READER_SELECTOR_SUPPORT.set(this.probeCacheKey, false);
-            return this.getMarketStatesFallback(markets, account);
-        }
+        const data = await this.contract.getMarketStates(markets, account);
+        return {
+            dynamicMarkets: normalizeDynamicMarketData(data.dynamicMarkets ?? data[0] ?? []),
+            userMarkets: normalizeUserMarkets(data.userMarkets ?? data[1] ?? []),
+        };
     }
 
     async previewAssetImpact(user: address, collateral_ctoken: address, debt_ctoken: address, deposit_amount: bigint, borrow_amount: bigint) {
@@ -655,3 +552,4 @@ export class ProtocolReader {
         }
     }
 }
+

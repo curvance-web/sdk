@@ -338,70 +338,6 @@
   },
   {
     "type": "function",
-    "name": "getLeverageSnapshot",
-    "inputs": [
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "cToken",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "borrowableCToken",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "bufferTime",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "collateralUsd",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "debtUsd",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "collateralAssetPrice",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "sharePrice",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "debtAssetPrice",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "debtTokenBalance",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "oracleError",
-        "type": "bool",
-        "internalType": "bool"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "getDynamicMarketData",
     "inputs": [],
     "outputs": [
@@ -504,6 +440,70 @@
   },
   {
     "type": "function",
+    "name": "getLeverageSnapshot",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "cToken",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "borrowableCToken",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "bufferTime",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "collateralUsd",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "debtUsd",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "collateralAssetPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "sharePrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "debtAssetPrice",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "debtTokenBalance",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "oracleError",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "getLiquidationPrice",
     "inputs": [
       {
@@ -532,6 +532,264 @@
         "name": "errorHit",
         "type": "bool",
         "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getMarketStates",
+    "inputs": [
+      {
+        "name": "markets",
+        "type": "address[]",
+        "internalType": "address[]"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "dynamicMarkets",
+        "type": "tuple[]",
+        "internalType": "struct ProtocolReader.DynamicMarketData[]",
+        "components": [
+          {
+            "name": "_address",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "tokens",
+            "type": "tuple[]",
+            "internalType": "struct ProtocolReader.DynamicMarketToken[]",
+            "components": [
+              {
+                "name": "_address",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "totalSupply",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "exchangeRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "totalAssets",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "collateral",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "debt",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "sharePrice",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "assetPrice",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "sharePriceLower",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "assetPriceLower",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "borrowRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "predictedBorrowRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "utilizationRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "supplyRate",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "liquidity",
+                "type": "uint256",
+                "internalType": "uint256"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "userMarkets",
+        "type": "tuple[]",
+        "internalType": "struct ProtocolReader.UserMarket[]",
+        "components": [
+          {
+            "name": "_address",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "collateral",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxDebt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "debt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "positionHealth",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "cooldown",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "errorCodeHit",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "tokens",
+            "type": "tuple[]",
+            "internalType": "struct ProtocolReader.UserMarketToken[]",
+            "components": [
+              {
+                "name": "_address",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "userAssetBalance",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "userShareBalance",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "userUnderlyingBalance",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "userCollateral",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "userDebt",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "liquidationPrice",
+                "type": "uint256",
+                "internalType": "uint256"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getMarketSummaries",
+    "inputs": [
+      {
+        "name": "markets",
+        "type": "address[]",
+        "internalType": "address[]"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "userMarkets",
+        "type": "tuple[]",
+        "internalType": "struct ProtocolReader.UserMarketSummary[]",
+        "components": [
+          {
+            "name": "_address",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "collateral",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxDebt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "debt",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "positionHealth",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "cooldown",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "errorCodeHit",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ]
       }
     ],
     "stateMutability": "view"
@@ -628,40 +886,6 @@
       },
       {
         "name": "errorCode",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "getPriceSafely",
-    "inputs": [
-      {
-        "name": "asset",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "inUSD",
-        "type": "bool",
-        "internalType": "bool"
-      },
-      {
-        "name": "getLower",
-        "type": "bool",
-        "internalType": "bool"
-      },
-      {
-        "name": "errorCodeBreakpoint",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       }
