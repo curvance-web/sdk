@@ -8,6 +8,18 @@ import { Zappers } from "./Market";
 import { type SetupConfigSnapshot } from "../setup";
 import FormatConverter from "./FormatConverter";
 
+function resolveDefaultSetupConfig(context: string): SetupConfigSnapshot {
+    const config = (require("../setup") as typeof import("../setup")).setup_config;
+    if (config == undefined) {
+        throw new Error(
+            `Setup config is not configured for ${context}. ` +
+            `Pass setup explicitly or initialize setupChain() first.`,
+        );
+    }
+
+    return config;
+}
+
 export interface Swap {
     inputToken: address,
     inputAmount: bigint,
@@ -43,12 +55,12 @@ export class Zapper extends Calldata<IZapper> {
     type: ZapperTypes;
     setup: SetupConfigSnapshot;
 
-    constructor(address: address, signer: curvance_signer, type: ZapperTypes, setup: SetupConfigSnapshot) {
+    constructor(address: address, signer: curvance_signer, type: ZapperTypes, setup?: SetupConfigSnapshot) {
         super();
         this.address = address;
         this.signer = signer;
         this.type = type;
-        this.setup = setup;
+        this.setup = setup ?? resolveDefaultSetupConfig(`Zapper ${address}`);
         this.contract = contractSetup<IZapper>(signer, address, abi);
     }
 

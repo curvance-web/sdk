@@ -1,5 +1,5 @@
 import { Contract, TransactionResponse } from "ethers";
-import { address, curvance_read_provider, Percentage, TokenInput, USD, USD_WAD } from "../types";
+import { address, curvance_provider, Percentage, TokenInput, USD, USD_WAD } from "../types";
 import { CToken, ICToken, ZapperInstructions } from "./CToken";
 import { DynamicMarketToken, StaticMarketToken, UserMarketToken } from "./ProtocolReader";
 import { Market } from "./Market";
@@ -33,13 +33,13 @@ export class BorrowableCToken extends CToken {
     override contract: Contract & IBorrowableCToken;
 
     constructor(
-        provider: curvance_read_provider,
+        provider: curvance_provider,
         address: address,
         cache: StaticMarketToken & DynamicMarketToken & UserMarketToken,
         market: Market
     ) {
         super(provider, address, cache, market);
-        this.contract = contractSetup<IBorrowableCToken>(provider, address, borrowable_ctoken_abi);
+        this.contract = contractSetup<IBorrowableCToken>(this.provider, address, borrowable_ctoken_abi);
     }
 
     protected override getWriteContract() {

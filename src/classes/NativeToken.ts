@@ -1,5 +1,5 @@
 import Decimal from "decimal.js";
-import { ChainRpcPrefix, requireAccount, WAD } from "../helpers";
+import { ChainRpcPrefix, requireAccount, resolveReadProvider, WAD } from "../helpers";
 import { address, curvance_provider, curvance_read_provider, curvance_signer, TokenInput, USD } from "../types";
 import { OracleManager } from "./OracleManager";
 import { chain_config } from "../chains";
@@ -43,12 +43,11 @@ export class NativeToken {
     ) {
         const config = chain_config[chain];
         const legacySigner = "address" in provider ? provider as curvance_signer : null;
-        const legacyReadProvider = legacySigner?.provider as curvance_read_provider | null;
         const legacyAccount = legacySigner?.address as address | undefined;
         const resolvedProvider =
-            legacyReadProvider ??
-            resolveDefaultReadProvider() ??
-            provider as curvance_read_provider;
+            legacySigner == null
+                ? provider as curvance_read_provider
+                : resolveReadProvider(provider, `NativeToken ${chain}`);
 
         this.symbol = config.native_symbol;
         this.name = config.native_name || config.native_symbol;

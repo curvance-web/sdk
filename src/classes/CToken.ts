@@ -1,12 +1,12 @@
 import { Contract, TransactionResponse } from "ethers";
-import { contractSetup, BPS, ChangeRate, getRateSeconds, requireAccount, requireSigner, WAD, getChainConfig, EMPTY_ADDRESS, toDecimal, SECONDS_PER_YEAR, toBps, NATIVE_ADDRESS, UINT256_MAX, amplifyContractSlippage } from "../helpers";
+import { contractSetup, BPS, ChangeRate, getRateSeconds, requireAccount, requireSigner, resolveReadProvider, WAD, getChainConfig, EMPTY_ADDRESS, toDecimal, SECONDS_PER_YEAR, toBps, NATIVE_ADDRESS, UINT256_MAX, amplifyContractSlippage } from "../helpers";
 import { AdaptorTypes, DynamicMarketToken, StaticMarketToken, UserMarketToken } from "./ProtocolReader";
 import { ERC20 } from "./ERC20";
 import { Market, PluginTypes } from "./Market";
 import { Calldata } from "./Calldata";
 import Decimal from "decimal.js";
 import base_ctoken_abi from '../abis/BaseCToken.json';
-import { address, bytes, curvance_read_provider, curvance_signer, Percentage, TokenInput, USD, USD_WAD } from "../types";
+import { address, bytes, curvance_provider, curvance_read_provider, curvance_signer, Percentage, TokenInput, USD, USD_WAD } from "../types";
 import { Redstone } from "./Redstone";
 import { Zapper, ZapperTypes, zapperTypeToName } from "./Zapper";
 import { PositionManager, PositionManagerTypes } from "./PositionManager";
@@ -284,15 +284,15 @@ export class CToken extends Calldata<ICToken> {
     protected get account(): address | null { return this.market.account; }
 
     constructor(
-        provider: curvance_read_provider,
+        provider: curvance_provider,
         address: address,
         cache: StaticMarketToken & DynamicMarketToken & UserMarketToken,
         market: Market
     ) {
         super();
-        this.provider = provider;
+        this.provider = resolveReadProvider(provider, `CToken ${address}`);
         this.address = address;
-        this.contract = contractSetup<ICToken>(provider, address, base_ctoken_abi);
+        this.contract = contractSetup<ICToken>(this.provider, address, base_ctoken_abi);
         this.cache = cache;
         this.market = market;
 

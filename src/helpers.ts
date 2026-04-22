@@ -1,6 +1,6 @@
 import { Contract, parseUnits } from "ethers";
 import { Decimal } from "decimal.js";
-import { address, bytes, curvance_provider, curvance_signer, Percentage } from "./types";
+import { address, bytes, curvance_provider, curvance_read_provider, curvance_signer, Percentage } from "./types";
 import { chains } from "./contracts";
 import FormatConverter from "./classes/FormatConverter";
 
@@ -210,6 +210,30 @@ export function requireAccount(
     }
 
     return requireSigner(signer).address as address;
+}
+
+export function resolveReadProvider(
+    provider: curvance_provider,
+    context: string,
+): curvance_read_provider {
+    if (!("address" in provider)) {
+        return provider as curvance_read_provider;
+    }
+
+    const signerProvider = provider.provider as curvance_read_provider | null | undefined;
+    if (signerProvider != null) {
+        return signerProvider;
+    }
+
+    const defaultReadProvider = getSetupConfig()?.readProvider as curvance_read_provider | undefined;
+    if (defaultReadProvider != null) {
+        return defaultReadProvider;
+    }
+
+    throw new Error(
+        `Read provider is not configured for ${context}. ` +
+        `Pass a read provider explicitly, use a signer with .provider, or initialize setupChain() first.`,
+    );
 }
 
 export function contractSetup<I>(provider: curvance_provider, contractAddress: address, abi: any): Contract & I {

@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Api } from "../src/classes/Api";
+import { BorrowableCToken } from "../src/classes/BorrowableCToken";
+import { CToken } from "../src/classes/CToken";
 import { ERC20 } from "../src/classes/ERC20";
 import { Market } from "../src/classes/Market";
 import { NativeToken } from "../src/classes/NativeToken";
 import { OracleManager } from "../src/classes/OracleManager";
 import { OptimizerReader } from "../src/classes/OptimizerReader";
 import { ProtocolReader } from "../src/classes/ProtocolReader";
+import { Zapper } from "../src/classes/Zapper";
 import * as helpers from "../src/helpers";
 import * as setupModule from "../src/setup";
 
@@ -19,16 +22,16 @@ const originalOracleManagerGetPrice = OracleManager.prototype.getPrice;
 const originalSetupConfig = (setupModule as any).setup_config;
 const originalContractSetup = (helpers as any).contractSetup;
 
-function setSetupConfig(oracleManager: string) {
+function setSetupConfig(oracleManager: string, readProvider: any = {} as any) {
     (setupModule as any).setup_config = {
         chain: "monad-mainnet",
         contracts: {
             OracleManager: oracleManager,
         },
-        readProvider: {} as any,
+        readProvider,
         signer: null,
         account: null,
-        provider: {} as any,
+        provider: readProvider,
         api_url: "https://api.curvance.test",
         feePolicy: {
             getFeeBps: () => 0n,
@@ -75,6 +78,28 @@ test("NativeToken captures OracleManager context at construction time", async ()
 
     assert.equal(price, 222n);
     assert.deepEqual(observedAddresses, [ORACLE_A]);
+});
+
+test("ERC20 keeps an explicit detached read provider even when setup context exists", () => {
+    const defaultReadProvider = { id: "default" } as any;
+    const explicitReadProvider = { id: "explicit" } as any;
+
+    setSetupConfig(ORACLE_A, defaultReadProvider);
+    const token = new ERC20(explicitReadProvider, TOKEN as any);
+
+    assert.equal(token.provider, explicitReadProvider);
+});
+
+test("NativeToken keeps an explicit detached read provider even when setup context exists", () => {
+    const defaultReadProvider = { id: "default" } as any;
+    const explicitReadProvider = {
+        getBalance: async () => 0n,
+    } as any;
+
+    setSetupConfig(ORACLE_A, defaultReadProvider);
+    const token = new NativeToken("monad-mainnet", explicitReadProvider);
+
+    assert.equal(token.provider, explicitReadProvider);
 });
 
 test("ERC20 preserves legacy detached signer-in-provider writes", async () => {
@@ -126,6 +151,64 @@ test("NativeToken preserves legacy detached signer account inference", async () 
 
     assert.equal(balance, 123n);
     assert.equal(capturedAccount, legacySigner.address);
+});
+
+test("Zapper falls back to setup context when setup arg is omitted", () => {
+    setSetupConfig(ORACLE_A);
+    (setupModule as any).setup_config.contracts.ProtocolReader = READER;
+
+    const signer = {
+        address: "0x0000000000000000000000000000000000000abc",
+    } as any;
+    const runners: any[] = [];
+
+    (helpers as any).contractSetup = (runner: any) => {
+        runners.push(runner);
+        return {};
+    };
+
+    const zapper = new Zapper(READER as any, signer, "simple");
+
+    assert.equal(zapper.setup, (setupModule as any).setup_config);
+    assert.equal(runners[0], signer);
+});
+
+test("CToken and BorrowableCToken preserve legacy signer-backed provider inputs", () => {
+    (setupModule as any).setup_config = undefined;
+
+    const signerReadProvider = { id: "signer-read" } as any;
+    const legacySigner = {
+        address: "0x0000000000000000000000000000000000000abc",
+        provider: signerReadProvider,
+    } as any;
+    const runners: any[] = [];
+
+    (helpers as any).contractSetup = (runner: any) => {
+        runners.push(runner);
+        return {};
+    };
+
+    const market = {
+        address: READER,
+        setup: { chain: "monad-mainnet" },
+        plugins: {},
+        signer: null,
+        account: null,
+    } as any;
+    const cache = {
+        asset: {
+            address: TOKEN,
+            symbol: "TOK",
+        },
+        decimals: 18n,
+    } as any;
+
+    const ctoken = new CToken(legacySigner, TOKEN as any, cache, market);
+    const borrowable = new BorrowableCToken(legacySigner, TOKEN as any, cache, market);
+
+    assert.equal(ctoken.provider, signerReadProvider);
+    assert.equal(borrowable.provider, signerReadProvider);
+    assert.ok(runners.every((runner) => runner === signerReadProvider));
 });
 
 test("detached tokens fail clearly when OracleManager context was never configured", async () => {

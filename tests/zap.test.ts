@@ -85,6 +85,27 @@ describe('Zapping', { skip: FORK_SKIP }, () => {
         });
     });
 
+    test('SDK-004: same-token simple zap deposits without a swap route', async function() {
+        const [ market, cWMON, cUSDC ] = await framework.getMarket('WMON | USDC');
+        const depositAmount = Decimal(250);
+        const instructions = {
+            type: 'simple' as const,
+            inputToken: cUSDC.getAsset(true).address,
+            slippage: Decimal(0.005),
+        };
+
+        await cUSDC.approvePlugin('simple', 'zapper');
+        await cUSDC.approveZapAsset(instructions, depositAmount);
+        await cUSDC.depositAsCollateral(depositAmount, instructions);
+        await market.reloadUserData(account);
+
+        const userCollateral = cUSDC.getUserCollateral(false);
+        assert(
+            userCollateral.gte(depositAmount),
+            `Expected same-token zap deposit to post collateral, got ${userCollateral}`,
+        );
+    });
+
     // SDK-003: getAvailableTokens quote closure converted output amounts
     // using the INPUT token's decimals instead of the OUTPUT token's decimals.
     // For cross-decimal swaps (e.g. MON 18dec → USDC 6dec), the formatted
@@ -101,7 +122,7 @@ describe('Zapping', { skip: FORK_SKIP }, () => {
         assert.notEqual(wmonDecimals, usdcDecimals, 'Test requires tokens with different decimals');
 
         const zapTokens = await framework.curvance.dexAgg.getAvailableTokens(framework.provider, null);
-        const wmonZap = zapTokens.find(z => z.interface.address.toLowerCase() === wmonAddress.toLowerCase());
+        const wmonZap = zapTokens.find((z: any) => z.interface.address.toLowerCase() === wmonAddress.toLowerCase());
         assert(wmonZap, `Could not find zap token for WMON (${wmonAddress})`);
         assert(wmonZap!.quote, `Zap token for WMON has no quote function`);
 

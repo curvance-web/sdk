@@ -402,6 +402,54 @@ describe('Leverage', { skip: FORK_SKIP }, () => {
         );
     });
 
+    test('SDK-008: removeCollateralExact stays exact when well below the safe cap', async function() {
+        const [ market, cWMON, cUSDC ] = await framework.getMarket('WMON | USDC');
+
+        await cUSDC.approveUnderlying();
+        await cUSDC.deposit(Decimal(5000));
+
+        const initialDeposit = Decimal(1000);
+        await cWMON.approveUnderlying(initialDeposit);
+        await cWMON.depositAsCollateral(initialDeposit);
+
+        await cWMON.approvePlugin('simple', 'positionManager');
+        await cWMON.leverageUp(cUSDC, Decimal(3), 'simple', SIMPLE_SLIPPAGE);
+        await reloadUserState(market);
+
+        const maxRemovable = await cWMON.maxRemovableCollateral();
+        assert(maxRemovable.gt(Decimal(0)), `Expected positive removable collateral, got ${maxRemovable}`);
+
+        const requestedRemoval = maxRemovable.mul(Decimal(0.25));
+        assert(
+            requestedRemoval.gt(Decimal(0)),
+            `Expected a positive exact removal request below the safe cap, got ${requestedRemoval}`,
+        );
+
+        const collateralBefore = cWMON.getUserCollateral(false);
+
+        await framework.skipMarketCooldown(market.address);
+        await cWMON.removeCollateralExact(requestedRemoval);
+        await reloadUserState(market);
+
+        const collateralAfter = cWMON.getUserCollateral(false);
+        const removed = collateralBefore.sub(collateralAfter);
+
+        assert(
+            removed.sub(requestedRemoval).abs().lte(Decimal('0.000001')),
+            `Expected exact removal ${removed} to stay close to request ${requestedRemoval}`,
+        );
+
+        const remainingRemovable = await cWMON.maxRemovableCollateral();
+        assert(
+            remainingRemovable.gt(Decimal(0)),
+            `Expected removable collateral to remain after an exact sub-max removal, got ${remainingRemovable}`,
+        );
+        assert(
+            remainingRemovable.lt(maxRemovable),
+            `Expected removable collateral to decrease after exact removal: before ${maxRemovable}, after ${remainingRemovable}`,
+        );
+    });
+
     // SDK-003: Full deleverage at user-facing minimum slippage.
     // Bug: BasePositionManager__InvalidSlippage (0xeac6760a) was thrown
     // when going from L > ~4 to L=1 at 1% user slippage. Cause: the PR

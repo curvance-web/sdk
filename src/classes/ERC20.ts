@@ -1,5 +1,5 @@
 import { TransactionResponse } from "ethers";
-import { contractSetup, requireSigner, toBigInt, toDecimal, UINT256_MAX, WAD } from "../helpers";
+import { contractSetup, requireSigner, resolveReadProvider, toBigInt, toDecimal, UINT256_MAX, WAD } from "../helpers";
 import { Contract } from "ethers";
 import type { StaticMarketAsset } from "./ProtocolReader";
 import { address, curvance_provider, curvance_read_provider, curvance_signer, TokenInput, USD } from "../types";
@@ -60,11 +60,10 @@ export class ERC20 {
         signer?: curvance_signer | null,
     ) {
         const legacySigner = "address" in provider ? provider as curvance_signer : null;
-        const legacyReadProvider = legacySigner?.provider as curvance_read_provider | null;
         const resolvedProvider =
-            legacyReadProvider ??
-            resolveDefaultReadProvider() ??
-            provider as curvance_read_provider;
+            legacySigner == null
+                ? provider as curvance_read_provider
+                : resolveReadProvider(provider, `ERC20 ${address}`);
 
         this.provider = resolvedProvider;
         this.signer = signer ?? legacySigner ?? resolveDefaultSigner();
