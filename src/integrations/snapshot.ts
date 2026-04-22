@@ -75,12 +75,26 @@ function groupMarketsByReaderDeployment(markets: Market[]) {
     return groups.values();
 }
 
+function assertSnapshotCompatibleMarket(market: Market) {
+    if (market.userDataScope !== "summary") {
+        return;
+    }
+
+    throw new Error(
+        `snapshotMarket requires full user token data for ${market.address}. ` +
+        `Call market.reloadUserData(account), Market.reloadUserMarkets(...), or ` +
+        `takePortfolioSnapshot(account, { refresh: true }) before snapshotting a summary-refreshed market.`,
+    );
+}
+
 // ── Functions ────────────────────────────────────────────────────────────────
 
 /**
  * Snapshot a single market's user positions into plain numbers for JSON serialization.
  */
 export function snapshotMarket(market: Market): MarketSnapshot {
+    assertSnapshotCompatibleMarket(market);
+
     const positions: PositionSnapshot[] = [];
 
     for (const token of market.tokens) {
@@ -142,6 +156,11 @@ export async function takePortfolioSnapshot(
                 if (!dynamic || !user) continue;
                 market.applyState(dynamic, user);
             }
+        }
+    } else {
+        const summaryScopedMarkets = markets.filter((market) => market.userDataScope === "summary");
+        if (summaryScopedMarkets.length > 0) {
+            await Market.reloadUserMarkets(summaryScopedMarkets, account);
         }
     }
 

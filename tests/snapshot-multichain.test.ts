@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import Decimal from "decimal.js";
 import { Market } from "../src/classes/Market";
-import { takePortfolioSnapshot } from "../src/integrations/snapshot";
+import { ProtocolReader } from "../src/classes/ProtocolReader";
+import { snapshotMarket, takePortfolioSnapshot } from "../src/integrations/snapshot";
 
 const ACCOUNT = "0x00000000000000000000000000000000000000aa";
 const MARKET_A = "0x00000000000000000000000000000000000000a1";
 const MARKET_B = "0x00000000000000000000000000000000000000b2";
 const MARKET_C = "0x00000000000000000000000000000000000000c3";
+const READER = "0x00000000000000000000000000000000000000d4";
 
 function createToken(symbol: string, isBorrowable = false) {
     return {
@@ -188,4 +190,101 @@ test("takePortfolioSnapshot refresh groups explicit markets by deployment key", 
         `${MARKET_B}:${MARKET_B}`,
         `${MARKET_C}:${MARKET_C}`,
     ]);
+});
+
+test("takePortfolioSnapshot refresh keeps same-chain readers with different providers separate", async () => {
+    const calls: string[] = [];
+
+    const readerA = new ProtocolReader(READER as any, { label: "provider-a" } as any, "monad-mainnet");
+    readerA.getAllDynamicState = (async () => {
+        calls.push("A");
+        return {
+            dynamicMarket: [{ address: MARKET_A }],
+            userData: { markets: [{ address: MARKET_A }] },
+        };
+    }) as any;
+
+    const readerB = new ProtocolReader(READER as any, { label: "provider-b" } as any, "monad-mainnet");
+    readerB.getAllDynamicState = (async () => {
+        calls.push("B");
+        return {
+            dynamicMarket: [{ address: MARKET_B }],
+            userData: { markets: [{ address: MARKET_B }] },
+        };
+    }) as any;
+
+    const marketA = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Reader A",
+        chain: "monad-mainnet",
+        reader: readerA,
+    });
+    const marketB = createSnapshotMarket({
+        address: MARKET_B,
+        name: "Reader B",
+        chain: "monad-mainnet",
+        reader: readerB,
+    });
+
+    await takePortfolioSnapshot(ACCOUNT as any, {
+        markets: [marketA, marketB],
+        refresh: true,
+    });
+
+    assert.notEqual(readerA.batchKey, readerB.batchKey);
+    assert.deepEqual(calls, ["A", "B"]);
+});
+
+test("takePortfolioSnapshot promotes summary-scoped markets back to full user data", async () => {
+    let scope: "summary" | "full" = "summary";
+    let reloads = 0;
+
+    const market = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Summary Market",
+        chain: "monad-mainnet",
+        reader: {
+            batchKey: "monad-mainnet:summary-reader",
+            getMarketStates: async () => {
+                reloads += 1;
+                return {
+                    dynamicMarkets: [{ address: MARKET_A }],
+                    userMarkets: [{ address: MARKET_A }],
+                };
+            },
+        },
+        applyState: () => {
+            scope = "full";
+        },
+    });
+
+    Object.defineProperty(market, "userDataScope", {
+        get: () => scope,
+        configurable: true,
+    });
+
+    const snapshot = await takePortfolioSnapshot(ACCOUNT as any, {
+        markets: [market],
+    });
+
+    assert.equal(reloads, 1);
+    assert.equal(scope, "full");
+    assert.equal(snapshot.markets[0]?.marketAddress, MARKET_A);
+});
+
+test("snapshot helpers fail clearly after a summary-only refresh", () => {
+    const market = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Summary Market",
+        chain: "monad-mainnet",
+    });
+    Object.defineProperty(market, "userDataScope", {
+        value: "summary",
+        configurable: true,
+    });
+
+    assert.throws(
+        () => snapshotMarket(market),
+        /summary-refreshed market/i,
+    );
 });

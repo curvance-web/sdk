@@ -284,6 +284,42 @@ test("getStaticMarketData keeps caches isolated across namespaces", async () => 
     assert.equal(calls, 2);
 });
 
+test("same-chain readers with different providers keep static cache isolated", async () => {
+    const providerA = { label: "provider-a" } as any;
+    const providerB = { label: "provider-b" } as any;
+
+    let callsA = 0;
+    const readerA = new ProtocolReader(MARKET as any, providerA, "monad-mainnet");
+    readerA.contract = {
+        getStaticMarketData: async () => {
+            callsA += 1;
+            return [createRawStaticMarket(MARKET, TOKEN)];
+        },
+    } as any;
+
+    let callsB = 0;
+    const readerB = new ProtocolReader(MARKET as any, providerB, "monad-mainnet");
+    readerB.contract = {
+        getStaticMarketData: async () => {
+            callsB += 1;
+            return [createRawStaticMarket(MARKET_B, TOKEN_B)];
+        },
+    } as any;
+
+    const firstA = await readerA.getStaticMarketData();
+    const firstB = await readerB.getStaticMarketData();
+    const secondA = await readerA.getStaticMarketData();
+    const secondB = await readerB.getStaticMarketData();
+
+    assert.notEqual(readerA.batchKey, readerB.batchKey);
+    assert.equal(firstA[0]?.address, MARKET);
+    assert.equal(firstB[0]?.address, MARKET_B);
+    assert.equal(secondA[0]?.address, MARKET);
+    assert.equal(secondB[0]?.address, MARKET_B);
+    assert.equal(callsA, 1);
+    assert.equal(callsB, 1);
+});
+
 test("getStaticMarketData forceRefresh bypasses the short-lived cache", async () => {
     const reader = createReader();
     let calls = 0;

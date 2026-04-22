@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Market } from "../src/classes/Market";
 import { CToken } from "../src/classes/CToken";
+import { ProtocolReader } from "../src/classes/ProtocolReader";
 
 const ACCOUNT = "0x00000000000000000000000000000000000000aa";
 const MARKET_A = "0x00000000000000000000000000000000000000a1";
@@ -128,6 +129,43 @@ test("reloadUserMarkets batches addresses and applies responses by address", asy
         { market: MARKET_A, dynamic: MARKET_A, user: MARKET_A },
         { market: MARKET_B, dynamic: MARKET_B, user: MARKET_B },
     ]);
+});
+
+test("reloadUserMarkets keeps same-chain readers with different providers separate", async () => {
+    const calls: string[] = [];
+
+    const readerA = new ProtocolReader(MARKET_A as any, { label: "provider-a" } as any, "monad-mainnet");
+    readerA.getMarketStates = (async () => {
+        calls.push("A");
+        return {
+            dynamicMarkets: [{ address: MARKET_A }],
+            userMarkets: [{ address: MARKET_A }],
+        };
+    }) as any;
+
+    const readerB = new ProtocolReader(MARKET_A as any, { label: "provider-b" } as any, "monad-mainnet");
+    readerB.getMarketStates = (async () => {
+        calls.push("B");
+        return {
+            dynamicMarkets: [{ address: MARKET_B }],
+            userMarkets: [{ address: MARKET_B }],
+        };
+    }) as any;
+
+    const marketA = Object.create(Market.prototype) as Market;
+    marketA.address = MARKET_A as any;
+    marketA.reader = readerA as any;
+    marketA.applyState = (() => undefined) as any;
+
+    const marketB = Object.create(Market.prototype) as Market;
+    marketB.address = MARKET_B as any;
+    marketB.reader = readerB as any;
+    marketB.applyState = (() => undefined) as any;
+
+    await Market.reloadUserMarkets([marketA, marketB], ACCOUNT as any);
+
+    assert.notEqual(readerA.batchKey, readerB.batchKey);
+    assert.deepEqual(calls, ["A", "B"]);
 });
 
 test("applyState preserves prior token cache when dynamic data omits a token", () => {

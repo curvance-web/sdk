@@ -265,7 +265,7 @@ function createUserCacheFreshness(value: boolean): UserCacheFreshness {
 }
 
 export class CToken extends Calldata<ICToken> {
-    provider: curvance_read_provider;
+    override provider: curvance_read_provider;
     address: address;
     contract: Contract & ICToken;
     abi: any;

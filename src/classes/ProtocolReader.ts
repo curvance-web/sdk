@@ -151,6 +151,23 @@ type StaticMarketCacheEntry = {
     data: Promise<StaticMarketData[]>;
 };
 
+const PROVIDER_IDENTITIES = new WeakMap<object, number>();
+let nextProviderIdentity = 1;
+
+function getProviderIdentity(provider: curvance_read_provider): string {
+    if (typeof provider !== "object" || provider == null) {
+        return "provider:primitive";
+    }
+
+    let identity = PROVIDER_IDENTITIES.get(provider as object);
+    if (identity == undefined) {
+        identity = nextProviderIdentity++;
+        PROVIDER_IDENTITIES.set(provider as object, identity);
+    }
+
+    return `provider:${identity}`;
+}
+
 function normalizeDynamicMarketData(data: any[]): DynamicMarketData[] {
     return data.map((market: any) => ({
         address: market._address,
@@ -325,8 +342,9 @@ export class ProtocolReader {
         this.address = address;
         this.contract = contractSetup<IProtocolReader>(resolvedProvider, address, abi);
         const normalizedAddress = address.toLowerCase();
+        const providerIdentity = getProviderIdentity(resolvedProvider);
         this.batchKey =
-            cacheNamespace == null ? null : `${cacheNamespace}:${normalizedAddress}`;
+            cacheNamespace == null ? null : `${cacheNamespace}:${providerIdentity}:${normalizedAddress}`;
         this.staticMarketCacheKey = this.batchKey;
     }
 

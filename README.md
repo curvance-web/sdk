@@ -585,6 +585,8 @@ const snapshot = await takePortfolioSnapshot(account)
 const marketSnapshot = snapshotMarket(market)
 ```
 
+`snapshotMarket(...)` requires full user token data. `takePortfolioSnapshot(...)` will automatically promote summary-scoped markets back to full user data before reading token balances. If you previously called `refreshActiveUserMarketSummaries(...)` and need a direct single-market snapshot, run `market.reloadUserData(account)` or `Market.reloadUserMarkets(...)` first.
+
 ## ❯ Optimizer
 
 The `OptimizerReader` reads yield-rebalancing vaults that allocate across markets.

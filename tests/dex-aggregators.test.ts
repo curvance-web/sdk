@@ -8,6 +8,7 @@ import test from "node:test";
 import "../src/setup";
 import { KyberSwap } from "../src/classes/DexAggregators/KyberSwap";
 import { Kuru } from "../src/classes/DexAggregators/Kuru";
+import { MultiDexAgg } from "../src/classes/DexAggregators/MultiDexAgg";
 import FormatConverter from "../src/classes/FormatConverter";
 import type { address, bytes } from "../src/types";
 
@@ -131,4 +132,90 @@ test("Kuru.quoteAction keeps action.slippage raw even when feeBps is active (reg
         FormatConverter.bpsToBpsWad(50n),
         "Kuru slippage must remain raw; expansion is a KyberSwap-specific concern",
     );
+});
+
+test("KyberSwap.quoteMin returns the minimum output, not the optimistic output", async () => {
+    const kyber = new KyberSwap();
+    (kyber as any).quote = async () => ({
+        to: kyber.router,
+        calldata: "0x" as bytes,
+        min_out: 95n,
+        out: 100n,
+        raw: {} as any,
+    });
+
+    const minOut = await kyber.quoteMin(
+        WALLET,
+        TOKEN_IN,
+        TOKEN_OUT,
+        1_000n,
+        50n,
+    );
+
+    assert.equal(minOut, 95n);
+});
+
+test("Kuru.quoteMin returns the minimum output, not the optimistic output", async () => {
+    const kuru = new Kuru();
+    (kuru as any).quote = async () => ({
+        to: kuru.router,
+        calldata: "0x" as bytes,
+        min_out: 88n,
+        out: 91n,
+    });
+
+    const minOut = await kuru.quoteMin(
+        WALLET,
+        TOKEN_IN,
+        TOKEN_OUT,
+        1_000n,
+        50n,
+    );
+
+    assert.equal(minOut, 88n);
+});
+
+test("MultiDexAgg.quoteMin picks the route with the highest guaranteed output", async () => {
+    const conservative = {
+        dao: FEE_RECEIVER,
+        router: TOKEN_IN,
+        getAvailableTokens: async () => [],
+        quoteAction: async () => {
+            throw new Error("not used");
+        },
+        quoteMin: async () => 80n,
+        quote: async () => ({
+            to: TOKEN_IN,
+            calldata: "0x" as bytes,
+            min_out: 80n,
+            out: 90n,
+        }),
+    } as any;
+
+    const optimistic = {
+        dao: FEE_RECEIVER,
+        router: TOKEN_OUT,
+        getAvailableTokens: async () => [],
+        quoteAction: async () => {
+            throw new Error("not used");
+        },
+        quoteMin: async () => 50n,
+        quote: async () => ({
+            to: TOKEN_OUT,
+            calldata: "0x" as bytes,
+            min_out: 50n,
+            out: 100n,
+        }),
+    } as any;
+
+    const multi = new MultiDexAgg([optimistic, conservative]);
+    const minOut = await multi.quoteMin(
+        WALLET,
+        TOKEN_IN,
+        TOKEN_OUT,
+        1_000n,
+        50n,
+    );
+
+    assert.equal(minOut, 80n);
 });

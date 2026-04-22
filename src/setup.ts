@@ -174,7 +174,19 @@ export async function setupChain(
         readProviderOverride ?? chainReadProvider,
         readProviderOverride ? [chainReadProvider, ...readFallbacks] : readFallbacks,
     );
-    const account = options.account ?? (signer?.address as address | undefined) ?? null;
+    const signerAccount = (signer?.address as address | undefined) ?? null;
+    const requestedAccount = options.account ?? null;
+    if (
+        signerAccount != null &&
+        requestedAccount != null &&
+        signerAccount.toLowerCase() !== requestedAccount.toLowerCase()
+    ) {
+        throw new Error(
+            `setupChain('${chain}') cannot boot with signer ${signerAccount} and read account ${requestedAccount}. ` +
+            `Pass a matching account or omit options.account when a signer is connected.`,
+        );
+    }
+    const account = requestedAccount ?? signerAccount;
 
     const nextSetupConfig = createSetupConfig(
         chain,

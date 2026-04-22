@@ -199,7 +199,7 @@ test("setupChain wraps explicit read-provider overrides with chain fallbacks", a
         address: "0x000000000000000000000000000000000000dEaD",
     } as any;
     const customReadProvider = new JsonRpcProvider("https://wallet-rpc.example");
-    const customAccount = "0x0000000000000000000000000000000000000def";
+    const customAccount = fakeSigner.address;
 
     let captured: {
         provider: any;
@@ -245,6 +245,62 @@ test("setupChain wraps explicit read-provider overrides with chain fallbacks", a
     for (const fallback of monadRpc.fallbacks.map((url) => url.replace(/\/+$/, ""))) {
         assert.ok(urls.includes(fallback));
     }
+});
+
+test("setupChain rejects mismatched signer and explicit account", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const fakeSigner = {
+        address: "0x000000000000000000000000000000000000dEaD",
+    } as any;
+
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async () => {
+        throw new Error("should fail before Market.getAll");
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    await assert.rejects(
+        () =>
+            setupChain("monad-mainnet", fakeSigner, "https://api.example", {
+                account: "0x0000000000000000000000000000000000000def" as any,
+            }),
+        /cannot boot with signer .* and read account/i,
+    );
+});
+
+test("setupChain re-wraps an already retry-wrapped explicit read provider per invocation", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const baseProvider = new JsonRpcProvider("https://wallet-rpc.example");
+
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async () => [] as any) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+        resetRpcDebugState();
+    });
+
+    const firstWrapped = await (async () => {
+        await setupChain("monad-mainnet", null, "https://api.first.example", {
+            readProvider: baseProvider,
+        });
+        return setup_config.readProvider;
+    })();
+
+    await setupChain("monad-mainnet", null, "https://api.second.example", {
+        readProvider: firstWrapped,
+    });
+
+    assert.ok(isRetryableReadProvider(firstWrapped));
+    assert.ok(isRetryableReadProvider(setup_config.readProvider));
+    assert.notEqual(setup_config.readProvider, firstWrapped);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

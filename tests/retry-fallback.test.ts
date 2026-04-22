@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_RETRY_CONFIG, getRpcDebugSnapshot, resetRpcDebugState, RetryableProvider } from "../src/retry-provider";
+import {
+    configureRetries,
+    DEFAULT_RETRY_CONFIG,
+    getRpcDebugSnapshot,
+    resetRpcDebugState,
+    RetryableProvider,
+    wrapProviderWithRetries,
+} from "../src/retry-provider";
 import { TransportHarness, fail, hang, ok } from "./support/transport-harness";
 
 test.beforeEach(() => {
     resetRpcDebugState();
+    configureRetries(DEFAULT_RETRY_CONFIG);
 });
 
 test("read methods fall through to fallback when primary exhausts retries", async (t) => {
@@ -63,6 +71,33 @@ test("read provider methods fall through to fallback", async (t) => {
 
     const result = await wrapped.getBlockNumber();
     assert.equal(result, 123);
+    assert.deepEqual(harness.callLabels(), ["primary", "fallback"]);
+});
+
+test("waitForTransaction stays on the retry/fallback path", async (t) => {
+    const harness = new TransportHarness(t);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            methods: {
+                waitForTransaction: fail("timeout: primary waitForTransaction"),
+            },
+        },
+        {
+            fallbacks: [
+                {
+                    label: "fallback",
+                    methods: {
+                        waitForTransaction: ok({ status: 1 }),
+                    },
+                },
+            ],
+        },
+    );
+
+    const result = await wrapped.waitForTransaction("0xabc");
+    assert.deepEqual(result, { status: 1 });
     assert.deepEqual(harness.callLabels(), ["primary", "fallback"]);
 });
 
@@ -342,6 +377,50 @@ test("fallback remains sticky during cooldown, then returns to primary", async (
 
     assert.equal(harness.getCalls("primary", "eth_call").length, 2, "primary is bypassed during cooldown, then retried after it expires");
     assert.equal(harness.getCalls("fallback", "eth_call").length, 2, "fallback serves the initial failure and the sticky cooldown window");
+});
+
+test("configureRetries updates active fallback-backed wrapped providers", async (t) => {
+    const harness = new TransportHarness(t);
+
+    configureRetries({
+        ...DEFAULT_RETRY_CONFIG,
+        maxRetries: 0,
+        baseDelay: 1,
+        maxDelay: 1,
+        backoffMultiplier: 1,
+        retryableErrors: ["timeout"],
+    });
+
+    const primary = harness.createProvider({
+        label: "primary",
+        methods: {
+            getBlockNumber: [
+                fail("timeout: primary getBlockNumber"),
+                ok(123),
+            ],
+        },
+    });
+    const fallback = harness.createProvider({
+        label: "fallback",
+        methods: {
+            getBlockNumber: ok(456),
+        },
+    });
+
+    const wrapped = wrapProviderWithRetries(primary as any, fallback as any);
+
+    configureRetries({
+        maxRetries: 1,
+        baseDelay: 1,
+        maxDelay: 1,
+        backoffMultiplier: 1,
+        retryableErrors: ["timeout"],
+    });
+
+    const result = await wrapped.getBlockNumber();
+    assert.equal(result, 123);
+    assert.equal(harness.getCalls("primary", "getBlockNumber").length, 2);
+    assert.equal(harness.getCalls("fallback", "getBlockNumber").length, 0);
 });
 
 test("rpc debug snapshot records endpoint health without request params", async (t) => {

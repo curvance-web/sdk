@@ -17,6 +17,7 @@ const RPC_PROVIDER_METHODS = new Set([
     'getLogs',
     'getNetwork',
     'detectNetwork',
+    'waitForTransaction',
     'call',
     'estimateGas',
 ]);
@@ -153,6 +154,7 @@ interface ProviderState {
 
 const rpcDebugListeners = new Set<RpcDebugListener>();
 const rpcDebugStates = new Map<string, RpcEndpointDebugState>();
+const activeRetryProviders = new Set<RetryableProvider>();
 
 function normalizeRpcUrl(url: string | null | undefined): string | null {
     if (!url) {
@@ -234,6 +236,7 @@ class RetryableProvider {
         this.fallbackProviderStates = this.fallbackProviders.map((provider, index) =>
             this.createProviderState(provider, 'fallback', `fallback-${index + 1}`, index),
         );
+        activeRetryProviders.add(this);
     }
 
     private async sleep(ms: number): Promise<void> {
@@ -791,6 +794,10 @@ class RetryableProvider {
                 if (prop === '_isRetryable') {
                     return true;
                 }
+
+                if (prop === '_retryableTarget') {
+                    return target;
+                }
                 
                 // Wrap the main RPC send method
                 if (prop === 'send' && typeof original === 'function') {
@@ -896,6 +903,10 @@ export function configureRetries(config: Partial<RetryConfig> = {}): void {
     } else {
         globalRetryProvider.updateConfig(config);
     }
+
+    for (const retryProvider of activeRetryProviders) {
+        retryProvider.updateConfig(config);
+    }
 }
 
 /**
@@ -940,7 +951,10 @@ export function wrapProviderWithRetries(
             getGlobalRetryProvider().getConfig(),
             readFallback,
         );
-        return retryProvider.wrapProvider(provider);
+        const unwrappedProvider = (provider as any)._isRetryable
+            ? ((provider as any)._retryableTarget as curvance_read_provider | undefined) ?? provider
+            : provider;
+        return retryProvider.wrapProvider(unwrappedProvider);
     }
     return getGlobalRetryProvider().wrapProvider(provider);
 }
