@@ -85,7 +85,7 @@ export class TestFramework {
             setup.provider,
             setup.signer,
             chain,
-            await setupChain(chain, setup.signer, true, apiUrl, { readProvider: setup.provider }),
+            await setupChain(chain, setup.signer, apiUrl, { readProvider: setup.provider }),
             log,
             apiUrl
         );
@@ -119,7 +119,7 @@ export class TestFramework {
         this.provider = setup.provider;
         this.signer = setup.signer;
         try {
-            this.curvance = await setupChain(this.chain, this.signer, true, this.apiUrl, { readProvider: this.provider });
+            this.curvance = await setupChain(this.chain, this.signer, this.apiUrl, { readProvider: this.provider });
         } catch(e: any) {
             console.error(`[reset] setupChain failed: ${e.message}`);
             throw e;
@@ -157,7 +157,7 @@ export class TestFramework {
         await this.provider.send("anvil_impersonateAccount", [account]);
 
         const impersonatedSigner = await this.provider.getSigner(account);
-        this.curvance = await setupChain(this.chain, impersonatedSigner, true, this.apiUrl, { readProvider: this.provider });
+        this.curvance = await setupChain(this.chain, impersonatedSigner, this.apiUrl, { readProvider: this.provider });
     }
 
     async impersonateStop() {

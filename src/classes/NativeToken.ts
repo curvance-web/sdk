@@ -1,6 +1,6 @@
 import Decimal from "decimal.js";
 import { ChainRpcPrefix, requireAccount, WAD } from "../helpers";
-import { address, curvance_read_provider, curvance_signer, TokenInput, USD } from "../types";
+import { address, curvance_provider, curvance_read_provider, curvance_signer, TokenInput, USD } from "../types";
 import { OracleManager } from "./OracleManager";
 import { chain_config } from "../chains";
 
@@ -20,6 +20,10 @@ function resolveDefaultAccount(): address | null {
     return (getSetupConfig() as any)?.account ?? null;
 }
 
+function resolveDefaultReadProvider(): curvance_read_provider | undefined {
+    return (getSetupConfig() as any)?.readProvider as curvance_read_provider | undefined;
+}
+
 export class NativeToken {
     name   : string;
     symbol  : string;
@@ -32,17 +36,25 @@ export class NativeToken {
 
     constructor(
         chain: ChainRpcPrefix,
-        provider: curvance_read_provider,
+        provider: curvance_provider,
         oracleManagerAddress?: address,
         signer?: curvance_signer | null,
         account?: address | null,
     ) {
         const config = chain_config[chain];
+        const legacySigner = "address" in provider ? provider as curvance_signer : null;
+        const legacyReadProvider = legacySigner?.provider as curvance_read_provider | null;
+        const legacyAccount = legacySigner?.address as address | undefined;
+        const resolvedProvider =
+            legacyReadProvider ??
+            resolveDefaultReadProvider() ??
+            provider as curvance_read_provider;
+
         this.symbol = config.native_symbol;
         this.name = config.native_name || config.native_symbol;
-        this.provider = provider;
-        this.signer = signer ?? resolveDefaultSigner();
-        this.account = account ?? resolveDefaultAccount();
+        this.provider = resolvedProvider;
+        this.signer = signer ?? legacySigner ?? resolveDefaultSigner();
+        this.account = account ?? legacyAccount ?? resolveDefaultAccount();
         this.oracleManagerAddress = oracleManagerAddress ?? resolveDefaultOracleManagerAddress();
     }
 

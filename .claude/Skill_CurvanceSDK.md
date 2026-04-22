@@ -77,7 +77,7 @@ Full APIs: Context → class-specific sections.
 ## Data Flow (brief)
 
 ```
-setupChain(chain, provider, approval_protection, api_url)
+setupChain(chain, provider, api_url)
   → ProtocolReader + OracleManager + Api.getRewards()
   → Market.getAll():
       1. reader.getAllMarketData(user) — 3 parallel RPC calls
@@ -179,7 +179,7 @@ Invalidation: `invalidateUserStateQueries` → 13 query keys including `['setupc
 | CToken.getPrice() vs ERC20.getPrice() | Same behavior | CToken sync (bulk-loaded), ERC20 async (on-chain call) | [L] |
 | Slippage value in DEX aggregator `quoteAction` Swap struct | Pass raw BPS from `quote()` | Must be WAD for `_swapSafe`: `FormatConverter.bpsToBpsWad(slippage)`. Kuru was passing BPS — every leverage swap would revert | [H] |
 | Approval types | One flow | Three: ERC20 allowance, plugin delegate, zap asset approval | [L] |
-| `approval_protection` flag | SDK guards are safety net | Defaults `false`. App-side checks are the only gate | [L] |
+| `setupChain()` signature | Pass removed boolean third arg | Third arg is now `api_url`. High-level deposit/zap approval preflights always run | [H] |
 | Consuming external API response as `BigInt()` | `BigInt(response.field)` — crashes on non-numeric | `safeBigInt()` from `validation.ts`. KyberSwap/Kuru responses are untrusted — `"null"`, `""`, floats all throw `SyntaxError` | [H] |
 | Using DEX quote `to` address for on-chain execution | Trust API response (Kuru had no check) | `validateRouterAddress()` against expected. KyberSwap validates; Kuru didn't AND no on-chain `KuruChecker` — double gap | [H] |
 | Casting external API string to `address` type | `value as address` — compile-time only | `validateAddress()` via ethers `getAddress()` at trust boundaries. The type alias has no runtime enforcement | [H] |
@@ -223,7 +223,7 @@ Invalidation: `invalidateUserStateQueries` → 13 query keys including `['setupc
 |---|---|
 | SDK has two price scales that look similar but aren't — share price (`getPrice(false)`) vs asset price (`getPrice(true)`), BPS vs WAD slippage, sync CToken.getPrice vs async ERC20.getPrice. At every SDK boundary, verify which scale you're operating in | WGW: getPrice, slippage scale, FormatConverter rounding, rate vs utilization |
 | Every SDK write must go through `oracleRoute()` and every `oracleRoute()` must be `await`ed before any cache read. Direct contract calls bypass Redstone price updates; missing `await` reads pre-tx state | WGW: write to contract, cache reload. Transaction Flow Checklist |
-| The three approval types (ERC20 allowance, plugin delegate, zap asset) are independently checked and independently gated. `approval_protection` defaults false so app-side checks are the only gate. Each operation needs its specific approval sequence | WGW: approval types, approval_protection. V1 Mutation Rules |
+| The three approval types (ERC20 allowance, plugin delegate, zap asset) are independently checked. High-level deposit/zap flows always preflight the approvals they need before submit. Each operation still needs its specific approval sequence | WGW: approval types. V1 Mutation Rules |
 | Merkl API has three rate-adjacent fields that look similar but aren't — `opportunity.apr` (total APR, possibly uncapped), `rewardsRecord.total` (can differ from apr), `rewardsRecord.breakdowns[].value` (dollar amounts, not APR). Every Merkl rate must flow through `getOpportunityRate()` / `computeMerklRates()` in `shared/api/merkl.ts` — never read these fields directly | WGW: breakdown.value as APR, opportunity.apr divergence, SDK getMerkl* bypass |
 | Every app mutation has three infrastructure layers between store and SDK: `resolveFreshToken` (stale provider), `safeWaitForTx` (Monad nonce parsing), and component error dispatching (`catch`/`onError` → `TransactionFailure`). The third layer can override mutation-layer BAD_DATA recovery if it fires first — `classifyMutationError()` guards it. These aren't optional wrappers — without them, mutations silently fail on wallet connect, throw on successful broadcasts, or show false failure screens. Documentation that shows bare `token.method()` or `tx.wait()` in mutation context is outdated | WGW: store-held CToken, mutation wrapping, Promise.resolve variant. Transaction Flow Checklist |
 | The SDK has three external trust boundaries with different security postures: RPC (retried via proxy, deterministic errors filtered), Curvance API (URL-injectable, graceful degradation), DEX APIs (response calldata forwarded to on-chain — highest risk). Each needs its own validation layer (`validation.ts`). DEX calldata is validated on-chain by calldata checkers where they exist — but Kuru has no checker, only KyberSwap does. `@redstone-finance/sdk` pulls axios into the oracle price path via `requestDataPackages` | WGW: BigInt on API, router validation, address casting, fetch timeout, npm pinning. Chain config: `KyberSwapChecker` exists, no `KuruChecker` |

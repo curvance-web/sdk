@@ -6,7 +6,7 @@ Context file for Curvance SDK (contract-sdk). Load specific sections via grep on
 
 ## [SETUP_FLOW]
 
-### `setupChain(chain, provider?, approval_protection?, api_url?, options?)`
+### `setupChain(chain, provider?, api_url?, options?)`
 
 Bootstrap entry point. Must run before any SDK usage.
 
@@ -20,7 +20,6 @@ type SetupChainOptions = {
 async function setupChain(
   chain: ChainRpcPrefix,
   provider: curvance_provider | null = null,
-  approval_protection: boolean = false,
   api_url: string = "https://api.curvance.com",
   options: SetupChainOptions = {},
 ): Promise<{
@@ -54,7 +53,6 @@ async function setupChain(
   signer: curvance_signer | null,
   account: address | null,
   provider: curvance_provider,   // deprecated alias: signer ?? readProvider
-  approval_protection: boolean,
   api_url: string,
   feePolicy: FeePolicy
 }
@@ -2056,7 +2054,7 @@ User calls SDK method (e.g., token.deposit(amount))
   │     this.zap(assets, zapInstructions, ...) → { calldata, calldata_overrides, zapper }
   │     Overrides include { to: zapper.address } and { value: amount } for native
   │
-  ├─ 4. Check approvals (if approval_protection enabled)
+├─ 4. Check approvals (always)
   │     _checkAssetApproval, _checkZapperApproval, _checkDepositApprovals
   │     THROWS if insufficient — does NOT auto-approve
   │
@@ -2195,15 +2193,9 @@ token.approveZapAsset(instructions, amount)      // approves inputToken to plugi
 // instructions must be an object { type, inputToken, slippage }, not 'none'
 ```
 
-### approval_protection Flag
+### Approval preflights
 
-```ts
-setup_config.approval_protection: boolean
-```
-
-When `true` (v2 default): `_checkAssetApproval`, `_checkZapperApproval`, `_checkDepositApprovals` run before every tx and THROW on insufficient approval. The v2 UI handles approvals before calling SDK methods, so throws indicate a bug.
-
-When `false`: all approval checks are skipped. The SDK assumes the caller has handled approvals externally. Useful for scripts or testing where approvals are pre-set.
+High-level deposit-style writes always run `_checkAssetApproval`, `_checkZapperApproval`, and `_checkDepositApprovals` before submit and THROW on insufficient approval. The SDK does not auto-approve. Callers satisfy the relevant approval path explicitly via `approveUnderlying`, `approveZapAsset`, and `approvePlugin`.
 
 ### v2 Approval Flow (UI-side, before SDK call)
 

@@ -178,6 +178,12 @@ interface ResolveLeverageUpPreviewParams {
     depositAssets?: bigint;
 }
 
+interface TokenApprovalTarget {
+    token: ERC20;
+    spender: address;
+    spenderLabel: string;
+}
+
 export interface ZapToken {
     interface: NativeToken | ERC20;
     type: ZapperTypes;
@@ -635,6 +641,18 @@ export class CToken extends Calldata<ICToken> {
         return asErc20 ? await this.getUnderlyingVault().fetchAsset(true) : await this.getUnderlyingVault().fetchAsset(false);
     }
 
+    async getExpectedVaultShares(assets: bigint) {
+        const vault = this.getUnderlyingVault();
+        const vaultSharesRaw = await vault.previewDeposit(assets);
+
+        // Vault/native-vault flows mint vault shares first, then convert those
+        // into Curvance shares. Buffer the inner preview so exchange-rate drift
+        // between quote time and inclusion cannot trip the outer expectedShares
+        // check on otherwise-valid deposits/leverage/zaps.
+        const vaultShares = vaultSharesRaw * (10000n - LEVERAGE.SHARES_BUFFER_BPS) / 10000n;
+        return this.convertToShares(vaultShares);
+    }
+
     getAsset(asErc20: true): ERC20;
     getAsset(asErc20: false): address;
     getAsset(asErc20: boolean) {
@@ -754,36 +772,29 @@ export class CToken extends Calldata<ICToken> {
     }
 
     async isZapAssetApproved(instructions: ZapperInstructions, amount: bigint) {
-        if(instructions == 'none' || typeof instructions != 'object') {
+        if(instructions == 'none') {
             return true;
         }
 
-        if(instructions.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
+        const approvalTarget = await this.resolveZapApprovalTarget(instructions);
+        if(approvalTarget == null) {
             return true;
         }
 
-        const signer = this.requireSigner();
-        const asset =  new ERC20(this.provider, instructions.inputToken, undefined, undefined, signer);
-        const plugin = this.getPluginAddress(instructions.type, 'zapper');
-
-        const allowance = await asset.allowance(signer.address as address, plugin!);
-        return allowance >= amount;
+        return this.hasTokenApproval(approvalTarget, amount);
     }
 
     async approveZapAsset(instructions: ZapperInstructions, amount: TokenInput | null) {
-        if(instructions == 'none' || typeof instructions != 'object') {
+        if(instructions == 'none') {
             throw new Error("Plugin does not have an associated contract");
         }
 
-        if(instructions.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
+        const approvalTarget = await this.resolveZapApprovalTarget(instructions);
+        if(approvalTarget == null) {
             return;
         }
 
-        const signer = this.requireSigner();
-        const asset =  new ERC20(this.provider, instructions.inputToken, undefined, undefined, signer);
-        const plugin = this.getPluginAddress(instructions.type, 'zapper');
-
-        return asset.approve(plugin!, amount);
+        return approvalTarget.token.approve(approvalTarget.spender, amount);
     }
 
     async isPluginApproved(plugin: ZapperTypes | PositionManagerTypes, type: PluginTypes) {
@@ -1615,7 +1626,7 @@ export class CToken extends Calldata<ICToken> {
         borrowToken: BorrowableCToken,
         currentLeverage: Decimal,
         newLeverage: Decimal,
-        type: PositionManagerTypes,
+        type: 'simple',
         slippage_: Percentage = Decimal(0.05),
         simulate: boolean = false
     ): Promise<any> {
@@ -1635,6 +1646,9 @@ export class CToken extends Calldata<ICToken> {
             const snapshot = await this._getLeverageSnapshot(borrowToken);
             const { collateralAssetReduction } = this.previewLeverageDown(newLeverage, currentLeverage);
             const isFullDeleverage = newLeverage.equals(1);
+            const maxTokenCollateral = this.virtualConvertToAssets(
+                this.readFreshUserCache("userCollateral", "executing leverage down")
+            );
 
             switch(type) {
                 case 'simple': {
@@ -1684,11 +1698,8 @@ export class CToken extends Calldata<ICToken> {
                         const overheadBps = LEVERAGE.DELEVERAGE_OVERHEAD_BPS + feeBps;
                         swapCollateral = debtInCollateral * (10000n + overheadBps) / 10000n;
 
-                        const maxCollateral = this.virtualConvertToAssets(
-                            this.readFreshUserCache("userCollateral", "executing leverage down")
-                        );
-                        if (swapCollateral > maxCollateral) {
-                            swapCollateral = maxCollateral;
+                        if (swapCollateral > maxTokenCollateral) {
+                            swapCollateral = maxTokenCollateral;
                         }
                     } else if (feeBps > 0n) {
                         // Partial deleverage: inflate swap size to compensate
@@ -1697,6 +1708,14 @@ export class CToken extends Calldata<ICToken> {
                         // the swap underdelivers and actual leverage is slightly
                         // higher than target.
                         swapCollateral = swapCollateral * 10000n / (10000n - feeBps);
+                    }
+
+                    if (!isFullDeleverage && swapCollateral > maxTokenCollateral) {
+                        const error = "Selected collateral token does not have enough posted collateral to reach the requested leverage target.";
+                        if (simulate) {
+                            return { success: false, error };
+                        }
+                        throw new Error(error);
                     }
 
                     const { action, quote } = await config.dexAgg.quoteAction(
@@ -1785,6 +1804,7 @@ export class CToken extends Calldata<ICToken> {
             let calldata: bytes;
 
             const depositAssets = FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals);
+            await this._checkTokenApproval(this.getPositionManagerDepositApprovalTarget(manager), depositAssets);
             await this._getLeverageSnapshot(borrow);
             const preview = this.previewDepositAndLeverage(multiplier, borrow, depositAssets);
             if (preview.borrowAssets === 0n) {
@@ -2017,22 +2037,10 @@ export class CToken extends Calldata<ICToken> {
                 zapAssets = FormatConverter.decimalToBigInt(amount, zapDecimals);
             }
         }
-        const zapType = typeof zap == 'object' ? zap.type : zap;
-        const isNative = zapType == 'native-simple' || zapType == 'native-vault' || zapType == 'none'
-            || (typeof zap == 'object' && zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase());
+        await this._checkDepositApprovals(zap, depositAssets, zapAssets);
 
         const default_calldata = this.getCallData("deposit", [depositAssets, receiver]);
         const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, false, default_calldata);
-
-        if(isNative) {
-            await this._checkAssetApproval(depositAssets);
-        } else {
-            const zapper = this.getZapper(zapType);
-            if(!zapper) {
-                throw new Error(`No zapper contract found for type '${zapType}' on ${this.symbol}`);
-            }
-            await this._checkDepositApprovals(zapper, zapAssets);
-        }
 
         return this.oracleRoute(calldata, calldata_overrides);
     }
@@ -2068,10 +2076,10 @@ export class CToken extends Calldata<ICToken> {
             }
         }
 
-        const default_calldata = this.getCallData("depositAsCollateral", [depositAssets, receiver]);
-        const { calldata, calldata_overrides, zapper } = await this.zap(zapAssets, zap, true, default_calldata);
+        await this._checkDepositApprovals(zap, depositAssets, zapAssets);
 
-        await this._checkDepositApprovals(zapper, zapAssets);
+        const default_calldata = this.getCallData("depositAsCollateral", [depositAssets, receiver]);
+        const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, true, default_calldata);
         return this.oracleRoute(calldata, calldata_overrides);
     }
 
@@ -2180,51 +2188,112 @@ export class CToken extends Calldata<ICToken> {
     }
 
     private async _checkZapperApproval(zapper: Zapper) {
-        if(!this.setup.approval_protection) {
+        const plugin_allowed = await this.isPluginApproved(zapper.type, 'zapper');
+        if (!plugin_allowed) {
+            throw new Error(`Please approve the ${zapper.type} Zapper to be able to move ${this.symbol} on your behalf.`);
+        }
+    }
+
+    private getDepositAssetApprovalTarget(): TokenApprovalTarget {
+        const asset = this.getAsset(true);
+        return {
+            token: asset,
+            spender: this.address,
+            spenderLabel: this.symbol,
+        };
+    }
+
+    private getPositionManagerDepositApprovalTarget(manager: PositionManager): TokenApprovalTarget {
+        return {
+            token: this.getAsset(true),
+            spender: manager.address,
+            spenderLabel: `${manager.type} PositionManager`,
+        };
+    }
+
+    private async resolveZapApprovalTarget(instructions: ZapperInstructions): Promise<TokenApprovalTarget | null> {
+        const zapType = typeof instructions == 'object' ? instructions.type : instructions;
+        if(zapType == 'none') {
+            return null;
+        }
+
+        const spender = this.getPluginAddress(zapType, 'zapper');
+
+        if(spender == null) {
+            throw new Error("Plugin does not have an associated contract");
+        }
+
+        switch(zapType) {
+            case 'native-vault':
+            case 'native-simple':
+                return null;
+            case 'vault':
+                return {
+                    token: await this.getVaultAsset(true),
+                    spender,
+                    spenderLabel: `${zapType} Zapper`,
+                };
+            case 'simple':
+                if(typeof instructions != 'object') {
+                    throw new Error("Input token must be provided for simple zap approval");
+                }
+
+                if(instructions.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
+                    return null;
+                }
+
+                return {
+                    token: new ERC20(this.provider, instructions.inputToken, undefined, undefined, this.signer),
+                    spender,
+                    spenderLabel: `${zapType} Zapper`,
+                };
+        }
+    }
+
+    private async hasTokenApproval(target: TokenApprovalTarget, amount: bigint) {
+        const owner = this.getAccountOrThrow();
+        const allowance = await target.token.allowance(owner, target.spender);
+        return allowance >= amount;
+    }
+
+    private async _checkTokenApproval(target: TokenApprovalTarget, amount: bigint) {
+        const allowance = await this.hasTokenApproval(target, amount);
+        if(allowance) {
             return;
         }
 
-        if (this.setup.approval_protection && zapper) {
-            const plugin_allowed = await this.isPluginApproved(zapper.type, 'zapper');
-            if (!plugin_allowed) {
-                throw new Error(`Please approve the ${zapper.type} Zapper to be able to move ${this.symbol} on your behalf.`);
+        let tokenLabel = target.token.symbol ?? target.token.address;
+        if(target.token.symbol == undefined) {
+            try {
+                tokenLabel = await target.token.fetchSymbol();
+            } catch {
+                tokenLabel = target.token.address;
             }
         }
+
+        throw new Error(`Please approve the ${tokenLabel} token for ${target.spenderLabel}`);
     }
 
-    private async _checkErc20Approval(erc20_address: address, amount: bigint, spender: address) {
-        const signer = this.requireSigner();
-        const erc20 = new ERC20(this.provider, erc20_address, undefined, undefined, signer);
-        const allowance = await erc20.allowance(signer.address as address, spender);
-        if(allowance < amount) {
-            const symbol = await erc20.fetchSymbol();
-            throw new Error(`Please approve ${symbol} for ${spender}: ${amount}`);
-        }
-    }
+    private async _checkDepositApprovals(zap: ZapperInstructions, depositAssets: bigint, zapAssets: bigint) {
+        const zapType = typeof zap == 'object' ? zap.type : zap;
 
-    private async _checkAssetApproval(assets: bigint) {
-        if(!this.setup.approval_protection) {
-            return;
-        }
-
-        const asset = this.getAsset(true);
-        const owner = this.getAccountOrThrow();
-        const allowance = await asset.allowance(owner, this.address);
-        if(allowance < assets) {
-            throw new Error(`Please approve the ${asset.symbol} token for ${this.symbol}`);
-        }
-    }
-
-    private async _checkDepositApprovals(zapper: Zapper | null, assets: bigint) {
-        if(!this.setup.approval_protection) {
-            return;
-        }
-
-        if(zapper) {
+        if(zapType != 'none') {
+            const zapper = this.getZapper(zapType);
+            if(!zapper) {
+                throw new Error(`No zapper contract found for type '${zapType}' on ${this.symbol}`);
+            }
             await this._checkZapperApproval(zapper);
         }
 
-        await this._checkAssetApproval(assets);
+        const approvalTarget = zapType == 'none'
+            ? this.getDepositAssetApprovalTarget()
+            : await this.resolveZapApprovalTarget(zap);
+        if(approvalTarget == null) {
+            return;
+        }
+
+        const approvalAmount = zapType == 'none' ? depositAssets : zapAssets;
+        await this._checkTokenApproval(approvalTarget, approvalAmount);
     }
 
     async oracleRoute(calldata: bytes, override: { [key: string]: any } = {}): Promise<TransactionResponse> {

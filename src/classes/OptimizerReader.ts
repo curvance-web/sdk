@@ -1,5 +1,4 @@
 import { Contract } from "ethers";
-import { contractSetup } from "../helpers";
 import abi from '../abis/OptimizerReader.json'
 import { address, curvance_read_provider } from "../types";
 
@@ -44,8 +43,6 @@ export interface IOptimizerReader {
     getOptimizerAPY(optimizer: address): Promise<bigint>;
     getOptimizerMarketData(optimizers: address[]): Promise<any[]>;
     getOptimizerUserData(optimizers: address[], account: address): Promise<any[]>;
-    optimalDeposit(optimizer: address, assets: bigint): Promise<address>;
-    optimalWithdrawal(optimizer: address, assets: bigint): Promise<address>;
     optimalRebalance(optimizer: address, slippageBps: bigint): Promise<any>;
 }
 
@@ -80,7 +77,7 @@ export class OptimizerReader {
 
         this.provider = resolvedProvider;
         this.address = address;
-        this.contract = contractSetup<IOptimizerReader>(resolvedProvider, address, abi);
+        this.contract = new Contract(address, abi, resolvedProvider) as Contract & IOptimizerReader;
     }
 
     async getOptimizerAPY(optimizer: address): Promise<bigint> {
@@ -88,7 +85,7 @@ export class OptimizerReader {
     }
 
     async getOptimizerMarketData(optimizers: address[]): Promise<OptimizerMarketData[]> {
-        const data = await this.contract.getOptimizerMarketData(optimizers);
+        const data = await (this.contract as any).getOptimizerMarketData.staticCall(optimizers);
         return data.map((opt: any) => ({
             address: opt._address,
             asset: opt.asset,
@@ -111,14 +108,6 @@ export class OptimizerReader {
             shareBalance: BigInt(opt.shareBalance),
             redeemable: BigInt(opt.redeemable)
         }));
-    }
-
-    async optimalDeposit(optimizer: address, assets: bigint): Promise<address> {
-        return await this.contract.optimalDeposit(optimizer, assets);
-    }
-
-    async optimalWithdrawal(optimizer: address, assets: bigint): Promise<address> {
-        return await this.contract.optimalWithdrawal(optimizer, assets);
     }
 
     async optimalRebalance(

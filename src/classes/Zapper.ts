@@ -160,7 +160,7 @@ export class Zapper extends Calldata<IZapper> {
     async getZapVaultData(ctoken: CToken, amount: bigint) {
         const vault = await ctoken.getUnderlyingVault();
         const vault_underlying = await vault.fetchAsset(false);
-        const expected_shares = await ctoken.convertToShares(await vault.previewDeposit(amount));
+        const expected_shares = await ctoken.getExpectedVaultShares(amount);
 
         return {
             underlying_address: vault_underlying,
@@ -170,9 +170,11 @@ export class Zapper extends Calldata<IZapper> {
 
     async getNativeZapCalldata(ctoken: CToken, amount: bigint, collateralize: boolean, wrapped: boolean = false) {
         const vaultAssets = (ctoken.isVault || ctoken.isNativeVault)
-            ? await ctoken.getUnderlyingVault().previewDeposit(amount)
+            ? await ctoken.getExpectedVaultShares(amount)
             : amount;
-        const expected_shares = await ctoken.convertToShares(vaultAssets);
+        const expected_shares = (ctoken.isVault || ctoken.isNativeVault)
+            ? vaultAssets
+            : await ctoken.convertToShares(vaultAssets);
         const config = getChainConfig(this.setup.chain);
 
         const swap: Swap = {

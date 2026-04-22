@@ -134,16 +134,21 @@ export async function fetchMerklCampaignsBySymbol({
 
 type FetchOpportunitiesParams = FetchOptions & {
     action?: 'LEND' | 'BORROW';
+    chainId?: number;
 };
 
 export async function fetchMerklOpportunities({
     signal,
     action,
+    chainId,
 }: FetchOpportunitiesParams): Promise<MerklOpportunity[]> {
     const url = new URL(`${MERKL_API_BASE_URL}/opportunities?items=100&tokenTypes=TOKEN`);
     url.searchParams.set('mainProtocolId', PROTOCOL_ID);
     if (action) {
         url.searchParams.set('action', action);
+    }
+    if (chainId != undefined) {
+        url.searchParams.set('chainId', String(chainId));
     }
 
     const response = await fetchWithTimeout(url.toString(), { signal: signal ?? null, cache: 'no-store' });

@@ -2,7 +2,7 @@ import { TransactionResponse } from "ethers";
 import { contractSetup, requireSigner, toBigInt, toDecimal, UINT256_MAX, WAD } from "../helpers";
 import { Contract } from "ethers";
 import type { StaticMarketAsset } from "./ProtocolReader";
-import { address, curvance_read_provider, curvance_signer, TokenInput, USD } from "../types";
+import { address, curvance_provider, curvance_read_provider, curvance_signer, TokenInput, USD } from "../types";
 import { OracleManager } from "./OracleManager";
 import Decimal from "decimal.js";
 import FormatConverter from "./FormatConverter";
@@ -17,6 +17,10 @@ function resolveDefaultOracleManagerAddress(): address | undefined {
 
 function resolveDefaultSigner(): curvance_signer | null {
     return (getSetupConfig() as any)?.signer ?? null;
+}
+
+function resolveDefaultReadProvider(): curvance_read_provider | undefined {
+    return (getSetupConfig() as any)?.readProvider as curvance_read_provider | undefined;
 }
 
 export interface IERC20 {
@@ -49,18 +53,25 @@ export class ERC20 {
     protected oracleManagerAddress: address | undefined;
 
     constructor(
-        provider: curvance_read_provider,
+        provider: curvance_provider,
         address: address,
         cache: StaticMarketAsset | undefined = undefined,
         oracleManagerAddress?: address,
         signer?: curvance_signer | null,
     ) {
-        this.provider = provider;
-        this.signer = signer ?? resolveDefaultSigner();
+        const legacySigner = "address" in provider ? provider as curvance_signer : null;
+        const legacyReadProvider = legacySigner?.provider as curvance_read_provider | null;
+        const resolvedProvider =
+            legacyReadProvider ??
+            resolveDefaultReadProvider() ??
+            provider as curvance_read_provider;
+
+        this.provider = resolvedProvider;
+        this.signer = signer ?? legacySigner ?? resolveDefaultSigner();
         this.address = address;
         this.cache = cache;
         this.oracleManagerAddress = oracleManagerAddress ?? resolveDefaultOracleManagerAddress();
-        this.contract = contractSetup<IERC20>(provider, address, ERC20_ABI);
+        this.contract = contractSetup<IERC20>(resolvedProvider, address, ERC20_ABI);
     }
 
     get name() { return this.cache?.name; }

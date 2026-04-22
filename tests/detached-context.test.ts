@@ -7,6 +7,7 @@ import { NativeToken } from "../src/classes/NativeToken";
 import { OracleManager } from "../src/classes/OracleManager";
 import { OptimizerReader } from "../src/classes/OptimizerReader";
 import { ProtocolReader } from "../src/classes/ProtocolReader";
+import * as helpers from "../src/helpers";
 import * as setupModule from "../src/setup";
 
 const TOKEN = "0x00000000000000000000000000000000000000a1";
@@ -16,6 +17,7 @@ const READER = "0x00000000000000000000000000000000000000c1";
 
 const originalOracleManagerGetPrice = OracleManager.prototype.getPrice;
 const originalSetupConfig = (setupModule as any).setup_config;
+const originalContractSetup = (helpers as any).contractSetup;
 
 function setSetupConfig(oracleManager: string) {
     (setupModule as any).setup_config = {
@@ -27,7 +29,6 @@ function setSetupConfig(oracleManager: string) {
         signer: null,
         account: null,
         provider: {} as any,
-        approval_protection: false,
         api_url: "https://api.curvance.test",
         feePolicy: {
             getFeeBps: () => 0n,
@@ -39,6 +40,7 @@ function setSetupConfig(oracleManager: string) {
 test.afterEach(() => {
     OracleManager.prototype.getPrice = originalOracleManagerGetPrice;
     (setupModule as any).setup_config = originalSetupConfig;
+    (helpers as any).contractSetup = originalContractSetup;
 });
 
 test("ERC20 captures OracleManager context at construction time", async () => {
@@ -73,6 +75,57 @@ test("NativeToken captures OracleManager context at construction time", async ()
 
     assert.equal(price, 222n);
     assert.deepEqual(observedAddresses, [ORACLE_A]);
+});
+
+test("ERC20 preserves legacy detached signer-in-provider writes", async () => {
+    (setupModule as any).setup_config = undefined;
+
+    const legacySigner = {
+        address: "0x0000000000000000000000000000000000000abc",
+        provider: {} as any,
+    } as any;
+    const runners: any[] = [];
+
+    (helpers as any).contractSetup = (runner: any) => {
+        runners.push(runner);
+        return {
+            approve: async () => ({ hash: "0xapprove" }),
+        };
+    };
+
+    const token = new ERC20(
+        legacySigner,
+        TOKEN as any,
+        {
+            decimals: 18n,
+            symbol: "TOK",
+        } as any,
+    );
+    const tx = await token.approve(ORACLE_A as any, null);
+
+    assert.deepEqual(tx, { hash: "0xapprove" });
+    assert.equal(runners.at(-1), legacySigner);
+});
+
+test("NativeToken preserves legacy detached signer account inference", async () => {
+    (setupModule as any).setup_config = undefined;
+
+    let capturedAccount: string | null = null;
+    const legacySigner = {
+        address: "0x0000000000000000000000000000000000000abc",
+        provider: {
+            getBalance: async (account: string) => {
+                capturedAccount = account;
+                return 123n;
+            },
+        },
+    } as any;
+
+    const token = new NativeToken("monad-mainnet", legacySigner);
+    const balance = await token.balanceOf(null, false);
+
+    assert.equal(balance, 123n);
+    assert.equal(capturedAccount, legacySigner.address);
 });
 
 test("detached tokens fail clearly when OracleManager context was never configured", async () => {

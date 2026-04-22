@@ -96,7 +96,7 @@ describeFork("Fork integration", () => {
 
     test("public account-only setup rehydrates signer-created state on the fork", async () => {
         const { market: signerMarket, token: signerToken, depositAmount } = await resolveDepositTarget(framework);
-        const publicBefore = await setupChain(TEST_CHAIN, null, true, TEST_API_URL, {
+        const publicBefore = await setupChain(TEST_CHAIN, null, TEST_API_URL, {
             account: framework.account,
             readProvider: framework.provider,
         });
@@ -113,7 +113,7 @@ describeFork("Fork integration", () => {
         const signerAssetBalance = signerToken.cache.userAssetBalance;
         assert.ok(signerAssetBalance > 0n, "Expected signer-side cache to reflect the new deposit");
 
-        const publicAfter = await setupChain(TEST_CHAIN, null, true, TEST_API_URL, {
+        const publicAfter = await setupChain(TEST_CHAIN, null, TEST_API_URL, {
             account: framework.account,
             readProvider: framework.provider,
         });

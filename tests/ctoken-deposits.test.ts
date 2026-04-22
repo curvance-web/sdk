@@ -1,7 +1,7 @@
-import { test, describe } from 'node:test';
+import { afterEach, test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
-import { CToken, BorrowableCToken, FormatConverter } from '../src';
+import { CToken, BorrowableCToken, ERC20, FormatConverter, NATIVE_ADDRESS } from '../src';
 
 /**
  * Unit tests pinning the USD-valuation semantics of CToken getters after the
@@ -54,6 +54,19 @@ interface MockCache {
 }
 
 const WAD = 10n ** 18n;
+const originalErc20Allowance = ERC20.prototype.allowance;
+const originalErc20Approve = ERC20.prototype.approve;
+const originalErc20FetchSymbol = ERC20.prototype.fetchSymbol;
+const originalErc20DecimalsDescriptor = Object.getOwnPropertyDescriptor(ERC20.prototype, 'decimals');
+
+afterEach(() => {
+    ERC20.prototype.allowance = originalErc20Allowance;
+    ERC20.prototype.approve = originalErc20Approve;
+    ERC20.prototype.fetchSymbol = originalErc20FetchSymbol;
+    if (originalErc20DecimalsDescriptor) {
+        Object.defineProperty(ERC20.prototype, 'decimals', originalErc20DecimalsDescriptor);
+    }
+});
 
 function makeDefaultCache(): MockCache {
     return {
@@ -184,6 +197,248 @@ describe('getDeposits — Issue 3 fix (renamed from getTvl, valued from totalAss
         const sum = liquidity.plus(debtUsd);
         assert.ok(deposits.sub(sum).abs().lt(new Decimal('0.000001')),
             `expected deposits (${deposits}) ≈ liquidity (${liquidity}) + debt USD (${debtUsd}) = ${sum}`);
+    });
+});
+
+describe('Approval preflights â€” single-path execution', () => {
+    const OWNER = '0x00000000000000000000000000000000000000aa';
+    const CTOKEN = '0x00000000000000000000000000000000000000c1';
+    const SIMPLE_ZAPPER = '0x00000000000000000000000000000000000000b1';
+    const VAULT_ZAPPER = '0x00000000000000000000000000000000000000b2';
+    const INPUT_TOKEN = '0x00000000000000000000000000000000000000d1';
+    const VAULT_ASSET = '0x00000000000000000000000000000000000000d2';
+
+    function createExecutionToken() {
+        const token = createCToken() as CToken & {
+            __state: {
+                oracleRouteCalled: boolean;
+                assetChecked: boolean;
+            };
+        };
+
+        (token as any).cache = {
+            ...(token as any).cache,
+            symbol: 'cWMON',
+        };
+        (token as any).address = CTOKEN;
+        (token as any).provider = {} as any;
+        (token as any).market = {
+            signer: { address: OWNER },
+            account: OWNER,
+            setup: {
+                chain: 'monad-mainnet',
+                contracts: {
+                    OracleManager: ADDR,
+                    zappers: {
+                        simpleZapper: SIMPLE_ZAPPER,
+                        vaultZapper: VAULT_ZAPPER,
+                        nativeVaultZapper: VAULT_ZAPPER,
+                    },
+                },
+            },
+            plugins: {},
+        };
+        (token as any).__state = {
+            oracleRouteCalled: false,
+            assetChecked: false,
+        };
+        (token as any).ensureUnderlyingAmount = async (amount: Decimal) => amount;
+        (token as any).requireSigner = () => ({ address: OWNER } as any);
+        (token as any).getAccountOrThrow = () => OWNER;
+        (token as any).getCallData = () => '0xdeadbeef';
+        (token as any).zap = async (
+            _assets: bigint,
+            _zap: unknown,
+            _collateralize: boolean,
+            defaultCalldata: string,
+        ) => ({ calldata: defaultCalldata, calldata_overrides: {} });
+        (token as any).oracleRoute = async () => {
+            token.__state.oracleRouteCalled = true;
+            return {} as any;
+        };
+
+        return token;
+    }
+
+    test('zapper helper approvals target the real simple-zap input token and zapper', async () => {
+        const token = createExecutionToken();
+        const allowanceChecks: Array<{ owner: string; spender: string; token: string }> = [];
+        const approveCalls: Array<{ spender: string; token: string; amount: string | null }> = [];
+        const instructions = {
+            type: 'simple',
+            inputToken: INPUT_TOKEN,
+            slippage: new Decimal('0.005'),
+        } as const;
+
+        ERC20.prototype.allowance = async function (owner, spender) {
+            allowanceChecks.push({ owner, spender, token: this.address });
+            return 0n;
+        };
+        ERC20.prototype.approve = async function (spender, amount) {
+            approveCalls.push({
+                spender,
+                token: this.address,
+                amount: amount == null ? null : amount.toString(),
+            });
+            return {} as any;
+        };
+
+        const isApproved = await token.isZapAssetApproved(instructions, 10n);
+        await token.approveZapAsset(instructions, Decimal('1.25'));
+
+        assert.equal(isApproved, false);
+        assert.deepEqual(allowanceChecks, [
+            {
+                owner: OWNER,
+                spender: SIMPLE_ZAPPER,
+                token: INPUT_TOKEN,
+            },
+        ]);
+        assert.deepEqual(approveCalls, [
+            {
+                spender: SIMPLE_ZAPPER,
+                token: INPUT_TOKEN,
+                amount: '1.25',
+            },
+        ]);
+    });
+
+    test('deposit blocks submission when underlying allowance is missing', async () => {
+        const token = createExecutionToken();
+        (token as any).getAsset = () => ({
+            allowance: async () => {
+                token.__state.assetChecked = true;
+                return 0n;
+            },
+            symbol: 'WMON',
+        });
+
+        await assert.rejects(
+            () => token.deposit(Decimal(1)),
+            /Please approve the WMON token for cWMON/i,
+        );
+        assert.equal(token.__state.assetChecked, true);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('deposit blocks submission when zapper delegate approval is missing', async () => {
+        const token = createExecutionToken();
+        (token as any).getZapper = () => ({ type: 'simple' });
+        (token as any).isPluginApproved = async () => false;
+        (token as any).getAsset = () => ({
+            allowance: async () => {
+                token.__state.assetChecked = true;
+                return 10n ** 30n;
+            },
+            symbol: 'WMON',
+        });
+
+        await assert.rejects(
+            () => token.deposit(Decimal(1), 'simple' as any),
+            /Please approve the simple Zapper to be able to move cWMON on your behalf\./i,
+        );
+        assert.equal(token.__state.assetChecked, false);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('deposit blocks simple ERC20 zaps on the zap input allowance target, not the deposit asset', async () => {
+        const token = createExecutionToken();
+        const allowanceChecks: Array<{ owner: string; spender: string; token: string }> = [];
+        (token as any).isPluginApproved = async () => true;
+        (token as any).getAsset = () => ({
+            allowance: async () => {
+                token.__state.assetChecked = true;
+                return 10n ** 30n;
+            },
+            symbol: 'WMON',
+        });
+        ERC20.prototype.allowance = async function (owner, spender) {
+            allowanceChecks.push({ owner, spender, token: this.address });
+            return 0n;
+        };
+        ERC20.prototype.fetchSymbol = async function () {
+            return this.address === INPUT_TOKEN ? 'USDC' : 'UNKNOWN';
+        };
+        Object.defineProperty(ERC20.prototype, 'decimals', {
+            configurable: true,
+            get() {
+                return 6n;
+            },
+        });
+
+        await assert.rejects(
+            () =>
+                token.deposit(Decimal(1), {
+                    type: 'simple',
+                    inputToken: INPUT_TOKEN,
+                    slippage: new Decimal('0.005'),
+                }),
+            /Please approve the USDC token for simple Zapper/i,
+        );
+        assert.deepEqual(allowanceChecks, [
+            {
+                owner: OWNER,
+                spender: SIMPLE_ZAPPER,
+                token: INPUT_TOKEN,
+            },
+        ]);
+        assert.equal(token.__state.assetChecked, false);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('deposit skips ERC20 allowance checks for native simple zaps', async () => {
+        const token = createExecutionToken();
+        (token as any).isPluginApproved = async () => true;
+        (token as any).getAsset = () => ({
+            allowance: async () => {
+                throw new Error('deposit asset allowance should not be checked for native zaps');
+            },
+            symbol: 'WMON',
+        });
+        ERC20.prototype.allowance = async function () {
+            throw new Error(`unexpected ERC20 allowance check for ${this.address}`);
+        };
+
+        await token.deposit(Decimal(1), {
+            type: 'simple',
+            inputToken: NATIVE_ADDRESS,
+            slippage: new Decimal('0.005'),
+        });
+
+        assert.equal(token.__state.oracleRouteCalled, true);
+        assert.equal(token.__state.assetChecked, false);
+    });
+
+    test('depositAsCollateral checks vault zaps against the underlying vault asset allowance', async () => {
+        const token = createExecutionToken();
+        let vaultAllowanceCheck: { owner: string; spender: string } | null = null;
+        (token as any).isPluginApproved = async () => true;
+        (token as any).getAsset = () => ({
+            allowance: async () => {
+                token.__state.assetChecked = true;
+                return 10n ** 30n;
+            },
+            symbol: 'WMON',
+        });
+        (token as any).getVaultAsset = async () => ({
+            address: VAULT_ASSET,
+            symbol: 'MON',
+            allowance: async (owner: string, spender: string) => {
+                vaultAllowanceCheck = { owner, spender };
+                return 0n;
+            },
+        });
+
+        await assert.rejects(
+            () => token.depositAsCollateral(Decimal(1), 'vault' as any),
+            /Please approve the MON token for vault Zapper/i,
+        );
+        assert.deepEqual(vaultAllowanceCheck, {
+            owner: OWNER,
+            spender: VAULT_ZAPPER,
+        });
+        assert.equal(token.__state.assetChecked, false);
+        assert.equal(token.__state.oracleRouteCalled, false);
     });
 });
 

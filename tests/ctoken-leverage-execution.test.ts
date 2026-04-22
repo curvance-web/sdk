@@ -83,6 +83,7 @@ function createSimpleExecutionHarness({
 
     const manager = {
         address: '0x0000000000000000000000000000000000000fed',
+        type: 'simple',
         getLeverageCalldata(action: unknown, slippage: bigint) {
             leverageCalls.push({ action, slippage });
             return '0xleverage';
@@ -140,8 +141,17 @@ function createSimpleExecutionHarness({
     });
     (token as any).address = COLLATERAL;
     (token as any).getPositionManager = () => manager;
+    (token as any).getPositionManagerDepositApprovalTarget = () => ({
+        token: {
+            symbol: 'WMON',
+            allowance: async () => 10n ** 30n,
+        },
+        spender: manager.address,
+        spenderLabel: 'simple PositionManager',
+    });
     (token as any)._getLeverageSnapshot = async () => ({});
     (token as any)._checkPositionManagerApproval = async () => {};
+    (token as any)._checkTokenApproval = async () => {};
     (token as any).oracleRoute = async (calldata: string) => ({ hash: calldata });
     (token as any).ensureUnderlyingAmount = async (amount: Decimal) => amount;
     Object.defineProperty(token, 'currentChainConfig', {
@@ -166,6 +176,49 @@ function createSimpleExecutionHarness({
 }
 
 describe('CToken simple leverage execution', () => {
+    test('leverageDown fails closed for unsupported position manager types before quoting', async () => {
+        const { token, borrow, quoteCalls } = createSimpleExecutionHarness();
+
+        const result = await token.leverageDown(
+            borrow,
+            Decimal(2),
+            Decimal('1.5'),
+            'vault' as any,
+            Decimal(0.01),
+            true,
+        );
+
+        assert.deepEqual(result, {
+            success: false,
+            error: 'Unsupported position manager type',
+        });
+        assert.deepEqual(quoteCalls, []);
+    });
+
+    test('leverageDown fails closed when the selected token lacks enough collateral for the requested mixed-collateral deleverage', async () => {
+        const { token, borrow, quoteCalls, leverageCalls } = createSimpleExecutionHarness({
+            marketCollateralUsd: Decimal(100),
+            tokenCollateralUsd: Decimal(20),
+            userDebtUsd: Decimal(80),
+        });
+
+        const result = await token.leverageDown(
+            borrow,
+            token.getLeverage() ?? Decimal(1),
+            Decimal(2),
+            'simple',
+            Decimal(0.01),
+            true,
+        );
+
+        assert.deepEqual(result, {
+            success: false,
+            error: 'Selected collateral token does not have enough posted collateral to reach the requested leverage target.',
+        });
+        assert.deepEqual(quoteCalls, []);
+        assert.deepEqual(leverageCalls, []);
+    });
+
     test('leverageUp uses leverage-up fee policy output in quote and calldata', async () => {
         const { token, borrow, feeCalls, quoteCalls, leverageCalls } = createSimpleExecutionHarness({
             feeByOperation: {
@@ -206,6 +259,42 @@ describe('CToken simple leverage execution', () => {
                 amplifyContractSlippage(110n, Decimal(1), 11n),
             ),
         );
+    });
+
+    test('depositAndLeverage blocks submission when the underlying asset is not approved to the selected position manager', async () => {
+        const { token, borrow, quoteCalls, depositCalls } = createSimpleExecutionHarness();
+        const allowanceChecks: Array<{ owner: string; spender: string }> = [];
+
+        (token as any)._checkTokenApproval = (CToken.prototype as any)._checkTokenApproval;
+        (token as any).getPositionManagerDepositApprovalTarget = () => ({
+            token: {
+                symbol: 'WMON',
+                allowance: async (owner: string, spender: string) => {
+                    allowanceChecks.push({ owner, spender });
+                    return 0n;
+                },
+            },
+            spender: '0x0000000000000000000000000000000000000fed',
+            spenderLabel: 'simple PositionManager',
+        });
+
+        const result = await token.depositAndLeverage(
+            Decimal(10),
+            borrow,
+            Decimal('1.60'),
+            'simple',
+            Decimal(0.01),
+            true,
+        );
+
+        assert.equal(result.success, false);
+        assert.match(result.error ?? '', /Please approve the WMON token for simple PositionManager/i);
+        assert.deepEqual(allowanceChecks, [{
+            owner: ACCOUNT,
+            spender: '0x0000000000000000000000000000000000000fed',
+        }]);
+        assert.deepEqual(quoteCalls, []);
+        assert.deepEqual(depositCalls, []);
     });
 
     test('depositAndLeverage uses deposit-and-leverage fee policy output and post-deposit target in quote and calldata', async () => {

@@ -11,6 +11,7 @@ import { fetchMerklOpportunities, MerklOpportunity } from "../integrations/merkl
 import { BorrowableCToken } from "./BorrowableCToken";
 import FormatConverter from "./FormatConverter";
 import { Api, IncentiveResponse, Incentives, MilestoneResponse, Milestones } from "./Api";
+import { chain_config } from "../chains";
 
 export type MarketToken = CToken | BorrowableCToken;
 export type PluginTypes = 'zapper' | 'positionManager';
@@ -565,9 +566,13 @@ export class Market {
 
         for (const opportunity of opportunities) {
             const key = opportunity.identifier.toLowerCase();
-            if (!index.has(key)) {
-                index.set(key, opportunity);
+            const existing = index.get(key);
+            if (existing != undefined) {
+                existing.apr += opportunity.apr;
+                continue;
             }
+
+            index.set(key, { ...opportunity });
         }
 
         return index;
@@ -960,13 +965,14 @@ export class Market {
         const resolvedProvider = provider ?? resolvedSetup.readProvider;
         const resolvedSigner = signer === undefined ? resolvedSetup.signer : signer;
         const resolvedAccount = account === undefined ? resolvedSetup.account : account;
+        const chainId = chain_config[resolvedSetup.chain]?.chainId;
 
         const all_data = await reader.getAllMarketData(resolvedAccount);
         // Filter out USDC — DeFiLlama incorrectly returns YZM vault yield labeled as USDC
         const [yields, merklLendOpps, merklBorrowOpps] = await Promise.all([
             Api.fetchNativeYields(resolvedSetup).then(y => y.filter(y => y.symbol.toUpperCase() !== 'USDC')),
-            fetchMerklOpportunities({ action: 'LEND' }).catch(() => [] as MerklOpportunity[]),
-            fetchMerklOpportunities({ action: 'BORROW' }).catch(() => [] as MerklOpportunity[]),
+            fetchMerklOpportunities({ action: 'LEND', chainId }).catch(() => [] as MerklOpportunity[]),
+            fetchMerklOpportunities({ action: 'BORROW', chainId }).catch(() => [] as MerklOpportunity[]),
         ]);
         const deployIndex = this.buildDeployDataIndex(resolvedSetup);
         const lendOppIndex = this.buildOpportunityIndex(merklLendOpps);

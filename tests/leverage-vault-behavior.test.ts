@@ -7,6 +7,7 @@ import {
     FormatConverter,
     LEVERAGE,
     PositionManager,
+    Zapper,
     amplifyContractSlippage,
 } from '../src';
 
@@ -44,6 +45,7 @@ function createVaultExecutionHarness() {
 
     const manager = {
         address: '0x0000000000000000000000000000000000000abc',
+        type: 'vault',
         getLeverageCalldata(action: unknown, slippage: bigint) {
             leverageCalls.push({ action, slippage });
             return '0xleverage';
@@ -81,8 +83,17 @@ function createVaultExecutionHarness() {
     (token as any).address = COLLATERAL;
     (token as any).requireSigner = () => ({ address: ACCOUNT });
     (token as any).getPositionManager = () => manager;
+    (token as any).getPositionManagerDepositApprovalTarget = () => ({
+        token: {
+            symbol: 'COLL',
+            allowance: async () => 10n ** 30n,
+        },
+        spender: manager.address,
+        spenderLabel: 'vault PositionManager',
+    });
     (token as any)._getLeverageSnapshot = async () => ({});
     (token as any)._checkPositionManagerApproval = async () => {};
+    (token as any)._checkTokenApproval = async () => {};
     (token as any).oracleRoute = async () => ({ hash: '0x1' });
     (token as any).ensureUnderlyingAmount = async (amount: Decimal) => amount;
     (token as any).previewLeverageUp = (_newLeverage: Decimal) => createPreviewStub(_newLeverage);
@@ -102,6 +113,26 @@ function createVaultExecutionHarness() {
     };
 
     return { token, borrow, leverageCalls, depositCalls };
+}
+
+function createVaultZapHarness() {
+    const zapper = Object.create(Zapper.prototype) as Zapper;
+    const calls: Array<{ functionName: string; params: unknown[] }> = [];
+
+    (zapper as any).signer = { address: ACCOUNT };
+    (zapper as any).setup = {
+        chain: 'monad-mainnet',
+        feePolicy: {
+            feeReceiver: ACCOUNT,
+            getFeeBps: () => 0n,
+        },
+    };
+    (zapper as any).getCallData = (functionName: string, params: unknown[]) => {
+        calls.push({ functionName, params });
+        return params;
+    };
+
+    return { zapper, calls };
 }
 
 describe('vault leverage behavior', () => {
@@ -202,6 +233,61 @@ describe('vault leverage behavior', () => {
         );
 
         assert.equal(expectedShares, 49_991n);
+        assert.deepEqual(convertCalls, [49_990n]);
+    });
+
+    test('vault zaps buffer the inner previewDeposit result before encoding expectedShares', async () => {
+        const { zapper, calls } = createVaultZapHarness();
+        const token = Object.create(CToken.prototype) as CToken;
+        const convertCalls: bigint[] = [];
+
+        (token as any).address = COLLATERAL;
+        (token as any).isVault = true;
+        (token as any).isNativeVault = false;
+        (token as any).getUnderlyingVault = () => ({
+            fetchAsset: async () => COLLATERAL,
+            previewDeposit: async (assets: bigint) => {
+                assert.equal(assets, 1_000_000_000_000_000_000n);
+                return 50_000n;
+            },
+        });
+        (token as any).convertToShares = async (assets: bigint) => {
+            convertCalls.push(assets);
+            return assets + 1n;
+        };
+
+        await zapper.getVaultZapCalldata(token, 1_000_000_000_000_000_000n, true);
+
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0]?.functionName, 'swapAndDeposit');
+        assert.equal((calls[0]?.params[3] as bigint), 49_991n);
+        assert.deepEqual(convertCalls, [49_990n]);
+    });
+
+    test('native-vault zaps reuse the buffered vault-share helper before encoding expectedShares', async () => {
+        const { zapper, calls } = createVaultZapHarness();
+        const token = Object.create(CToken.prototype) as CToken;
+        const convertCalls: bigint[] = [];
+
+        (token as any).address = COLLATERAL;
+        (token as any).isVault = false;
+        (token as any).isNativeVault = true;
+        (token as any).getUnderlyingVault = () => ({
+            previewDeposit: async (assets: bigint) => {
+                assert.equal(assets, 1_000_000_000_000_000_000n);
+                return 50_000n;
+            },
+        });
+        (token as any).convertToShares = async (assets: bigint) => {
+            convertCalls.push(assets);
+            return assets + 1n;
+        };
+
+        await zapper.getNativeZapCalldata(token, 1_000_000_000_000_000_000n, false);
+
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0]?.functionName, 'swapAndDeposit');
+        assert.equal((calls[0]?.params[3] as bigint), 49_991n);
         assert.deepEqual(convertCalls, [49_990n]);
     });
 });

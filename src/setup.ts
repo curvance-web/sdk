@@ -17,7 +17,6 @@ export interface SetupConfigSnapshot {
     account: address | null;
     /** @deprecated Prefer readProvider/signer/account. */
     provider: curvance_provider;
-    approval_protection: boolean;
     api_url: string;
     feePolicy: FeePolicy;
 }
@@ -26,6 +25,12 @@ export let setup_config: SetupConfigSnapshot;
 
 export let all_markets: Market[] = [];
 let latest_setup_invocation = 0;
+let latest_published_setup_invocation = 0;
+const pending_setup_invocations = new Set<number>();
+const successful_setup_results = new Map<number, {
+    setupConfig: SetupConfigSnapshot;
+    markets: Market[];
+}>();
 
 export interface SetupChainOptions {
     /** Optional fee policy for SDK-initiated DEX swaps (zaps + leverage).
@@ -42,7 +47,6 @@ function createSetupConfig(
     readProvider: curvance_read_provider,
     signer: curvance_signer | null,
     account: address | null,
-    approval_protection: boolean,
     api_url: string,
     options: SetupChainOptions,
 ): SetupConfigSnapshot {
@@ -52,7 +56,6 @@ function createSetupConfig(
         signer,
         account,
         provider: signer ?? readProvider,
-        approval_protection,
         contracts: getContractAddresses(chain),
         api_url,
         feePolicy: options.feePolicy ?? NO_FEE_POLICY,
@@ -67,10 +70,71 @@ function validateSetupConfig(config: SetupConfigSnapshot) {
     }
 }
 
+async function validateSignerProviderChain(chain: ChainRpcPrefix, signer: curvance_signer | null) {
+    if (signer?.provider == null) {
+        return;
+    }
+
+    const expectedChainId = BigInt(chain_config[chain].chainId);
+    const network = await signer.provider.getNetwork();
+    const actualChainId = BigInt(network.chainId);
+
+    if (actualChainId !== expectedChainId) {
+        throw new Error(
+            `Signer provider is connected to chainId ${actualChainId} but setupChain('${chain}') expects ${expectedChainId}.`,
+        );
+    }
+}
+
+function getHighestPendingSetupInvocation() {
+    let highest = 0;
+    for (const invocation of pending_setup_invocations) {
+        if (invocation > highest) {
+            highest = invocation;
+        }
+    }
+    return highest;
+}
+
+function publishLatestSuccessfulSetup() {
+    const highestPending = getHighestPendingSetupInvocation();
+    let candidateInvocation = 0;
+    let candidate:
+        | {
+              setupConfig: SetupConfigSnapshot;
+              markets: Market[];
+          }
+        | undefined;
+
+    for (const [invocation, result] of successful_setup_results.entries()) {
+        if (
+            invocation > latest_published_setup_invocation &&
+            invocation > highestPending &&
+            invocation > candidateInvocation
+        ) {
+            candidateInvocation = invocation;
+            candidate = result;
+        }
+    }
+
+    if (candidate == undefined) {
+        return;
+    }
+
+    latest_published_setup_invocation = candidateInvocation;
+    setup_config = candidate.setupConfig;
+    all_markets = candidate.markets;
+
+    for (const invocation of [...successful_setup_results.keys()]) {
+        if (invocation <= latest_published_setup_invocation) {
+            successful_setup_results.delete(invocation);
+        }
+    }
+}
+
 export async function setupChain(
     chain: ChainRpcPrefix,
     provider: curvance_provider | null = null,
-    approval_protection: boolean = false,
     api_url: string = "https://api.curvance.com",
     options: SetupChainOptions = {},
 ) {
@@ -89,6 +153,7 @@ export async function setupChain(
     if(provider != null) {
         if("address" in provider) {
             signer = provider as curvance_signer;
+            await validateSignerProviderChain(chain, signer);
             // Wallet-primary for reads: when a wallet is connected, its own
             // provider is the primary read source. chainReadProvider + chain
             // fallbacks become the fallback chain via wrapProviderWithRetries
@@ -116,49 +181,54 @@ export async function setupChain(
         readProvider,
         signer,
         account,
-        approval_protection,
         api_url,
         options,
     );
     validateSetupConfig(nextSetupConfig);
 
     const setupInvocation = ++latest_setup_invocation;
-    const { milestones, incentives } = await Api.getRewards(nextSetupConfig);
-    const reader = new ProtocolReader(
-        nextSetupConfig.contracts.ProtocolReader as address,
-        nextSetupConfig.readProvider,
-        nextSetupConfig.chain,
-    );
-    const oracle_manager = new OracleManager(
-        nextSetupConfig.contracts.OracleManager as address,
-        nextSetupConfig.readProvider,
-    );
-    const markets = await Market.getAll(
-        reader,
-        oracle_manager,
-        nextSetupConfig.readProvider,
-        nextSetupConfig.signer,
-        nextSetupConfig.account,
-        milestones,
-        incentives,
-        nextSetupConfig,
-    );
+    pending_setup_invocations.add(setupInvocation);
 
-    if(setupInvocation === latest_setup_invocation) {
-        setup_config = nextSetupConfig;
-        all_markets = markets;
-    } else {
-        console.debug(
-            `[setupChain] invocation ${setupInvocation} superseded by ${latest_setup_invocation}, not publishing to globals`
+    try {
+        const { milestones, incentives } = await Api.getRewards(nextSetupConfig);
+        const reader = new ProtocolReader(
+            nextSetupConfig.contracts.ProtocolReader as address,
+            nextSetupConfig.readProvider,
+            nextSetupConfig.chain,
         );
-    }
+        const oracle_manager = new OracleManager(
+            nextSetupConfig.contracts.OracleManager as address,
+            nextSetupConfig.readProvider,
+        );
+        const markets = await Market.getAll(
+            reader,
+            oracle_manager,
+            nextSetupConfig.readProvider,
+            nextSetupConfig.signer,
+            nextSetupConfig.account,
+            milestones,
+            incentives,
+            nextSetupConfig,
+        );
 
-    return {
-        markets,
-        reader,
-        dexAgg: chain_config[chain].dexAgg,
-        global_milestone: milestones['global'] ?? null
-    };
+        pending_setup_invocations.delete(setupInvocation);
+        successful_setup_results.set(setupInvocation, {
+            setupConfig: nextSetupConfig,
+            markets,
+        });
+        publishLatestSuccessfulSetup();
+
+        return {
+            markets,
+            reader,
+            dexAgg: chain_config[chain].dexAgg,
+            global_milestone: milestones['global'] ?? null
+        };
+    } catch (error) {
+        pending_setup_invocations.delete(setupInvocation);
+        publishLatestSuccessfulSetup();
+        throw error;
+    }
 }
 
 export function getActiveUserMarkets(markets: Market[] = all_markets): Market[] {

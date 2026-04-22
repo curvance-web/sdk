@@ -27,14 +27,14 @@ test("buildDeployDataIndex normalizes addresses and keeps the first deployment e
     });
 });
 
-test("buildOpportunityIndex keeps the first match for a token identifier", () => {
+test("buildOpportunityIndex aggregates duplicate token identifiers deterministically", () => {
     const index = (Market as any).buildOpportunityIndex([
         { identifier: "0xAbC", apr: 12, name: "first", type: "merkl", tokens: [] },
         { identifier: "0xaBc", apr: 34, name: "second", type: "merkl", tokens: [] },
     ]);
 
     assert.equal(index.size, 1);
-    assert.equal(index.get("0xabc")?.apr, 12);
+    assert.equal(index.get("0xabc")?.apr, 46);
     assert.equal(index.get("0xabc")?.name, "first");
 });
 

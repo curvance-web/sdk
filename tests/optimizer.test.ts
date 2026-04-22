@@ -122,24 +122,6 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
         assert(entry.redeemable > 0n, 'redeemable should be > 0 after deposit');
     });
 
-    test('optimalDeposit returns a valid cToken', async () => {
-        const target = await reader.optimalDeposit(optimizerAddress, 1_000n * 10n ** 6n);
-
-        assert(
-            APPROVED_CTOKENS.includes(target),
-            `optimalDeposit returned ${target}, expected one of ${APPROVED_CTOKENS}`,
-        );
-    });
-
-    test('optimalWithdrawal returns a valid cToken', async () => {
-        const target = await reader.optimalWithdrawal(optimizerAddress, 1_000n * 10n ** 6n);
-
-        assert(
-            APPROVED_CTOKENS.includes(target),
-            `optimalWithdrawal returned ${target}, expected one of ${APPROVED_CTOKENS}`,
-        );
-    });
-
     test('optimalRebalance returns actions for all markets', async () => {
         const { actions, bounds } = await reader.optimalRebalance(optimizerAddress);
 

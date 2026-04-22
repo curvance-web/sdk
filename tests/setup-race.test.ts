@@ -9,11 +9,13 @@ import { all_markets, setup_config, setupChain } from "../src/setup";
 
 function defer<T>() {
     let resolve!: (value: T) => void;
-    const promise = new Promise<T>((res) => {
+    let reject!: (error?: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
         resolve = res;
+        reject = rej;
     });
 
-    return { promise, resolve };
+    return { promise, resolve, reject };
 }
 
 test("setupChain only publishes the latest invocation", async (t) => {
@@ -32,7 +34,7 @@ test("setupChain only publishes the latest invocation", async (t) => {
 
     Market.getAll = (async (_reader, _oracleManager, _provider, _signer, _account, _milestones, _incentives, setup) => {
         const activeSetup = setup!;
-        return [{ marker: activeSetup.api_url, approvalProtection: activeSetup.approval_protection }] as any;
+        return [{ marker: activeSetup.api_url }] as any;
     }) as typeof Market.getAll;
 
     t.after(() => {
@@ -40,8 +42,8 @@ test("setupChain only publishes the latest invocation", async (t) => {
         Market.getAll = originalGetAll;
     });
 
-    const olderSetup = setupChain("monad-mainnet", null, false, "https://api.older.example");
-    const newerSetup = setupChain("monad-mainnet", null, true, "https://api.newer.example");
+    const olderSetup = setupChain("monad-mainnet", null, "https://api.older.example");
+    const newerSetup = setupChain("monad-mainnet", null, "https://api.newer.example");
 
     rewardsB.resolve({ milestones: {}, incentives: {} });
     const newerResult = await newerSetup;
@@ -50,7 +52,6 @@ test("setupChain only publishes the latest invocation", async (t) => {
     const olderResult = await olderSetup;
 
     assert.equal(setup_config.api_url, "https://api.newer.example");
-    assert.equal(setup_config.approval_protection, true);
     assert.equal(setup_config.signer, null);
     assert.equal(setup_config.account, null);
     assert.equal(setup_config.provider, setup_config.readProvider);
@@ -58,6 +59,46 @@ test("setupChain only publishes the latest invocation", async (t) => {
     assert.notDeepEqual(all_markets, olderResult.markets);
     assert.equal((newerResult.markets[0] as any).marker, "https://api.newer.example");
     assert.equal((olderResult.markets[0] as any).marker, "https://api.older.example");
+});
+
+test("setupChain publishes the newest successful invocation after newer pending setups fail", async (t) => {
+    const rewardsA = defer<{ milestones: Record<string, any>; incentives: Record<string, any> }>();
+    const rewardsB = defer<{ milestones: Record<string, any>; incentives: Record<string, any> }>();
+
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+
+    let rewardsCall = 0;
+
+    Api.getRewards = (async () => {
+        rewardsCall += 1;
+        return rewardsCall === 1 ? rewardsA.promise : rewardsB.promise;
+    }) as typeof Api.getRewards;
+
+    Market.getAll = (async (_reader, _oracleManager, _provider, _signer, _account, _milestones, _incentives, setup) => {
+        const activeSetup = setup!;
+        return [{ marker: activeSetup.api_url }] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    const olderSetup = setupChain("monad-mainnet", null, "https://api.recover.example");
+    const newerSetup = setupChain("monad-mainnet", null, "https://api.fail.example");
+
+    rewardsA.resolve({ milestones: {}, incentives: {} });
+    const olderResult = await olderSetup;
+
+    assert.notDeepEqual(all_markets, olderResult.markets);
+
+    rewardsB.promise.catch(() => undefined);
+    rewardsB.reject(new Error("newer setup failed"));
+    await assert.rejects(() => newerSetup, /newer setup failed/i);
+
+    assert.equal(setup_config.api_url, "https://api.recover.example");
+    assert.deepEqual(all_markets, olderResult.markets);
 });
 
 test("setupChain keeps signer writes separate from dedicated read transport", async (t) => {
@@ -95,7 +136,7 @@ test("setupChain keeps signer writes separate from dedicated read transport", as
         Market.getAll = originalGetAll;
     });
 
-    await setupChain("monad-mainnet", fakeSigner, false, "https://api.example");
+    await setupChain("monad-mainnet", fakeSigner, "https://api.example");
 
     assert.equal(setup_config.signer, fakeSigner);
     assert.equal(setup_config.account, fakeSigner.address);
@@ -141,7 +182,7 @@ test("setupChain supports user-specific public reads without a signer", async (t
         Market.getAll = originalGetAll;
     });
 
-    await setupChain("monad-mainnet", null, false, "https://api.example", { account: account as any });
+    await setupChain("monad-mainnet", null, "https://api.example", { account: account as any });
 
     assert.equal(setup_config.signer, null);
     assert.equal(setup_config.account, account);
@@ -183,7 +224,7 @@ test("setupChain wraps explicit read-provider overrides with chain fallbacks", a
         resetRpcDebugState();
     });
 
-    await setupChain("monad-mainnet", fakeSigner, false, "https://api.example", {
+    await setupChain("monad-mainnet", fakeSigner, "https://api.example", {
         account: customAccount as any,
         readProvider: customReadProvider,
     });
@@ -226,6 +267,7 @@ test("setupChain uses the wallet's own provider as the read primary when signer 
     const originalGetRewards = Api.getRewards;
     const originalGetAll = Market.getAll;
     const walletRpcProvider = new JsonRpcProvider("https://wallet-rpc.example");
+    walletRpcProvider.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
     const fakeSigner = {
         address: "0x000000000000000000000000000000000000dEaD",
         provider: walletRpcProvider,
@@ -241,7 +283,7 @@ test("setupChain uses the wallet's own provider as the read primary when signer 
         resetRpcDebugState();
     });
 
-    await setupChain("monad-mainnet", fakeSigner, false, "https://api.example");
+    await setupChain("monad-mainnet", fakeSigner, "https://api.example");
 
     const snapshot = getRpcDebugSnapshot();
     const monadRpc = getChainRpcConfig("monad-mainnet");
@@ -293,7 +335,7 @@ test("setupChain falls back to chain provider when the signer has no .provider",
         resetRpcDebugState();
     });
 
-    await setupChain("monad-mainnet", fakeSignerNoProvider, false, "https://api.example");
+    await setupChain("monad-mainnet", fakeSignerNoProvider, "https://api.example");
 
     const snapshot = getRpcDebugSnapshot();
     const monadRpc = getChainRpcConfig("monad-mainnet");
@@ -311,6 +353,7 @@ test("explicit readProvider option wins over the signer's own provider", async (
     const originalGetRewards = Api.getRewards;
     const originalGetAll = Market.getAll;
     const walletRpcProvider = new JsonRpcProvider("https://wallet-rpc.example");
+    walletRpcProvider.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
     const fakeSigner = {
         address: "0x000000000000000000000000000000000000dEaD",
         provider: walletRpcProvider,
@@ -327,7 +370,7 @@ test("explicit readProvider option wins over the signer's own provider", async (
         resetRpcDebugState();
     });
 
-    await setupChain("monad-mainnet", fakeSigner, false, "https://api.example", {
+    await setupChain("monad-mainnet", fakeSigner, "https://api.example", {
         readProvider: overrideProvider,
     });
 
@@ -348,4 +391,45 @@ test("explicit readProvider option wins over the signer's own provider", async (
         !fallbackUrls.includes("https://wallet-rpc.example"),
         "wallet's provider must not appear in the fallback chain when an explicit override was given",
     );
+});
+
+test("setupChain fails fast when the signer provider is connected to a different chain", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const walletRpcProvider = new JsonRpcProvider("https://wallet-rpc.example");
+    walletRpcProvider.getNetwork = async () => ({ chainId: 421614n, name: "arb-sepolia" } as any);
+
+    const overrideProvider = new JsonRpcProvider("https://override-rpc.example");
+    overrideProvider.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
+
+    const fakeSigner = {
+        address: "0x000000000000000000000000000000000000dEaD",
+        provider: walletRpcProvider,
+    } as any;
+
+    let rewardsCalls = 0;
+    let marketCalls = 0;
+
+    Api.getRewards = (async () => {
+        rewardsCalls += 1;
+        return { milestones: {}, incentives: {} };
+    }) as typeof Api.getRewards;
+    Market.getAll = (async () => {
+        marketCalls += 1;
+        return [] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    await assert.rejects(
+        () => setupChain("monad-mainnet", fakeSigner, "https://api.example", {
+            readProvider: overrideProvider,
+        }),
+        /Signer provider is connected to chainId 421614 but setupChain\('monad-mainnet'\) expects 143\./i,
+    );
+    assert.equal(rewardsCalls, 0);
+    assert.equal(marketCalls, 0);
 });

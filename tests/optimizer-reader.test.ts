@@ -10,6 +10,17 @@ function createReader(): OptimizerReader {
     return Object.create(OptimizerReader.prototype) as OptimizerReader;
 }
 
+test("OptimizerReader only exposes live contract helpers", () => {
+    const reader = createReader() as any;
+
+    assert.equal(typeof reader.getOptimizerAPY, "function");
+    assert.equal(typeof reader.getOptimizerMarketData, "function");
+    assert.equal(typeof reader.getOptimizerUserData, "function");
+    assert.equal(typeof reader.optimalRebalance, "function");
+    assert.equal(reader.optimalDeposit, undefined);
+    assert.equal(reader.optimalWithdrawal, undefined);
+});
+
 test("getOptimizerAPY returns the raw WAD value from the contract", async () => {
     const reader = createReader();
     let capturedOptimizer: string | null = null;
@@ -25,6 +36,58 @@ test("getOptimizerAPY returns the raw WAD value from the contract", async () => 
 
     assert.equal(capturedOptimizer, OPTIMIZER);
     assert.equal(apy, 123_000_000_000_000_000n);
+});
+
+test("getOptimizerMarketData uses staticCall so read-provider consumers stay on the eth_call path", async () => {
+    const reader = createReader();
+    let capturedOptimizers: string[] | null = null;
+
+    const getOptimizerMarketData = Object.assign(
+        async () => {
+            throw new Error("direct send path should not be used");
+        },
+        {
+            staticCall: async (optimizers: string[]) => {
+                capturedOptimizers = optimizers;
+                return [{
+                    _address: OPTIMIZER,
+                    asset: CTOKEN_A,
+                    totalAssets: 123n,
+                    markets: [
+                        {
+                            _address: CTOKEN_A,
+                            allocatedAssets: 45n,
+                            liquidity: 67n,
+                        },
+                    ],
+                    totalLiquidity: 67n,
+                    sharePrice: 89n,
+                    performanceFee: 10n,
+                }];
+            },
+        },
+    );
+
+    reader.contract = {
+        getOptimizerMarketData,
+    } as any;
+
+    const result = await reader.getOptimizerMarketData([OPTIMIZER as any]);
+
+    assert.deepEqual(capturedOptimizers, [OPTIMIZER]);
+    assert.deepEqual(result, [{
+        address: OPTIMIZER,
+        asset: CTOKEN_A,
+        totalAssets: 123n,
+        markets: [{
+            address: CTOKEN_A,
+            allocatedAssets: 45n,
+            liquidity: 67n,
+        }],
+        totalLiquidity: 67n,
+        sharePrice: 89n,
+        performanceFee: 10n,
+    }]);
 });
 
 test("optimalRebalance forwards the default slippage and decodes actions plus bounds", async () => {

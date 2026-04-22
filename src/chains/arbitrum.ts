@@ -11,7 +11,7 @@ export const testnet: ChainConfig = {
     fallbackProviders: createChainFallbackProviders("arb-sepolia"),
     native_symbol: 'ETH',
     native_name: 'Ether',
-    wrapped_native: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1' as address,
+    wrapped_native: '0x980B62Da83eFf3D4576C647993b0c1D7faf17c73' as address,
     native_vaults: [],
     vaults: []
 }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import Decimal from "decimal.js";
 import { Api } from "../src/classes/Api";
 import { Market } from "../src/classes/Market";
 
@@ -111,7 +112,6 @@ function createSetup() {
         signer: null,
         account: ACCOUNT,
         provider: {} as any,
-        approval_protection: false,
         api_url: "https://api.curvance.test",
         feePolicy: {
             getFeeBps: () => 0n,
@@ -207,6 +207,56 @@ test("Market.getAll fails clearly when a static market is missing dynamic state"
         ),
         /Missing dynamic market data for 0x00000000000000000000000000000000000000a1 during Market\.getAll boot/i,
     );
+});
+
+test("Market.getAll forwards chainId to Merkl and aggregates duplicate opportunities during boot", async () => {
+    Api.fetchNativeYields = async () => [];
+    const merklCalls: Array<{ action: string | undefined; chainId: number | undefined }> = [];
+    merklModule.fetchMerklOpportunities = async (params: { action?: string; chainId?: number }) => {
+        merklCalls.push({ action: params.action, chainId: params.chainId });
+
+        if (params.action === "LEND") {
+            return [
+                { identifier: TOKEN_A, apr: 12, name: "lend-first", type: "merkl", tokens: [] },
+                { identifier: TOKEN_A.toUpperCase(), apr: 34, name: "lend-second", type: "merkl", tokens: [] },
+            ];
+        }
+
+        return [
+            { identifier: TOKEN_A, apr: 5, name: "borrow-first", type: "merkl", tokens: [] },
+            { identifier: TOKEN_A.toUpperCase(), apr: 7, name: "borrow-second", type: "merkl", tokens: [] },
+        ];
+    };
+
+    const reader = {
+        getAllMarketData: async () => ({
+            staticMarket: [createStaticMarket(MARKET_A, TOKEN_A)],
+            dynamicMarket: [createDynamicMarket(MARKET_A, TOKEN_A, 111n)],
+            userData: {
+                locks: [],
+                markets: [createUserMarket(MARKET_A, TOKEN_A, 11n)],
+            },
+        }),
+    } as any;
+
+    const markets = await Market.getAll(
+        reader,
+        {} as any,
+        {} as any,
+        null,
+        ACCOUNT as any,
+        {},
+        {},
+        createSetup() as any,
+    );
+
+    const token = markets[0]?.tokens[0] as any;
+    assert.deepEqual(merklCalls, [
+        { action: "LEND", chainId: 143 },
+        { action: "BORROW", chainId: 143 },
+    ]);
+    assert.ok(token.incentiveSupplyApy.eq(new Decimal(0.46)));
+    assert.ok(token.incentiveBorrowApy.eq(new Decimal(0.12)));
 });
 
 test("Market.hypotheticalLiquidityOf routes through ProtocolReader with the market address", async () => {
