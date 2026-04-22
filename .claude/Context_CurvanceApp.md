@@ -203,6 +203,12 @@ curvance-web/app/src/
 |---|---|
 | `useGetActiveRewardsQuery` | GET `/v1/rewards/active/{networkSlug}` → `{milestones: {market, tvl, multiplier}[]}` |
 
+### app/providers (query side-effects)
+
+| File / helper | Purpose | Notes |
+|---|---|---|
+| `modules/app/providers/health-alert-sync.ts` | Sync health-alert statuses/counts from the query cache into the notification store | Uses `shared/health-alerts.ts` helpers and can read both v2 `setupchain` payloads and legacy market-list payloads during migration. Legacy notification-store records key the wallet under `address`, not `user` |
+
 ---
 
 ## [SDK_OBJECT_MODEL]
@@ -348,6 +354,16 @@ getNetworkSlug(chainId)     // → string | undefined (for SDK setupChain)
 - Explore/Dashboard pages show empty state message, no skeletons
 - **No auto-switching.** Never switch wallet programmatically — not on connect, not on toggle, not before tx. Banner is the only chain-switch prompt. User clicks to switch.
 
+**Resolved chain seam:**
+- `useResolvedAccountChainId()` (`shared/hooks/use-resolved-account-chain-id.ts`) is the chain truth for E2E-aware consumers. It bridges seeded chain overrides over wagmi `useChainId()`.
+- `useCurrentChain()` (`modules/app/hooks/index.ts`) and `useEnsureChain()` (`blockchain/functions/handle-switch-chain.tsx`) intentionally read that resolved seam instead of raw wagmi chain state so display, unsupported-network gating, and confirm-time guards stay aligned under browser harnesses.
+- Notification/statusbar/task surfaces that need the current chain should resolve against the known chain registry when appropriate (`AllChainConfigs`), not only `SUPPORTED_CHAINS`, because task/testnet coverage can remain live outside the SDK-supported app list.
+
+**Seeded switch-chain E2E seam:**
+- `useHandleSwitchChain()` peeks for a seeded switch response through `shared/testing/curvance-e2e-bridge.ts` before the legacy no-connector/manual-switch guard.
+- Successful seeded switches patch the provider override state with `preserveRuntimeState: true`, which keeps toast/attempt history intact while updating the resolved chain snapshot.
+- Manual switch fallback is still the correct UX when no seeded execution exists and the wallet cannot or should not auto-switch.
+
 **`safeWaitForTx`** (`shared/functions/safe-tx-wait.ts`): Wraps SDK transaction promises to handle Monad RPC `nonce: null` bug. When ethers throws `INVALID_ARGUMENT` before `.wait()`, extracts tx hash from error object and falls back to `provider.waitForTransaction(hash)`. Used by all mutations in `market/v2/mutations/index.ts` and `dashboard/v2/queries/index.ts`.
 
 **Wallet disconnect:** `useSetupChainQuery` falls back to `useChainId()` when wallet chainId is undefined. On unsupported chain, query stays disabled (no fallback to DEFAULT_CHAIN for data — page shows empty state).
@@ -414,7 +430,7 @@ App and SDK use different RPC endpoints for the same chain. If either goes down 
 
 **Headers beyond CSP:**
 - `X-XSS-Protection` removed — deprecated by all modern browsers. Chrome removed XSS Auditor in 2019. CSP supersedes it.
-- `Cross-Origin-Opener-Policy: same-origin-allow-popups` added — prevents tabnabbing during WalletConnect popup/OAuth flows. Per Reown docs. Applied to both app and lander.
+- `Cross-Origin-Opener-Policy: same-origin-allow-popups` is a sensible hardening addition for WalletConnect popup/OAuth flows per Reown guidance, but do not assume it is present without checking the actual header source and live response.
 
 **img-src:**
 - Broadened to `https:` — app token icons are all local (`/public/`), but Merkl campaign metadata (`rewardToken.icon`) and Kuru's token list (`imageurl`) return arbitrary CDN URLs. Images can't execute code, so `https:` is low risk.
@@ -519,6 +535,19 @@ These stores are ephemeral for most fields but persist `currencyView` preference
 | `SelectedRowProvider` | `dashboard/providers` | `{selectedRow, currentView, navigateTo, goBack}` — navigation state machine with views: `'dashboard'\|'deposit'\|'withdraw'\|'borrow'\|'repay'\|'manage-collateral'\|null` |
 | `TransactionsStoreContext` | `app/providers` | Transaction store scoped to current wallet address |
 
+### Wallet/session and resolved-account seams
+
+- `useWalletSessionState()` (`shared/wallet-session-state.ts`) is the signer-aware helper. States: `disconnected`, `connecting`, `connected-no-signer`, `ready`. Use it for signer-gated query, mutation, and summary-action surfaces.
+- `useConnectionUiState()` (`shared/connection-ui-state.ts`) is UI-only connection state for shells that care about wallet presence, not signer readiness. Do not use it to gate signer-dependent work.
+- `useResolvedAccountAddress()` and `useResolvedAccountChainId()` are the E2E-aware address/chain seams. Statusbar, profile, notifications, tasks, and other browser-harnessed shell surfaces should prefer them over raw `useAccount()` / `useChainId()`.
+- `route-boundaries.test.ts` pins these seams across statusbar, notifications/tasks, dashboard, bytes, and market sidebars.
+
+### E2E override provider seam
+
+- `shared/testing/e2e-provider.tsx` is the single provider/storage boundary for seeded overrides.
+- `shared/testing/curvance-e2e-bridge.ts` exposes typed feature-facing hooks and runtime patch actions (`patchOverrides`) for account, chain, wallet-session, switch-chain, transaction execution, approval execution, drawer state, rewards, and toast events.
+- Feature code should consume bridge hooks, not raw override storage or resolver modules directly. That keeps test-format churn out of production seams.
+
 ### localStorage Direct Usage
 
 | Key Pattern | Used By | Data |
@@ -596,6 +625,23 @@ Columns: Type | Amount | Date | Actions (View tx link)
 ### Common Post-Transaction Sequence
 All mutations follow the same cleanup: `invalidateUserStateQueries(queryClient)` → complete tasks → update transaction store. Cooldown begins after deposit/borrow — `market.cooldown` provides the end Date.
 
+### Confirm-Time Chain Resolution
+
+- Confirm flows must derive `requiredChainId` from the market token's setup metadata via `resolveRequiredTransactionChainId(token)` in `shared/transactions/lifecycle.ts`.
+- All five transaction panels (`borrow`, `deposit`, `withdraw`, `repay`, `manage-collateral`) call `ensureChain(requiredChainId)` from that helper rather than echoing the wallet's current chain id back into the guard.
+- This protects supported-but-wrong network sessions; `useAccount().chainId` is not sufficient.
+
+### Shared Signer-Aware Summary Actions
+
+- `modules/market/components/transaction-summary-actions.tsx` is the shared summary-action seam.
+- It gates `Confirm`, `Connect Wallet`, and `Resolving Wallet` off `useWalletSessionState()` plus the shared wallet-connect opener, and is consumed by borrow, deposit, withdraw, repay, and manage-collateral summary flows.
+
+### Stale-Attempt Invalidation
+
+- `shared/transactions/use-transaction-attempt-guard.ts` owns `beginAttempt()`, `invalidateAttempts()`, and `isCurrentAttempt()`.
+- Use it around non-initial transaction states so disconnects, drawer teardown, or wallet/account resets invalidate late async callbacks before they can repaint `TransactionProcessing`, `TransactionCompleted`, or failure panels.
+- `route-boundaries.test.ts` pins the guard across the same five transaction panels.
+
 ### Transaction Record Shape
 ```ts
 type TransactionType = {
@@ -619,6 +665,17 @@ type TransactionType = {
 ```
 
 Persisted via `createTransactionsStore(address)` → localStorage key `transactions_{address}`. Dashboard history tab filters by `status === 'success'`.
+
+### Mutation Error Classification
+- `classifyMutationError()` in `shared/functions/handle-mutation-error.ts` checks more-specific recovery classes before generic DEX/slippage buckets.
+- Current ordering is: BAD_DATA broadcast-success fallback, user rejection, collateral shortfall, fee-config / calldata validation, then generic slippage selectors.
+- SDK-side pre-flight validation markers such as `"KyberSwap calldata"` must stay in the fee-config bucket before generic `"KyberSwap"` and `CALL_EXCEPTION` selectors, or the UI will misroute a config error into "Adjust Slippage".
+- `sim-error-map.test.ts` and `transaction-failure-collateral-copy.test.ts` are the regression sentinels for keeping new selector classes wired through both inline simulation copy and full `TransactionFailure` rendering.
+
+### Legacy Notification Action Bridge
+- Notification inbox health-alert actions still mount `AssetContextProvider + DepositDialogContent` from the v1 transaction layer.
+- The notification surface can migrate to v2 queries/helpers independently, but the "Add Collateral" action is not fully migrated until that dialog path is replaced.
+- Do not remove this bridge just because the notification query source changes.
 
 ---
 
@@ -853,7 +910,7 @@ Row order per token card: Underlying → Oracle → cToken → Market Manager.
 
 ## [SIDEBAR_REUSE]
 
-Migration complete. LeverageSlider, TokenSelect, amount-card rebuilt fresh. ApprovalButton, transaction-steps, useTokenStore, useDepositStore, useBalancePriceTokenQuery all wired. `v2-formatters.ts` replaced usdFormatter/tokenFormatter for sidebar displays (`formatSidebarUSD`, `formatSidebarToken`, `inputFontSize`, `ghostFontSize`, `shortenAddress` — import from `@/shared/v2-formatters`).
+Shared sidebar components: LeverageSlider, TokenSelect, amount-card, ApprovalButton, transaction-steps. Shared stores: useTokenStore, useDepositStore, useBalancePriceTokenQuery. Sidebar display formatters in `@/shared/v2-formatters`: `formatSidebarUSD`, `formatSidebarToken`, `inputFontSize`, `ghostFontSize`, `shortenAddress`.
 
 ---
 
@@ -868,14 +925,6 @@ Migration complete. LeverageSlider, TokenSelect, amount-card rebuilt fresh. Appr
 | Sidebar position summary | Skeleton rows | Hidden entirely |
 | IRM chart | Skeleton rectangle | "IRM data unavailable" |
 | Leverage chart | Show chart with default $10K/1x | — |
-
----
-
-## [BYTES_ENGAGEMENT]
-
-> **Migrated** to `Context_CurvanceBytes.md`. See that file for: Bustabyte game design (state machine, multiplier tiers, edge cases), partner task system (notification panel, task detection, completion flow), achievement badge inventory (24 badges), share card specs, referral page layout, rank tier visuals.
-
-> Onboarding tour UI patterns remain in `Context_CurvanceUI.md` → Onboarding Tour Patterns (UI implementation specs, not engagement feature logic).
 
 ---
 
@@ -1081,6 +1130,46 @@ Components with `flex lg:hidden` / `hidden lg:flex` have separate rendering path
 4. **Untracked changes:** New fix → document + add to tracker. Refactor → check for new bugs. Feature → note, out of scope
 5. **Check SDK deps** — if PR references fields like `newCollateral`, `newCollateralInAssets`, verify they exist in deployed SDK version
 6. **Update tracker** — mark fixed, add discovered, update status
+
+## [SOURCE_AUDIT_TESTS]
+
+Verified against:
+- `Dev\GitHub\app\src\shared\__tests__\route-boundaries.test.ts`
+- `Dev\GitHub\app\src\shared\__tests__\switch-chain-e2e-overrides.test.ts`
+- `Dev\GitHub\app\src\shared\__tests__\wallet-session-state.test.ts`
+- `Dev\GitHub\app\src\shared\__tests__\connection-ui-e2e-overrides.test.ts`
+- `Dev\GitHub\app\src\shared\__tests__\unsupported-chain-state.test.ts`
+- `Dev\GitHub\app\src\shared\transactions\__tests__\lifecycle.test.ts`
+- `Dev\GitHub\app\src\modules\market\components\deposit\__tests__\max-leverage-clamp.test.ts`
+- `Dev\GitHub\app\src\modules\market\components\deposit\__tests__\quote-retry-cap.test.ts`
+- `Dev\GitHub\app\src\modules\market\components\deposit\__tests__\sim-error-map.test.ts`
+- `Dev\GitHub\app\src\modules\market\components\deposit\__tests__\transaction-failure-collateral-copy.test.ts`
+
+Use source-audit tests when the bug class is "this code pattern or architectural boundary must remain present," not "this function should return X for mocked input."
+
+Pattern:
+- read source with `readFileSync`
+- anchor on a named hook, memo, JSX branch, or file slice
+- extract only the relevant region when possible
+- assert the invariant directly in source
+
+Current verified examples:
+
+| File | Invariant being pinned |
+|---|---|
+| `route-boundaries.test.ts` | page-boundary query composition stays explicit instead of leaking cross-route logic |
+| `route-boundaries.test.ts` | wallet/session/resolved-account seams stay on shared helpers across statusbar, notifications/tasks, connect-modal surfaces, summary actions, transaction-chain helpers, and stale-attempt guards |
+| `switch-chain-e2e-overrides.test.ts` | seeded switch-chain responses stay keyed by target chain and remain reusable across repeated attempts |
+| `wallet-session-state.test.ts`, `connection-ui-e2e-overrides.test.ts`, `unsupported-chain-state.test.ts` | wallet-session, connection-ui, and unsupported-network gating stay aligned under seeded account/chain overrides |
+| `shared/transactions/__tests__/lifecycle.test.ts` | required transaction chain resolution follows market setup metadata with sane default fallback |
+| `max-leverage-clamp.test.ts` | `Math.min(raw, token.maxLeverage)` clamp and dep-array coverage stay present |
+| `quote-retry-cap.test.ts` | bounded retry loop, terminal conditions, and auto-refetch gate stay wired together |
+| `sim-error-map.test.ts` | required selector coverage stays explicit in `simulationErrorMessage` |
+| `transaction-failure-collateral-copy.test.ts` | Root and Drawer both keep the collateral-shortfall branch and actionable copy |
+
+This pattern is cheap enough for routine CI, but intentionally brittle: if a refactor changes the structure, update the test anchor in the same change.
+
+When helper extraction or structural cleanup moves the invariant, convert or delete the stale source-audit in the same change instead of patching production code/comments just to keep the old regex green. Prefer stable semantic anchors (load-bearing hook names, explicit branches, exported helpers that own behavior) over helper-path churn or comment text. If the old seam disappears entirely, replace the audit with a behavior-level test on the new seam.
 
 ## [SENTINEL_VALUES]
 

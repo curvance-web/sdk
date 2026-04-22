@@ -6,18 +6,23 @@ Context file for Curvance SDK (contract-sdk). Load specific sections via grep on
 
 ## [SETUP_FLOW]
 
-### `setupChain(chain, provider?, approval_protection?, api_url?)`
+### `setupChain(chain, provider?, approval_protection?, api_url?, options?)`
 
 Bootstrap entry point. Must run before any SDK usage.
 
 ```ts
-type ChainRpcPrefix = 'monad-mainnet' | 'arb-sepolia';
+type SetupChainOptions = {
+  feePolicy?: FeePolicy;
+  account?: address | null;
+  readProvider?: curvance_read_provider | null;
+};
 
 async function setupChain(
   chain: ChainRpcPrefix,
-  provider: curvance_provider | null = null,    // null → uses chain_config default
-  approval_protection: boolean = false,          // throw on unapproved plugins
-  api_url: string = "https://api.curvance.com"
+  provider: curvance_provider | null = null,
+  approval_protection: boolean = false,
+  api_url: string = "https://api.curvance.com",
+  options: SetupChainOptions = {},
 ): Promise<{
   markets: Market[],
   reader: ProtocolReader,
@@ -27,65 +32,61 @@ async function setupChain(
 ```
 
 **Side effects:**
-- Sets module-level `setup_config` (chain, contracts, provider, approval_protection, api_url)
+- Sets module-level `setup_config`
 - Sets module-level `all_markets`
-- Wraps provider with retry logic (3 retries, exponential backoff 1s→10s)
+- Wraps the read transport with retry/fallback policy from `chains/rpc.ts`
 
-**Data model:** `setupChain` bulk-loads ALL market, token, and user data via `Market.getAll()` → ProtocolReader in a single batch of RPC calls. This populates `.cache` on every CToken and Market instance. The app reads from this bulk-loaded data everywhere — no per-read RPC calls needed. Selective refreshes happen on mutations (`oracleRoute` calls `reloadUserData` after every write). Current architecture is single-chain focused; future evolution will move static market data to an API layer for multi-chain support.
+**Data model:** `setupChain` bulk-loads all market, token, and user data via `Market.getAll()` -> ProtocolReader in a single batch of RPC calls. This populates `.cache` on every CToken and Market instance. The app reads from this bulk-loaded data everywhere; selective refreshes happen on mutations.
 
 **`Market.getAll` data-loading sequence:**
-1. `reader.getAllMarketData(user)` — 3 parallel RPC calls (static, dynamic, user)
-2. In parallel: `Api.fetchNativeYields()` (filtered: excludes USDC — DeFiLlama misattributes YZM yield as USDC), `fetchMerklOpportunities({ action: 'LEND' })`, `fetchMerklOpportunities({ action: 'BORROW' })`
-3. Construct Market/CToken instances from RPC data. Markets without deploy data in `setup_config.contracts.markets` are skipped with console warning.
-4. Per-token enrichment: match Merkl LEND by `opp.identifier === token.address` → `incentiveSupplyApy = apr/100`; match Merkl BORROW same way → `incentiveBorrowApy = apr/100`
-5. Per-token: match native yields by symbol → `nativeApy = apy/100`
+1. `reader.getAllMarketData(user)` -> 3 parallel RPC calls (static, dynamic, user)
+2. In parallel: rewards/native-yield fetches
+3. Construct `Market` / `CToken` instances from RPC data
+4. Enrich token APY fields from Merkl/native-yield responses
 
 ### `setup_config` (module global)
 
 ```ts
 {
   chain: ChainRpcPrefix,
-  contracts: ReturnType<typeof getContractAddresses>,  // from chains/*.json
-  provider: curvance_provider,
+  contracts: ReturnType<typeof getContractAddresses>,
+  readProvider: curvance_read_provider,
+  signer: curvance_signer | null,
+  account: address | null,
+  provider: curvance_provider,   // deprecated alias: signer ?? readProvider
   approval_protection: boolean,
-  api_url: string
+  api_url: string,
+  feePolicy: FeePolicy
 }
 ```
+
+### Provider routing contract
+
+- If `provider` is a signer and `options.readProvider` is not set, the signer's own provider becomes the primary read source.
+- The chain-configured provider plus chain fallbacks remain the fallback chain for connected-wallet reads.
+- If no signer is connected, `chain_config[chain].provider` stays the primary read provider.
+- Writes still route through `signer` only; the wallet-primary rule is read-path behavior, not a write-path change.
 
 ### Chain Configuration
 
-Each chain entry in `chain_config`:
-```ts
-{
-  chainId: number,                 // e.g. 143 for Monad
-  dexAgg: IDexAgg,              // KyberSwap or Kuru instance
-  provider: JsonRpcProvider,     // default RPC
-  native_symbol: string,         // 'MON' | 'ETH'
-  native_name: string,           // 'Monad' | 'Ether'
-  wrapped_native: address,       // WMON/WETH address
-  native_vaults: { name: string, contract: address }[],   // aprMON, shMON
-  vaults: { name: string, contract: address, underlying: address }[]  // sAUSD
-}
-```
+Each chain entry in `chain_config` carries:
+- `chainId`
+- `dexAgg`
+- `provider`
+- `fallbackProviders`
+- native token metadata
+- vault metadata
 
 **Supported chains:** `monad-mainnet`, `arb-sepolia`
 
 ### Contract Addresses (from `chains/*.json`)
 
 Each chain JSON has:
-```
-CentralRegistry, OracleManager, ProtocolReader,
-adaptors: { ChainlinkAdaptor, RedstoneClassicAdaptor, RedstoneCoreAdaptor },
-calldataCheckers: { RedstoneAdaptorMulticallChecker, KyberSwapChecker },
-zappers: { nativeVaultZapper, vaultZapper, simpleZapper },
-markets: {
-  "MarketName": {
-    address, tokens: { Symbol: ctoken_address, ... },
-    plugins: { simplePositionManager?, vaultPositionManager?, nativeVaultPositionManager? },
-    "Symbol-DynamicIRM": irm_address
-  }
-}
-```
+- `CentralRegistry`, `OracleManager`, `ProtocolReader`
+- oracle adaptors
+- calldata checkers
+- zappers
+- market definitions and plugin addresses
 
 ---
 
@@ -240,7 +241,8 @@ Risk parameter getters (`getCollRatio`, `getCollReqSoft/Hard`, `getLiqInc*`, `ge
 | `redeem(amount)` | Converts to shares, respects maxRedemption |
 | `redeemCollateral(amount, receiver?, owner?)` | |
 | `postCollateral(amount)` | Capped at available balance |
-| `removeCollateral(amount)` | Capped at current collateral |
+| `removeCollateralExact(amount)` | Preferred exact-removal path. Capped at safe removable collateral and dust-sweeps only to the safe cap |
+| `removeMaxCollateral()` | Preferred MAX-removal path. Uses the reader's collateral-only cap with execution buffer |
 | `approvePlugin(plugin, type)` | setDelegateApproval for Zapper/PositionManager |
 | `approveUnderlying(amount?)` | null = UINT256_MAX |
 
@@ -348,6 +350,7 @@ interface IDynamicIRM {
 | `getDynamicMarketData(use_api?)` | `boolean=true` | `DynamicMarketData[]` |
 | `getUserData(account)` | `address` | `UserData` |
 | `maxRedemptionOf(account, ctoken, bufferTime)` | `address, CToken, bigint` | `{ maxCollateralizedShares, maxUncollateralizedShares, errorCodeHit }` |
+| `maxCollateralRemovalOf(account, ctoken, bufferTime)` | `address, CToken, bigint` | `{ maxRemovableCollateralShares, errorCodeHit }` - explicit reader seam for posted-collateral removal |
 | `hypotheticalRedemptionOf(account, ctoken, shares)` | `address, CToken, bigint` | `(collateralSurplus, liquidityDeficit, isPossible, oracleError)` |
 | `hypotheticalBorrowOf(account, ctoken, assets)` | `address, BorrowableCToken, bigint` | `(collateralSurplus, liquidityDeficit, isPossible, loanSizeError, oracleError)` |
 | `getPositionHealth(market, user, cToken, borrowableCToken, isDeposit, collateralAssets, isRepayment, debtAssets, bufferTime)` | 9 params | `{ positionHealth: bigint, errorCodeHit: boolean }` |
@@ -573,19 +576,28 @@ interface IDexAgg {
   router: address;
   getAvailableTokens(provider, query): Promise<ZapToken[]>;
   quoteAction(...args: QuoteArgs): Promise<{ action: Swap, quote: Quote }>;
-  quoteMin(...args: QuoteArgs): Promise<BigInt>;
+  quoteMin(...args: QuoteArgs): Promise<bigint>;
   quote(...args: QuoteArgs): Promise<Quote>;
 }
-
-type QuoteArgs = [wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address];
-type Quote = { to: address; calldata: bytes; min_out: bigint; out: bigint; raw?: any; }
 ```
 
-**KyberSwap** (monad-mainnet): 2-step quote flow — GET `/api/v1/routes` → POST `/api/v1/route/build`. Client ID: `"curvance-sdk"`. Slippage in BPS. `quoteAction` converts to WAD via `bpsToBpsWad()` for the Swap struct's `slippage` field. `quote.min_out` = `amountOut * (10000 - slippage) / 10000` — use this for `repayAssets`, not arbitrary floors. Default 20min deadline (not set by SDK). Throws `Error` on non-OK HTTP responses. **Fee encoding:** when `feeBps > 0`, the SDK passes `feeAmount`, `chargeFeeBy=currency_in`, `isInBps=true`, `feeReceiver` as query params on the GET route request. KyberSwap stores the raw BPS value in `SwapDescriptionV2.feeAmounts[0]` (confirmed: `feeAmount=4` with `isInBps=true` → `feeAmounts[0] = 4` in calldata). The fee is deducted from input before routing. **On-chain validation:** every swap flows through `KyberSwapChecker.checkCalldata()` (resolved via `centralRegistry.externalCalldataChecker(kyberSwapRouter)`). The checker enforces: exactly 1 fee receiver == `centralRegistry.daoAddress()`, `feeAmounts[0] == FEE_BPS (4)`. Zero receivers rejected. Fee changes require checker redeployment.
+**KyberSwap** (monad-mainnet):
+- 2-step quote flow: GET `/api/v1/routes` -> POST `/api/v1/route/build`
+- `quoteAction` converts slippage to WAD for the on-chain `Swap` struct
+- when `feeBps > 0`, KyberSwap fee params are encoded in the adapter request itself
+- every swap is checked again on-chain by `KyberSwapChecker`
 
-**Kuru** (monad-mainnet): JWT-authenticated (`/generate-token`), rate-limited. POST `/quote`. Token search via `api.kuru.io/api/v2/tokens/search`. Cached JWT with request tracking. `quoteAction` converts slippage to WAD via `bpsToBpsWad()` — critical for `_swapSafe` on-chain check (raw BPS would read as ~0% tolerance).
+**Kuru** (monad-mainnet):
+- JWT-authenticated quote flow
+- `quoteAction` converts slippage to WAD
+- current source should be treated as its own adapter contract; do not assume KyberSwap fee semantics automatically apply here
 
-**MultiDexAgg** (multi-aggregator wrapper): Implements `IDexAgg`. Wraps 1+ aggregators — single aggregator = passthrough, multiple = parallel fan-out with best-quote selection. Config: `outlierThresholdPercent` (default 20, filters quotes deviating from median), `quoteTimeoutMs` (default 15000). Uses `Promise.allSettled` for fault tolerance. `_validateQuote` rejects responses missing `out`, `calldata`, or `to`. Monad mainnet chain config currently uses single `KyberSwap` instance (MultiDexAgg available but not yet default).
+**MultiDexAgg**:
+- wraps one or more aggregators
+- single aggregator -> passthrough
+- multiple aggregators -> parallel fan-out with best-quote selection
+
+Adapter fee semantics are intentionally adapter-owned. KyberSwap's pre-swap fee handling lives in the adapter path; do not generalize that behavior across aggregators unless the current source for that adapter proves the same semantics.
 
 ---
 
@@ -632,13 +644,24 @@ This is transparent — all `contractSetup()` results are already wrapped.
 
 ## [RETRY_PROVIDER]
 
-`wrapProviderWithRetries(provider, config?)` wraps any provider/signer with retry logic.
+`wrapProviderWithRetries(provider, config?)` wraps the read transport with retry and fallback logic.
 
-Default config: 3 retries, 1s base delay, 10s max, 2x backoff multiplier.
+Default config comes from `DEFAULT_CHAIN_RPC_POLICY` in `src/chains/rpc.ts`:
+- `maxRetries = 1`
+- `baseDelay = 150ms`
+- `timeoutMs = 4_000`
+- `fallbackCooldownMs = 30_000`
+- `rankSampleCount = 5`
+- `rankWeights = { latency: 0.3, stability: 0.7 }`
 
-Retryable errors: rate limits (429), network errors (timeout, ECONNRESET), server errors (500-504), RPC errors.
+Retryable errors include rate limits, network/connectivity failures, server failures, and RPC endpoint errors.
 
-Non-retryable errors are re-thrown wrapped in new Error objects — the original ethers `.code` property (e.g., `CALL_EXCEPTION`) does not survive the wrap. App-side error filtering must check `.message` content, not `.code`. The retry provider also logs directly via `console.error` in `forward-logs-shared.ts` — these blue "Provider method call failed" messages cannot be silenced from app code.
+Retry and fallback are separate decisions in current source:
+- `isContractError(...)` identifies deterministic contract/user failures that should skip both retry and fallback
+- `isRetryableError(...)` controls same-provider retry for transient endpoint failures
+- unknown non-contract failures can skip same-provider retry and still advance to a fallback provider
+
+Non-retryable errors are re-thrown wrapped in new `Error` objects, so the original ethers `.code` property does not survive. App-side error filtering must check `.message` content, not `.code`.
 
 ---
 
@@ -806,13 +829,17 @@ mutationFn: async ({ amount }) => {
   return await safeWaitForTx(freshToken.postCollateral(effectiveAmount), freshToken);
 }
 
-// Remove — isMax passed as second arg to SDK
+// Remove — exact calldata capped to fresh max removable collateral shares
 mutationFn: async ({ amount }) => {
   const freshToken = resolveFreshToken(token);
-  return await safeWaitForTx(
-    freshToken.removeCollateral(Decimal(amount), isMax),
-    freshToken,
-  );
+  const requestedShares = freshToken.convertTokenInputToShares(Decimal(amount));
+  const breakdown = await freshToken.maxRedemption(true, 0n, true);
+  const sharesToRemove =
+    requestedShares < breakdown.max_collateral
+      ? requestedShares
+      : breakdown.max_collateral;
+  const calldata = freshToken.getCallData('removeCollateral', [sharesToRemove]);
+  return await safeWaitForTx(freshToken.oracleRoute(calldata), freshToken);
 }
 ```
 
@@ -1999,7 +2026,10 @@ Takes a human-readable Decimal, scales to bigint using **asset.decimals** (NOT t
 | `redeem(amount)` | `TokenInput` (assets) | `convertTokenInputToShares(amount)` → sends shares to contract |
 | `redeemCollateral(amount)` | `Decimal` (assets) | `convertTokenInputToShares(amount)` → shares to contract |
 | `postCollateral(amount)` | `TokenInput` (assets) | `convertTokenInputToShares(amount)` → capped to available shares |
-| `removeCollateral(amount)` | `TokenInput` (assets) | `convertTokenInputToShares(amount)` → capped to current collateral |
+| 
+emoveCollateralExact(amount) | TokenInput (assets) | convertTokenInputToShares(amount) ? capped to safe removable collateral, then dust-swept only to the safe cap |
+| 
+emoveMaxCollateral() | none | Reads safe removable collateral shares and sends the full valid amount |
 | `transfer(receiver, amount)` | `TokenInput` (assets) | `convertTokenInputToShares(amount)` → transfers shares |
 
 **Key insight:** The user always thinks in assets (underlying token amounts). The cToken contract IS an ERC4626 vault — its interface accepts **assets** for `deposit`/`borrow` but **shares** for `redeem`/`postCollateral`/`removeCollateral`. The SDK bridges this gap: all user-facing methods accept asset-denominated `TokenInput`, and the SDK internally converts to shares via `convertTokenInputToShares` where the contract requires it.
@@ -2243,7 +2273,7 @@ The SDK uses different conversion approaches depending on context:
 
 ## [MAX_REDEMPTION]
 
-7 overloads controlling output format, buffer, and breakdown:
+`maxRedemption(...)` has 7 overloads controlling output format, buffer, and breakdown:
 
 ```ts
 // Basic: returns TokenInput (Decimal in asset terms)
@@ -2269,6 +2299,19 @@ maxRedemption(in_shares: false, bufferTime: bigint, breakdown: true):
 2. If `errorCodeHit` → throws (stale price or oracle issue)
 3. Combines: `all_shares = maxCollateralizedShares + maxUncollateralizedShares`
 4. If `in_shares=false`: converts via `virtualConvertToAssets(all_shares)` then `bigIntToDecimal(assets, asset.decimals)`
+
+**Collateral-specific seam (preferred for remove-collateral flows):**
+```ts
+maxRemovableCollateral(): Promise<TokenInput>
+maxRemovableCollateral(in_shares: true): Promise<bigint>
+maxRemovableCollateral(in_shares: false): Promise<TokenInput>
+maxRemovableCollateral(in_shares: true, bufferTime: bigint): Promise<bigint>
+maxRemovableCollateral(in_shares: false, bufferTime: bigint): Promise<TokenInput>
+```
+
+Internal flow:
+1. Calls `market.reader.maxCollateralRemovalOf(account, ctoken, bufferTime)`
+2. `removeCollateralExact()` and `removeMaxCollateral()` are built on this collateral-only seam
 
 **v2 withdraw mutation uses this with dust protection:**
 ```ts
@@ -2956,5 +2999,10 @@ All exported from package root. Used at every external trust boundary:
 ### Supply chain notes
 
 `@redstone-finance/sdk@0.9.0` pulls `axios@1.14.0` into the oracle price path (`Redstone.getPayload()` → `requestDataPackages()` → `axios.get()`). Every `oracleRoute()` call for Redstone-priced tokens loads axios. Pinned to exact version in `package.json`; `.npmrc` enforces `save-exact=true` for future additions.
+
+### Audit proof hierarchy
+
+- Package-boundary claims are only proven by the artifact the app actually consumes (`npm pack` tarball or published version). Linked source, copied `dist`, or repo-local green status are not release proof.
+- Liveness/equivalence claims are only proven by tracing a definitive endpoint: a real consumer callsite, deployed method, or packaged artifact behavior. Import hits, permissive types, and code-shape similarity are heuristics only.
 
 ---

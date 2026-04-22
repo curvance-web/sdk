@@ -222,6 +222,7 @@ token.getMaxBorrowable()             // max amount given credit
 ```ts
 token.getSnapshot(account)                // position snapshot for an account
 token.maxRedemption(inShares, bufferTime) // max redeemable amount
+token.maxRemovableCollateral(inShares, bufferTime) // max posted collateral removable without violating health
 token.simulateDeposit(amount)             // preview deposit without executing
 token.simulateDepositAsCollateral(amount)
 ```
@@ -254,7 +255,8 @@ await token.redeemCollateral(amount, receiver?, owner?)
 
 // Manage posted collateral
 await token.postCollateral(amount)   // post unposted balance as collateral
-await token.removeCollateral(amount, removeAll?)
+await token.removeCollateralExact(amount) // exact collateral removal, capped to the safe removable max
+await token.removeMaxCollateral()         // remove the maximum valid posted collateral
 ```
 
 ### Borrow & Repay (`BorrowableCToken` only)

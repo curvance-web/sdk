@@ -133,10 +133,10 @@ export interface IProtocolReader {
     getStaticMarketData(): Promise<StaticMarketData[]>;
     marketMultiCooldown(markets: address[], account: address): Promise<bigint[]>;
     previewAssetImpact(user: address, collateral_ctoken: address, debt_ctoken: address, new_collateral: bigint, new_debt: bigint): Promise<[bigint, bigint]>;
-    hypotheticalLeverageOf(account: address, depositCToken: address, borrowCToken: address, assets: bigint, bufferTime: bigint): Promise<[ bigint, bigint, bigint, bigint ]>;
+    hypotheticalLeverageOf(account: address, depositCToken: address, borrowCToken: address, assets: bigint, bufferTime: bigint): Promise<[ bigint, bigint, bigint, bigint, boolean, boolean ]>;
     getPositionHealth(market: address, account: address, ctoken: address, borrowableCToken: address, isDeposit: boolean, collateralAssets: bigint, isRepayment: boolean, debtAssets: bigint, bufferTime: bigint): Promise<[bigint, boolean]>;
     hypotheticalRedemptionOf(account: address, ctoken: address, redeemShares: bigint, bufferTime: bigint): Promise<[bigint, bigint, boolean, boolean]>;
-    hypotheticalBorrowOf(account: address, borrowableCToken: address, borrowAssets: bigint, bufferTime: bigint): Promise<[bigint, bigint, boolean, boolean]>;
+    hypotheticalBorrowOf(account: address, borrowableCToken: address, borrowAssets: bigint, bufferTime: bigint): Promise<[bigint, bigint, boolean, boolean, boolean]>;
     maxRedemptionOf(account: address, ctoken: address, bufferTime: bigint): Promise<[bigint, bigint, boolean]>;
     debtBalanceAtTimestamp(account: address, borrowableCtoken: address, timestamp: bigint): Promise<bigint>;
     getBalancesOf(tokens: address[], account: address): Promise<bigint[]>;
@@ -482,11 +482,15 @@ export class ProtocolReader {
 
     async hypotheticalBorrowOf(account: address, ctoken: BorrowableCToken, assets: bigint, bufferTime: bigint = 0n) {
         const data = await this.contract.hypotheticalBorrowOf(account, ctoken.address, assets, bufferTime);
+        const loanSizeError = Boolean(data[3]);
+        const oracleError = Boolean(data[4]);
         return {
             excess: BigInt(data[0]),
             deficit: BigInt(data[1]),
-            isPossible: data[2],
-            priceStale: data[3]
+            isPossible: Boolean(data[2]),
+            loanSizeError,
+            oracleError,
+            priceStale: oracleError,
         }
     }
 
@@ -581,7 +585,9 @@ export class ProtocolReader {
             currentLeverage,
             adjustMaxLeverage,
             maxLeverage,
-            maxDebtBorrowable
+            maxDebtBorrowable,
+            loanSizeError,
+            oracleError,
         ] = await this.contract.hypotheticalLeverageOf(account, depositCToken.address, borrowableCToken.address, assets, 0n);
 
         return {
@@ -589,6 +595,8 @@ export class ProtocolReader {
             adjustMaxLeverage: FormatConverter.bigIntToDecimal(adjustMaxLeverage, 18),
             maxLeverage: FormatConverter.bigIntToDecimal(maxLeverage, 18),
             maxDebtBorrowable: FormatConverter.bigIntToDecimal(maxDebtBorrowable, borrowableCToken.decimals),
+            loanSizeError: Boolean(loanSizeError),
+            oracleError: Boolean(oracleError),
         };
     }
 

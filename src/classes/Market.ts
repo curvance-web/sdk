@@ -672,29 +672,46 @@ export class Market {
         newLeverage: Decimal,
         depositAssets?: bigint
     ) {
-        const { borrowAmount } = deposit_ctoken.previewLeverageUp(newLeverage, borrow_ctoken, depositAssets);
-        // borrowAmount is the reduced amount sent to the contract — this is both
-        // what enters the vault/swap (becomes collateral) and what the user owes (debt).
-        // Use price-based conversion for collateral increase — this matches how the
-        // on-chain health reader values positions (via oracle prices, not vault rates).
-        const borrowUsd = borrowAmount.mul(borrow_ctoken.getPrice(true));
-        const collateralFromBorrow = borrowUsd.div(deposit_ctoken.getPrice(true));
+        if ((depositAssets ?? 0n) > 0n) {
+            return this.previewPositionHealthDepositAndLeverage(
+                deposit_ctoken,
+                borrow_ctoken,
+                newLeverage,
+                depositAssets!,
+            );
+        }
 
-        // Total collateral increase = initial deposit + borrowed amount swapped to collateral.
-        // The on-chain reader starts from the user's current position, so the deposit
-        // must be included or the preview will undercount collateral (showing ~0% health).
-        const depositInTokens = depositAssets
-            ? FormatConverter.bigIntToDecimal(depositAssets, deposit_ctoken.asset.decimals)
-            : Decimal(0);
-        const collateralIncrease = collateralFromBorrow.add(depositInTokens);
+        const preview = deposit_ctoken.previewLeverageUp(newLeverage, borrow_ctoken);
 
         return this.previewPositionHealth(
             deposit_ctoken,
             borrow_ctoken,
             true,
-            collateralIncrease,
+            preview.collateralIncreaseInAssets,
             false,
-            borrowAmount
+            preview.debtIncreaseInAssets
+        );
+    }
+
+    async previewPositionHealthDepositAndLeverage(
+        deposit_ctoken: CToken,
+        borrow_ctoken: BorrowableCToken,
+        newLeverage: Decimal,
+        depositAssets: bigint
+    ) {
+        const preview = deposit_ctoken.previewDepositAndLeverage(
+            newLeverage,
+            borrow_ctoken,
+            depositAssets,
+        );
+
+        return this.previewPositionHealth(
+            deposit_ctoken,
+            borrow_ctoken,
+            true,
+            preview.collateralIncreaseInAssets,
+            false,
+            preview.debtIncreaseInAssets
         );
     }
 
@@ -764,11 +781,12 @@ export class Market {
      */
     async previewPositionHealthRedeem(ctoken: CToken, amount: TokenInput) {
         const user = this.getAccountOrThrow();
-        const redeem_amount = ctoken.convertTokenInputToShares(amount);
+        const redeemShares = ctoken.convertTokenInputToShares(amount);
+        const redeemAssets = FormatConverter.decimalToBigInt(amount, ctoken.asset.decimals);
         const existing_collateral = ctoken.cache.userCollateral;
 
-        if(redeem_amount > existing_collateral) {
-            throw new Error(`Insufficient collateral: Existing (${existing_collateral}) < Redeem amount (${redeem_amount})`);
+        if(redeemShares > existing_collateral) {
+            throw new Error(`Insufficient collateral: Existing (${existing_collateral}) < Redeem amount (${redeemShares})`);
         }
 
         const data = await this.reader.getPositionHealth(
@@ -777,7 +795,7 @@ export class Market {
             ctoken.address,
             EMPTY_ADDRESS,
             false,
-            redeem_amount,
+            redeemAssets,
             false,
             0n,
             0n

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import Decimal from "decimal.js";
 import { UINT256_MAX } from "../src/helpers";
 import {
     ProtocolReader,
@@ -812,7 +813,7 @@ test("hypotheticalBorrowOf forwards bufferTime to the contract call", async () =
             bufferTime: bigint,
         ) => {
             captured.bufferTime = bufferTime;
-            return [0n, 0n, true, false];
+            return [0n, 0n, true, false, false];
         },
     } as any;
 
@@ -824,6 +825,26 @@ test("hypotheticalBorrowOf forwards bufferTime to the contract call", async () =
         60n,
         "wrapper must forward caller's bufferTime, not hardcode 0n",
     );
+});
+
+test("hypotheticalBorrowOf decodes loanSizeError separately from oracleError", async () => {
+    const reader = createReader();
+
+    reader.contract = {
+        hypotheticalBorrowOf: async () => [11n, 22n, true, true, false],
+    } as any;
+
+    const ctoken = { address: TOKEN } as any;
+    const result = await reader.hypotheticalBorrowOf(ACCOUNT as any, ctoken, 1_000n, 60n);
+
+    assert.deepEqual(result, {
+        excess: 11n,
+        deficit: 22n,
+        isPossible: true,
+        loanSizeError: true,
+        oracleError: false,
+        priceStale: false,
+    });
 });
 
 test("getMarketStates selector-support probe caches across instances at the same address", async () => {
@@ -985,7 +1006,7 @@ test("hypotheticalBorrowOf defaults bufferTime to 0n when not provided", async (
             bufferTime: bigint,
         ) => {
             captured.bufferTime = bufferTime;
-            return [0n, 0n, true, false];
+            return [0n, 0n, true, false, false];
         },
     } as any;
 
@@ -993,4 +1014,91 @@ test("hypotheticalBorrowOf defaults bufferTime to 0n when not provided", async (
     await reader.hypotheticalBorrowOf(ACCOUNT as any, ctoken, 1_000n);
 
     assert.equal(captured.bufferTime, 0n, "default must remain 0n for backward compatibility");
+});
+
+test("hypotheticalLeverageOf preserves loanSizeError and oracleError flags", async () => {
+    const reader = createReader();
+
+    reader.contract = {
+        hypotheticalLeverageOf: async () => [
+            1_000_000_000_000_000_000n,
+            1_500_000_000_000_000_000n,
+            2_000_000_000_000_000_000n,
+            4_000_000n,
+            true,
+            false,
+        ],
+    } as any;
+
+    const depositToken = {
+        address: TOKEN,
+        asset: { decimals: 18 },
+    } as any;
+    const borrowToken = {
+        address: TOKEN_B,
+        asset: { decimals: 6 },
+        decimals: 6,
+    } as any;
+
+    const result = await reader.hypotheticalLeverageOf(
+        ACCOUNT as any,
+        depositToken,
+        borrowToken,
+        Decimal(5),
+    );
+
+    assert.equal(result.currentLeverage.toString(), "1");
+    assert.equal(result.adjustMaxLeverage.toString(), "1.5");
+    assert.equal(result.maxLeverage.toString(), "2");
+    assert.equal(result.maxDebtBorrowable.toString(), "4");
+    assert.equal(result.loanSizeError, true);
+    assert.equal(result.oracleError, false);
+});
+
+test("maxRedemptionOf forwards bufferTime to the contract call", async () => {
+    const reader = createReader();
+    let captured: { bufferTime: bigint | null } = { bufferTime: null };
+
+    reader.contract = {
+        maxRedemptionOf: async (
+            _account: string,
+            _ctoken: string,
+            bufferTime: bigint,
+        ) => {
+            captured.bufferTime = bufferTime;
+            return [777n, 222n, false];
+        },
+    } as any;
+
+    const ctoken = { address: TOKEN } as any;
+    const result = await reader.maxRedemptionOf(ACCOUNT as any, ctoken, 180n);
+
+    assert.equal(captured.bufferTime, 180n);
+    assert.equal(result.maxCollateralizedShares, 777n);
+    assert.equal(result.maxUncollateralizedShares, 222n);
+    assert.equal(result.errorCodeHit, false);
+});
+
+test("maxRedemptionOf defaults bufferTime to 0n when not provided", async () => {
+    const reader = createReader();
+    let captured: { bufferTime: bigint | null } = { bufferTime: null };
+
+    reader.contract = {
+        maxRedemptionOf: async (
+            _account: string,
+            _ctoken: string,
+            bufferTime: bigint,
+        ) => {
+            captured.bufferTime = bufferTime;
+            return [555n, 111n, false];
+        },
+    } as any;
+
+    const ctoken = { address: TOKEN } as any;
+    const result = await reader.maxRedemptionOf(ACCOUNT as any, ctoken);
+
+    assert.equal(captured.bufferTime, 0n);
+    assert.equal(result.maxCollateralizedShares, 555n);
+    assert.equal(result.maxUncollateralizedShares, 111n);
+    assert.equal(result.errorCodeHit, false);
 });

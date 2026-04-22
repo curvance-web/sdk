@@ -12,7 +12,7 @@ Rules and conventions for working in `curvance-web/app` (branch: `dev`). Read be
 | Task type | Context sections to read |
 |---|---|
 | Creating a new page/route | #DIRECTORY_STRUCTURE |
-| Adding/editing components | Context_CurvanceUI.md → #ESTABLISHED_COMPONENTS; #V2_PRIMITIVES_BARREL |
+| Adding/editing components | Context_CurvanceUI.md → #ESTABLISHED_COMPONENTS; Context_CurvanceApp.md → #V2_PRIMITIVES_BARREL |
 | Understanding query hooks / SDK shape | #QUERY_INVENTORY, #SDK_OBJECT_MODEL |
 | App component APIs | #APP_COMPONENT_APIS |
 | Store/state work | #STATE_MANAGEMENT |
@@ -22,6 +22,7 @@ Rules and conventions for working in `curvance-web/app` (branch: `dev`). Read be
 | Dashboard page work | #DASHBOARD_ARCHITECTURE, #DASHBOARD_PAGE_IMPORTS |
 | Explore page work | #EXPLORE_PAGE, #EXPLORE_PAGE_BEHAVIOR |
 | Chain/network handling | #CHAIN_CONFIGURATION |
+| Wallet/session or statusbar/network parity | #STATE_MANAGEMENT, #CHAIN_CONFIGURATION, #SOURCE_AUDIT_TESTS |
 | RPC transport / fallback config | #RPC_TRANSPORT |
 | Query architecture (dual hook pattern) | Inline: `src/modules/market/v2/queries/index.ts` — useMarketDataQuery (public) vs useUserDataQuery (wallet-gated) |
 | Merkl rewards integration | #MERKL_INTEGRATION |
@@ -29,10 +30,10 @@ Rules and conventions for working in `curvance-web/app` (branch: `dev`). Read be
 | Liquidation logic | #LIQUIDATION_CALCULATIONS |
 | Utility function reference | #UTILITY_FUNCTIONS |
 | Sidebar reuse across pages | #SIDEBAR_REUSE |
-| Bytes engagement hooks | #BYTES_ENGAGEMENT |
 | Dead code audit | #DEAD_CODE |
 | Security / CSP / headers | #CSP_ARCHITECTURE |
 | Loading/empty states | #LOADING_STATES |
+| Large refactor review / source-audit regression tests | #PR_REVIEW_WORKFLOW, #SOURCE_AUDIT_TESTS |
 | Tech stack / version lookup | #TECHNOLOGY_STACK |
 | Color tokens | Context_CurvanceUI.md → #COLOR_TOKENS |
 
@@ -128,7 +129,10 @@ One system only. System A (`text-text-primary`) and System B (`new-*`) fully del
 | `select` closure reading `account.address` | Gate on address — truthy when connected | Updates before `useSigner().address`. Gate on `signer?.address` to match query key | [M] |
 | `keepPreviousData` on user-address query | Keeps data during refetch | Bridges key transitions — null-signer data serves for connected wallet. `keepPrevious: false` on user queries | [M] |
 | Showing ConnectWallet based on `!account.address` | Seems like correct wallet check | During wagmi reconnect, `address` is `undefined` but wallet IS persisted. Three tiers: `isDisconnected` for UI rendering (lenient — false during connecting), `isConnected` for query gating (strict — only true when handshake complete), `isConnected && hasSigner` for user data (strictest — signer resolved). Wrong tier = flash or address(0) leak | [H] |
+| Wallet/session or statusbar/network shell logic | Read raw `useAccount()` / `useChainId()` in shell, notification, or task consumers | Use the shared seams: `useWalletSessionState` for signer-gated surfaces, `useConnectionUiState` for UI-only shells, and `useResolvedAccountAddress` / `useResolvedAccountChainId` for E2E-aware account or chain state | [H] |
 | Disabling a query via `enabled: false` to hide data | Assume disabled query won't surface data | `enabled` controls fetching, not cache access. If the current key has a cache entry (e.g., signerless data from explore page), React Query returns it to all consumers regardless of `enabled`. UI must independently gate on readiness (`walletReady = isConnected && hasSigner`) | [H] |
+| User-facing query can keep cached data or catches fetch failures | Fall through to ready/zero/healthy/empty UI because some data exists | Decide stale-ready behavior per surface. If the data is not safe to present as fresh truth, render unavailable/error explicitly instead of silent fallback | [H] |
+| Migrating a page to v2/setupChain queries | Move visible consumers but leave provider/store side-effects on legacy keys | UI migration is incomplete until background sync, notification counts, and other side-effects move too. During rollout, route those effects through shared helpers that can read both current and legacy roots | [H] |
 | Changing a `useMediaQuery` breakpoint value | Change JS query only | Must also change corresponding Tailwind CSS classes (`xl:grid-cols`, `hidden xl:block`, `block xl:hidden`) in same file, same commit. JS controls component logic; CSS controls layout visibility. Desync shows desktop table with no sidebar | [H] |
 | Component with Framer Motion height animation mounts via CSS breakpoint | Expect instant render | `animate={{ height: bounds.height }}` plays entry animation from 0 on mount — looks like drawer sliding open. Add `initial={false}` to skip mount animation. Inner `AnimatePresence` for tab-switching is unaffected | [M] |
 | Passing inline arrow to `useComposedRefs` | `useComposedRefs(ref, (node) => {})` | `useCallback` first, pass stable reference | [M] |
@@ -162,6 +166,7 @@ One system only. System A (`text-text-primary`) and System B (`new-*`) fully del
 | Adding `target="_blank"` to Link or anchor | Assume Next.js adds rel automatically | Next.js `<Link>` does NOT add `rel="noopener noreferrer"`. Must be explicit. Audit regex: `<(?:a\|Link)\b[^>]*target="_blank"[^>]*>` without `noopener` | [H] |
 | Mutation using token from Zustand store | Use store token directly for SDK write calls | Store token may carry read-only provider from signerless setupChain. `resolveFreshToken(token)` resolves from `all_markets` at execution time — same address, fresh provider | [H] |
 | Chain-switch behavior | Auto-switch wallet | Never auto-switch. Show banner + disabled actions. User clicks "Switch to Monad" | [L] |
+| Thresholded, quoted, or freshly re-resolved mutation amount | Let preview/history/copy use requested amount while execution uses a different resolved amount | One flow, one amount. Thread the resolved submitted amount through preview, mutation input, pending history, and success/failure copy | [H] |
 | User says remove something | Substitute alternative | Remove it. Ask before adding replacement | [L] |
 | User states layout preference | Acknowledge but output old | Apply stated preference in same edit | [L] |
 | New barrel export | Refresh → "Element type invalid" | Kill and restart `yarn dev` | [L] |
@@ -169,6 +174,13 @@ One system only. System A (`text-text-primary`) and System B (`new-*`) fully del
 | Naming a specific wallet in `MutationCache.onError` | "Safe service unavailable" toast | WalletConnect users are indistinguishable at handler level. Keep messages generic unless wallet type detected before the call via hook/store | [M] |
 | Checking or modifying security headers in next.config.ts | Assume `headers()` executes in production | `output: 'export'` makes `headers()` dead code. Actual enforcement: Amplify `customHttp.yml`. Build warns but doesn't error. Both must stay in sync | [H] |
 | Build fails with type error | Fix the error, rebuild, repeat | Run `npx tsc --noEmit` first — see full count, group by pattern, batch-fix. Iterative build-fix-build hides scope and wastes cycles on errors sharing a root cause | [M] |
+| Auditing whether a broad refactor is live or equivalent | Infer from import hits, permissive types, or code-shape similarity | Trace to a live route, rendered consumer, or actual value domain. If the invariant is structural, pin it with a source-audit test | [H] |
+| Fix scoped to a Root/Drawer or desktop/mobile pair | Patch the explicit surface and assume the mirror is covered by similarity | Check whether a live mirror exists. Patch both or surface the scoped omission explicitly | [M] |
+| Modifying wagmi config `ssr` setting or removing `ssr: false` | Enable `ssr: true` for faster initial render or SSR hydration benefits | `ssr: false` is load-bearing. wagmi with `ssr: true` restores `isConnected` from persisted connector during SSR hydration, but server always has `isConnected=false`. The mismatch triggers React recovery → full tree re-render → wagmi re-initialization → auth cycling → route loss. Admin panel S2: four fix attempts before identifying `ssr: false` as root cause | [H] |
+| Adding a new SDK-side validation marker or DEX-specific pre-flight error path | Let the generic DEX-name selector bucket catch it | Add a more-specific classifier before generic selectors so the recovery copy matches the real fix | [M] |
+| Transaction confirm chain gating | Pass the wallet's current chain id back into `ensureChain(...)` | Resolve the required chain from market setup metadata via `resolveRequiredTransactionChainId(token)` before calling `ensureChain(...)` | [H] |
+| Transaction UI reset during disconnect or drawer teardown | Reset the visible panel only | Also invalidate stale async callbacks with `useTransactionAttemptGuard()` so late success/failure handlers cannot repaint reset UI | [H] |
+| Seeded browser harness plumbing | Feature code reads raw override storage or resolver modules directly | Keep storage in the provider/testing layer and expose typed feature-facing seams through `shared/testing/curvance-e2e-bridge.ts` | [M] |
 
 ## WWW (What Worked Well)
 
@@ -183,8 +195,12 @@ One system only. System A (`text-text-primary`) and System B (`new-*`) fully del
 | setupChain resilience | `retry: 2` with exponential backoff (2s, 4s) + error state with retry button instead of "No Results Found" | Transient RPC blips invisible to user; persistent failures get honest message + one-click recovery |
 | Merkl APY consolidation | Single `computeMerklRates` + `getOpportunityRate` in `shared/api/merkl.ts` — all 7 consumer files call through | Eliminated 14 inline `opp.apr / 100` references; header and breakdown guaranteed consistent by construction |
 | Query architecture split | `useMarketDataQuery` (public, keepPreviousData) + `useUserDataQuery` (gates on `isConnected && hasSigner`, no keepPreviousData) — two wrappers over same setupChain cache | New features auto-inherit correct gating. Dashboard can't leak address(0) data. Explore page unaffected by wallet state |
+| Live route query cleanup | Extract one page-boundary composition hook first (`useExplorePageData`, `useDashboardPageData`, etc.), then add source-audit tests (`route-boundaries.test.ts`, `test:query-quality`) | Reduced duplicated subscriptions/branching without increasing query count, and made architecture regressions fail fast |
 | setupChain race elimination | `!isReconnecting` in `baseEnabled` prevents premature signerless query during wagmi reconnect window | Single setupChain call per chain after reconnect settles. No race on module-level `all_markets` |
 | RPC fallback transport | `fallback([http(primary, RPC_OPTS), http(backup, RPC_OPTS)], { rank: false })` in wagmi.tsx with `retryCount: 3`, `timeout: 10_000` per endpoint. `chainRPCBackup` in chain-configs.ts | Universal retry + failover for every RPC read. Silent failover — user never sees the switch |
+| High-churn frontend regression audit | Source-audit tests that read source, anchor on named code regions, and assert structural invariants | Caught retry-cap, selector-map, route-boundary, and Root/Drawer parity regressions in fast CI without mocking the whole feature stack |
+| Wallet/network/statusbar parity hardening | One thin shared E2E bridge over provider actions and resolved account/chain hooks, then one dedicated `statusbar` Cypress spec | Found wallet-shell, switch-chain, unsupported-network, and notification/task drift without global wagmi mocks |
+| Shared wallet-aware action surfaces | Funnel signer-dependent summary actions through `transaction-summary-actions.tsx` and pin the seam with route-boundary audits | Closed the stale confirm bug class across borrow, deposit, withdraw, repay, and manage-collateral with one reusable component |
 
 ## WWK (What We Know)
 
@@ -195,14 +211,16 @@ One system only. System A (`text-text-primary`) and System B (`new-*`) fully del
 | Turbopack caches stale module graphs across file deletions and branch switches — HMR won't pick up the change. `rm -rf .next && rm -rf node_modules/.cache && yarn dev` is the only reliable reset | WGW: delete/move file, git reset |
 | `output: 'export'` makes all Next.js runtime configuration documentation-only — `headers()`, `rewrites()`, `redirects()` compile and appear in build output but never execute. The hosting layer (Amplify `customHttp.yml`, Cloudflare rules) is the actual enforcement point. Keeping both in sync is a maintenance requirement, not redundancy | WGW: headers() dead code. Hard Constraints: static export. Previous audit misattributed working headers to next.config.ts when they were served by customHttp.yml |
 | React Query cache is a shared namespace — `enabled` controls fetching, not visibility. When a query key can match both public and private cache entries (e.g., `['setupchain', undefined, slug]` from explore and from signer-resolving dashboard), the UI must independently verify data appropriateness. The query layer and UI layer are independent gates — neither substitutes for the other | WGW: disabled query leaking cached data, three-tier connection model. WWW: query architecture split. Three iterations of `enabled`-only fixes failed before adding UI-layer `walletReady` gate |
+| wagmi `ssr: true` (default) in Next.js App Router SSR triggers a cascade: hydration mismatch → React recovery re-renders full tree → wagmi re-initializes → auth state cycles → route context lost. Each workaround (mounted guards, null gates) fixes one layer but breaks another. Root fix: `ssr: false` prevents the initial server/client divergence. Applies to any wagmi + App Router SSR deployment | Admin panel S2: four attempted fixes before root cause. App-dev already has `ssr: false` in both `getLiteConfig` and `getCustomConfig` — confirmed working |
+| In broad app audits, endpoint traces beat surface signals. Import presence, type allowance, and code-shape similarity only show possibility; live route mounts, rendered consumers, value-domain checks, and source-audit tests show actuality | WGW: broad refactor audit, mirrored surface assumption. WWW: live route query cleanup, high-churn frontend regression audit |
+| Wallet state in this app has three distinct consumers — signer-gated query/mutation surfaces, UI-only connected/disconnected shells, and E2E-aware account/chain surfaces — and each needs its own shared helper (`useWalletSessionState`, `useConnectionUiState`, `useResolvedAccountAddress` / `useResolvedAccountChainId`) | WGW: wrong-tier wallet checks, raw wagmi shell reads. Source-audit tests now pin these seams across statusbar, notifications, tasks, dashboard, bytes, and action sidebars |
+| Transaction safety in the UI depends on two different guards: resolve the required chain from market setup metadata before confirm, and fence late async completions with `useTransactionAttemptGuard` after reset/disconnect | WGW: wrong-chain no-op, stale callback repaint. Source-audit tests pin `resolveRequiredTransactionChainId` and `useTransactionAttemptGuard` across all five transaction panels |
 
 ## Cross-References
 
 | Topic | Skill |
 |---|---|
 | UI/design conventions, color tokens | Skill_CurvanceUI.md + Context_CurvanceUI.md |
-| Brand identity, marketing | Skill_CurvanceBrand.md |
-| Bytes, games, engagement | Skill_CurvanceBytes.md |
 | SDK methods, type system | Skill_CurvanceSDK.md |
-| Display bugs, QA | Skill_CurvanceQA.md |
-| UI anti-patterns | Skill_UIPatterns.md |
+| Display bugs, QA (load when doing QA) | Skill_CurvanceQA.md |
+| UI anti-patterns (load when reviewing UI quality) | Skill_UIPatterns.md |

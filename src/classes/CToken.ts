@@ -18,6 +18,7 @@ import FormatConverter from "./FormatConverter";
 const EXCLUDED_ZAP_SYMBOLS = new Set([
     'eBTC', 'earnAUSD', 'vUSD', 'syzUSD', 'ezETH', 'YZM', 'wsrUSD', 'sAUSD',
 ]);
+const EXECUTION_DEBT_BUFFER_TIME = 100n;
 
 /**
  * Leverage operation buffers — centralized for tuning.
@@ -146,6 +147,34 @@ export interface MulticallAction {
     target: address;
     isPriceUpdate: boolean;
     data: bytes;
+}
+
+type LeverageUpPreviewOperation = 'leverage-up' | 'deposit-and-leverage';
+
+export interface LeverageUpPreview {
+    currentLeverage: Decimal;
+    effectiveCurrentLeverage: Decimal;
+    targetLeverage: Decimal;
+    borrowAmount: Decimal;
+    borrowAssets: bigint;
+    debtIncrease: Decimal;
+    debtIncreaseInAssets: Decimal;
+    newDebt: Decimal;
+    newDebtInAssets: Decimal;
+    collateralIncrease: Decimal;
+    collateralIncreaseInAssets: Decimal;
+    newCollateral: Decimal;
+    newCollateralInAssets: Decimal;
+    feeBps: bigint;
+    feeAssets: Decimal;
+    feeUsd: Decimal;
+}
+
+interface ResolveLeverageUpPreviewParams {
+    operation: LeverageUpPreviewOperation;
+    targetLeverage: Decimal;
+    borrow: BorrowableCToken;
+    depositAssets?: bigint;
 }
 
 export interface ZapToken {
@@ -373,13 +402,29 @@ export class CToken extends Calldata<ICToken> {
         return bufferBps > 0n ? shares * (10000n - bufferBps) / 10000n : shares;
     }
 
-    getLeverage() {
-        if(this.getUserCollateral(true).equals(0)) {
-            return null;
+    private getMarketLeverageState() {
+        const currentCollateralInUsd = this.market.userCollateral;
+        const currentDebt = this.market.userDebt;
+        const equity = currentCollateralInUsd.sub(currentDebt);
+
+        if (currentCollateralInUsd.lte(0) || equity.lte(0)) {
+            return {
+                currentCollateralInUsd,
+                currentDebt,
+                currentLeverage: null as Decimal | null,
+            };
         }
 
-        const leverage = this.getUserCollateral(true).div(this.getUserCollateral(true).sub(this.market.userDebt));
-        return leverage.eq(1) ? null : leverage;
+        const currentLeverage = currentCollateralInUsd.div(equity);
+        return {
+            currentCollateralInUsd,
+            currentDebt,
+            currentLeverage: currentLeverage.eq(1) ? null : currentLeverage,
+        };
+    }
+
+    getLeverage() {
+        return this.getMarketLeverageState().currentLeverage;
     }
 
     /** @returns Remaining Collateral cap */
@@ -1003,29 +1048,62 @@ export class CToken extends Calldata<ICToken> {
         return amount;
     }
 
-    async removeCollateral(amount: TokenInput, removeAll: boolean = false) {
-        const current_shares = await this.fetchUserCollateral();
-        let max_shares: bigint;
+    private getExecutionDebtBufferTime(): bigint {
+        return this.market.userDebt.greaterThan(0) ? EXECUTION_DEBT_BUFFER_TIME : 0n;
+    }
 
-        if (removeAll) {
-            max_shares = current_shares;
-        } else {
-            const shares = this.convertTokenInputToShares(amount);
-            max_shares = current_shares < shares ? current_shares : shares;
-            // If within 0.1% of full collateral, remove everything to avoid dust
-            const threshold = current_shares / 1000n || 10n;
-            if (current_shares - max_shares <= threshold) {
-                max_shares = current_shares;
-            }
+    private async resolveCollateralRemovalShares(amount: TokenInput): Promise<bigint> {
+        const max_removable_shares = await this.maxRemovableCollateral(true, this.getExecutionDebtBufferTime());
+        const requested_shares = this.convertTokenInputToShares(amount);
+        let shares =
+            max_removable_shares < requested_shares ? max_removable_shares : requested_shares;
+
+        // If within 0.1% of the safe removable collateral, remove it all to avoid dust.
+        const threshold = max_removable_shares / 1000n || 10n;
+        if (max_removable_shares - shares <= threshold) {
+            shares = max_removable_shares;
         }
 
-        const calldata = this.getCallData("removeCollateral", [max_shares]);
+        return shares;
+    }
+
+    private async executeCollateralRemoval(shares: bigint) {
+        if (shares === 0n) {
+            throw new Error("No removable collateral available.");
+        }
+
+        const calldata = this.getCallData("removeCollateral", [shares]);
         const tx = await this.oracleRoute(calldata);
 
         // Reload collateral state after execution
         await this.fetchUserCollateral();
 
         return tx;
+    }
+
+    async maxRemovableCollateral(): Promise<TokenInput>;
+    async maxRemovableCollateral(in_shares: true): Promise<bigint>;
+    async maxRemovableCollateral(in_shares: false): Promise<TokenInput>;
+    async maxRemovableCollateral(in_shares: true, bufferTime: bigint): Promise<bigint>;
+    async maxRemovableCollateral(in_shares: false, bufferTime: bigint): Promise<TokenInput>;
+    async maxRemovableCollateral(in_shares: boolean = false, bufferTime: bigint = 0n): Promise<TokenInput | bigint> {
+        if (in_shares) {
+            const breakdown = await this.maxRedemption(true, bufferTime, true);
+            return breakdown.max_collateral;
+        }
+
+        const breakdown = await this.maxRedemption(false, bufferTime, true);
+        return breakdown.max_collateral;
+    }
+
+    async removeCollateralExact(amount: TokenInput) {
+        const shares = await this.resolveCollateralRemovalShares(amount);
+        return this.executeCollateralRemoval(shares);
+    }
+
+    async removeMaxCollateral() {
+        const shares = await this.maxRemovableCollateral(true, this.getExecutionDebtBufferTime());
+        return this.executeCollateralRemoval(shares);
     }
 
     convertTokenInputToShares(amount: TokenInput) {
@@ -1214,6 +1292,7 @@ export class CToken extends Calldata<ICToken> {
         this.cache.assetPrice = snapshot.collateralAssetPrice;
         this.cache.sharePrice = snapshot.sharePrice;
         borrow.cache.assetPrice = snapshot.debtAssetPrice;
+        this.market.cache.user.collateral = snapshot.collateralUsd;
         this.market.cache.user.debt = snapshot.debtUsd;
 
         return snapshot;
@@ -1246,53 +1325,124 @@ export class CToken extends Calldata<ICToken> {
         return slippage + LEVERAGE.LEVERAGE_UP_BUFFER_BPS;
     }
 
-    previewLeverageUp(newLeverage: Decimal, borrow: BorrowableCToken, depositAmount?: bigint) {
-        const currentLeverage = this.getLeverage() ?? Decimal(0);
-        if(newLeverage.lte(currentLeverage)) {
+    private computePostDepositNaturalLeverage(
+        currentCollateralInUsd: Decimal,
+        currentDebtInUsd: Decimal,
+        depositInUsd: Decimal,
+    ): Decimal {
+        if (currentDebtInUsd.lte(0)) return Decimal(1);
+
+        const collateralAfterDeposit = currentCollateralInUsd.add(depositInUsd);
+        const equityAfterDeposit = collateralAfterDeposit.sub(currentDebtInUsd);
+        if (equityAfterDeposit.lte(0)) return Decimal(1);
+
+        return collateralAfterDeposit.div(equityAfterDeposit);
+    }
+
+    private resolveLeverageUpPreview({
+        operation,
+        targetLeverage,
+        borrow,
+        depositAssets = 0n,
+    }: ResolveLeverageUpPreviewParams): LeverageUpPreview {
+        const leverageState = this.getMarketLeverageState();
+        const currentLeverage = leverageState.currentLeverage ?? Decimal(1);
+        const currentCollateralInUsd = leverageState.currentCollateralInUsd;
+        const depositInAssets = FormatConverter.bigIntToDecimal(depositAssets, this.asset.decimals);
+        const depositInUsd = depositAssets > 0n
+            ? this.convertTokensToUsd(depositAssets, true)
+            : Decimal(0);
+        const currentDebt = leverageState.currentDebt;
+        const effectiveCurrentLeverage = depositAssets > 0n
+            ? this.computePostDepositNaturalLeverage(currentCollateralInUsd, currentDebt, depositInUsd)
+            : currentLeverage;
+        const cappedTargetLeverage = targetLeverage.gt(this.maxLeverage)
+            ? this.maxLeverage
+            : targetLeverage;
+        const resolvedTargetLeverage = operation === 'deposit-and-leverage'
+            ? Decimal.max(cappedTargetLeverage, effectiveCurrentLeverage)
+            : cappedTargetLeverage;
+
+        if (operation === 'leverage-up' && resolvedTargetLeverage.lte(effectiveCurrentLeverage)) {
             throw new Error("New leverage must be more than current leverage");
         }
 
-        if(newLeverage.gt(this.maxLeverage)) {
-            newLeverage = this.maxLeverage;
+        const collateralAfterDepositInUsd = currentCollateralInUsd.add(depositInUsd);
+        const notional = collateralAfterDepositInUsd.sub(currentDebt);
+        if (notional.lte(0)) {
+            throw new Error("Position has no positive equity to leverage.");
         }
 
-        const collateralAvail = this.readFreshUserCache("userCollateral", "previewing leverage up") + (depositAmount ? depositAmount : BigInt(0));
-        const collateralInUsd = this.convertTokensToUsd(collateralAvail, false);
-        const currentDebt     = this.market.userDebt;
-        const notional        = collateralInUsd.sub(currentDebt);
-        const leverageFactor  = newLeverage.sub(1);
-        const borrowPrice     = borrow.getPrice(true);
-
-        const rawDebtInUsd    = notional.mul(newLeverage).sub(notional);
-        const borrowAmount    = rawDebtInUsd.sub(currentDebt).div(borrowPrice);
-
-        // Fee preview: queried from the configured fee policy.
-        const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
-        const feeBps = this.setup.feePolicy.getFeeBps({
-            operation: 'leverage-up',
-            inputToken: borrow.asset.address,
-            outputToken: this.asset.address,
-            inputAmount: borrowAssets,
-            currentLeverage,
-            targetLeverage: newLeverage,
-        });
+        const borrowPrice = borrow.getPrice(true);
+        const rawDebtInUsd = notional.mul(resolvedTargetLeverage).sub(notional);
+        const debtIncrease = Decimal.max(rawDebtInUsd.sub(currentDebt), Decimal(0));
+        const borrowAmount = borrowPrice.gt(0)
+            ? debtIncrease.div(borrowPrice)
+            : Decimal(0);
+        const borrowAssets = debtIncrease.gt(0)
+            ? FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals)
+            : 0n;
+        const feePolicyCurrentLeverage = operation === 'deposit-and-leverage'
+            ? effectiveCurrentLeverage
+            : currentLeverage;
+        const feeBps = borrowAssets > 0n
+            ? this.setup.feePolicy.getFeeBps({
+                operation,
+                inputToken: borrow.asset.address,
+                outputToken: this.asset.address,
+                inputAmount: borrowAssets,
+                currentLeverage: feePolicyCurrentLeverage,
+                targetLeverage: resolvedTargetLeverage,
+            })
+            : 0n;
         const feeAssets = borrowAmount.mul(Decimal(Number(feeBps))).div(Decimal(10000));
         const feeUsd = feeAssets.mul(borrowPrice);
-
-        // Subtract fee from displayed collateral — the fee reduces swap
-        // output, so the user receives less collateral than rawDebtInUsd.
-        const newCollateralInUsd = notional.add(rawDebtInUsd).sub(feeUsd);
+        const collateralIncreaseFromBorrow = Decimal.max(debtIncrease.sub(feeUsd), Decimal(0));
+        const collateralIncrease = depositInUsd.add(collateralIncreaseFromBorrow);
+        const collateralIncreaseInAssets = depositInAssets.add(
+            this.convertUsdToTokens(collateralIncreaseFromBorrow, true),
+        );
+        const newCollateralInUsd = currentCollateralInUsd.add(collateralIncrease);
 
         return {
+            currentLeverage,
+            effectiveCurrentLeverage,
+            targetLeverage: resolvedTargetLeverage,
             borrowAmount,
+            borrowAssets,
+            debtIncrease,
+            debtIncreaseInAssets: borrowAmount,
             newDebt: rawDebtInUsd,
             newDebtInAssets: borrow.convertUsdToTokens(rawDebtInUsd, true),
+            collateralIncrease,
+            collateralIncreaseInAssets,
             newCollateral: newCollateralInUsd,
             newCollateralInAssets: this.convertUsdToTokens(newCollateralInUsd, true),
             feeBps,
             feeAssets,
             feeUsd,
         };
+    }
+
+    previewDepositAndLeverage(newLeverage: Decimal, borrow: BorrowableCToken, depositAmount: bigint) {
+        return this.resolveLeverageUpPreview({
+            operation: 'deposit-and-leverage',
+            targetLeverage: newLeverage,
+            borrow,
+            depositAssets: depositAmount,
+        });
+    }
+
+    previewLeverageUp(newLeverage: Decimal, borrow: BorrowableCToken, depositAmount?: bigint) {
+        if ((depositAmount ?? 0n) > 0n) {
+            return this.previewDepositAndLeverage(newLeverage, borrow, depositAmount!);
+        }
+
+        return this.resolveLeverageUpPreview({
+            operation: 'leverage-up',
+            targetLeverage: newLeverage,
+            borrow,
+        });
     }
 
     previewLeverageDown(newLeverage: Decimal, currentLeverage: Decimal, borrow?: BorrowableCToken) {
@@ -1305,10 +1455,13 @@ export class CToken extends Calldata<ICToken> {
         }
 
 
-        const collateralAvail = this.readFreshUserCache("userCollateral", "previewing leverage down");
-        const collateralInUsd = this.convertTokensToUsd(collateralAvail, false);
-        const currentDebt = this.market.userDebt;
+        const leverageState = this.getMarketLeverageState();
+        const collateralInUsd = leverageState.currentCollateralInUsd;
+        const currentDebt = leverageState.currentDebt;
         const equity = collateralInUsd.sub(currentDebt);
+        if (equity.lte(0)) {
+            throw new Error("Position has no positive equity to deleverage.");
+        }
         const targetCollateralUsd = equity.mul(newLeverage);
         const newDebtUsd = targetCollateralUsd.sub(equity);
 
@@ -1359,24 +1512,19 @@ export class CToken extends Calldata<ICToken> {
     ): Promise<any> {
         try {
             this.requireSigner();
-            const slippage = this._leverageUpSlippage(FormatConverter.percentageToBps(slippage_), newLeverage);
             const manager = this.getPositionManager(type);
 
             let calldata: bytes;
             await this._getLeverageSnapshot(borrow);
-            const { borrowAmount } = this.previewLeverageUp(newLeverage, borrow);
+            const preview = this.previewLeverageUp(newLeverage, borrow);
+            const slippage = this._leverageUpSlippage(
+                FormatConverter.percentageToBps(slippage_),
+                preview.targetLeverage,
+            );
+            const { borrowAmount, borrowAssets, feeBps, targetLeverage } = preview;
 
             switch(type) {
                 case 'simple': {
-                    const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
-                    const feeBps = this.setup.feePolicy.getFeeBps({
-                        operation: 'leverage-up',
-                        inputToken: borrow.asset.address,
-                        outputToken: this.asset.address,
-                        inputAmount: borrowAssets,
-                        currentLeverage: this.getLeverage() ?? Decimal(1),
-                        targetLeverage: newLeverage,
-                    });
                     const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
 
                     const { action, quote } = await this.currentChainConfig.dexAgg.quoteAction(
@@ -1400,14 +1548,14 @@ export class CToken extends Calldata<ICToken> {
                     // See `amplifyContractSlippage` in helpers.ts for rationale.
                     const contractSlippage = amplifyContractSlippage(
                         slippage,
-                        newLeverage.sub(1),
+                        targetLeverage.sub(1),
                         feeBps,
                     );
 
                     calldata = manager.getLeverageCalldata(
                         {
                             borrowableCToken: borrow.address,
-                            borrowAssets    : FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
+                            borrowAssets    : borrowAssets,
                             cToken          : this.address,
                             expectedShares  : this.virtualConvertToShares(BigInt(quote.min_out), LEVERAGE.SHARES_BUFFER_BPS),
                             swapAction      : action,
@@ -1426,14 +1574,14 @@ export class CToken extends Calldata<ICToken> {
                     // `checkSlippage` reads. See LEVERAGE_UP_VAULT_DRIFT_BPS.
                     const contractSlippage = amplifyContractSlippage(
                         slippage,
-                        newLeverage.sub(1),
+                        targetLeverage.sub(1),
                         LEVERAGE.LEVERAGE_UP_VAULT_DRIFT_BPS,
                     );
 
                     calldata = manager.getLeverageCalldata(
                         {
                             borrowableCToken: borrow.address,
-                            borrowAssets    : FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
+                            borrowAssets    : borrowAssets,
                             cToken          : this.address,
                             expectedShares  : await PositionManager.getVaultExpectedShares(
                                 this,
@@ -1631,26 +1779,28 @@ export class CToken extends Calldata<ICToken> {
             }
 
             depositAmount = await this.ensureUnderlyingAmount(depositAmount, 'none');
-            const slippage = this._leverageUpSlippage(toBps(slippage_), multiplier);
             const manager = this.getPositionManager(type);
 
             let calldata: bytes;
 
             const depositAssets = FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals);
             await this._getLeverageSnapshot(borrow);
-            const { borrowAmount } = this.previewLeverageUp(multiplier, borrow, depositAssets);
+            const preview = this.previewDepositAndLeverage(multiplier, borrow, depositAssets);
+            if (preview.borrowAssets === 0n) {
+                if (simulate) {
+                    return {
+                        success: false,
+                        error: "Target leverage must exceed the post-deposit leverage to borrow more.",
+                    };
+                }
+                throw new Error("Target leverage must exceed the post-deposit leverage to borrow more.");
+            }
+
+            const slippage = this._leverageUpSlippage(toBps(slippage_), preview.targetLeverage);
+            const { borrowAmount, borrowAssets, feeBps, targetLeverage } = preview;
 
             switch(type) {
                 case 'simple': {
-                    const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
-                    const feeBps = this.setup.feePolicy.getFeeBps({
-                        operation: 'deposit-and-leverage',
-                        inputToken: borrow.asset.address,
-                        outputToken: this.asset.address,
-                        inputAmount: borrowAssets,
-                        currentLeverage: this.getLeverage() ?? Decimal(1),
-                        targetLeverage: multiplier,
-                    });
                     const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
 
                     const { action, quote } = await this.currentChainConfig.dexAgg.quoteAction(
@@ -1670,7 +1820,7 @@ export class CToken extends Calldata<ICToken> {
                     // `amplifyContractSlippage` in helpers.ts.
                     const contractSlippage = amplifyContractSlippage(
                         slippage,
-                        multiplier.sub(1),
+                        targetLeverage.sub(1),
                         feeBps,
                     );
 
@@ -1697,7 +1847,7 @@ export class CToken extends Calldata<ICToken> {
                     // leverageDelta = multiplier - 1).
                     const contractSlippage = amplifyContractSlippage(
                         slippage,
-                        multiplier.sub(1),
+                        targetLeverage.sub(1),
                         LEVERAGE.LEVERAGE_UP_VAULT_DRIFT_BPS,
                     );
 
@@ -1705,7 +1855,7 @@ export class CToken extends Calldata<ICToken> {
                         FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals),
                         {
                             borrowableCToken: borrow.address,
-                            borrowAssets: FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
+                            borrowAssets: borrowAssets,
                             cToken: this.address,
                             expectedShares: await PositionManager.getVaultExpectedShares(
                                 this,
@@ -1929,7 +2079,7 @@ export class CToken extends Calldata<ICToken> {
         const receiver = signer.address as address;
         const owner    = signer.address as address;
 
-        const buffer = this.market.userDebt.greaterThan(0) ? 100n : 0n;
+        const buffer = this.getExecutionDebtBufferTime();
         const balance_avail = await this.balanceOf(signer.address as address);
         const max_shares = await this.maxRedemption(true, buffer);
         const converted_shares = this.convertTokenInputToShares(amount);
