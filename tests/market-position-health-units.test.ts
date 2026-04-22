@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import Decimal from 'decimal.js';
 import { CToken, Market } from '../src';
+import { BorrowableCToken } from '../src/classes/BorrowableCToken';
 
 const ACCOUNT = '0x00000000000000000000000000000000000000aa';
 const MARKET = '0x00000000000000000000000000000000000000bb';
@@ -76,5 +77,45 @@ describe('Market position health units', () => {
             market.previewPositionHealthRedeem(token, Decimal(10)),
             /Insufficient collateral/,
         );
+    });
+
+    test('previewPositionHealthRepay treats Decimal(0) as full repay when sizing the reader call', async () => {
+        const market = Object.create(Market.prototype) as Market;
+        const token = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
+        let capturedDebtAssets: bigint | null = null;
+
+        (market as any).address = MARKET;
+        (market as any).account = ACCOUNT;
+        (market as any).getAccountOrThrow = () => ACCOUNT;
+        (market as any).reader = {
+            getPositionHealth: async (
+                _market: string,
+                _account: string,
+                _depositToken: string,
+                _borrowToken: string,
+                _isDeposit: boolean,
+                _collateralAssets: bigint,
+                _isRepay: boolean,
+                debtAssets: bigint,
+            ) => {
+                capturedDebtAssets = debtAssets;
+                return {
+                    positionHealth: 2n * WAD,
+                    errorCodeHit: false,
+                };
+            },
+        };
+
+        (token as any).address = CTOKEN;
+        (token as any).cache = {
+            decimals: 18n,
+            asset: { decimals: 18 },
+        };
+        (token as any).getUserDebt = (_inUsd: boolean) => Decimal(7);
+
+        const result = await market.previewPositionHealthRepay(token, Decimal(0));
+
+        assert.equal(capturedDebtAssets, toWad(7));
+        assert.equal(result?.toString(), '1');
     });
 });

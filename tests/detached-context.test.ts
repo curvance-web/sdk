@@ -99,6 +99,56 @@ test("NativeToken keeps an explicit detached read provider even when setup conte
     assert.equal(token.provider, explicitReadProvider);
 });
 
+test("ERC20 explicit detached read providers do not inherit the global setup signer", async () => {
+    const defaultReadProvider = { id: "default" } as any;
+    const explicitReadProvider = { id: "explicit" } as any;
+    const globalSigner = {
+        address: "0x0000000000000000000000000000000000000abc",
+        provider: defaultReadProvider,
+    } as any;
+
+    setSetupConfig(ORACLE_A, defaultReadProvider);
+    (setupModule as any).setup_config.signer = globalSigner;
+
+    const token = new ERC20(explicitReadProvider, TOKEN as any);
+
+    assert.equal(token.provider, explicitReadProvider);
+    assert.equal(token.signer, null);
+    await assert.rejects(
+        () => token.approve(ORACLE_B as any, null),
+        /Provider is not a signer/i,
+    );
+});
+
+test("NativeToken explicit detached read providers do not inherit the global setup account", async () => {
+    const defaultReadProvider = {
+        getBalance: async () => {
+            throw new Error("should not use default provider");
+        },
+    } as any;
+    const explicitReadProvider = {
+        getBalance: async (account: string) => {
+            assert.equal(account, "0x0000000000000000000000000000000000000def");
+            return 123n;
+        },
+    } as any;
+
+    setSetupConfig(ORACLE_A, defaultReadProvider);
+    (setupModule as any).setup_config.account = "0x0000000000000000000000000000000000000abc";
+
+    const token = new NativeToken("monad-mainnet", explicitReadProvider);
+
+    assert.equal(token.provider, explicitReadProvider);
+    assert.equal(token.account, null);
+    await assert.rejects(
+        () => token.balanceOf(null, false),
+        /Provider is not a signer/i,
+    );
+
+    const balance = await token.balanceOf("0x0000000000000000000000000000000000000def" as any, false);
+    assert.equal(balance, 123n);
+});
+
 test("ERC20 preserves legacy detached signer-in-provider writes", async () => {
     (setupModule as any).setup_config = undefined;
 

@@ -332,6 +332,78 @@ export type MerklOpportunityLike = {
 };
 
 export type ApyOverrides = Record<string, { value: number }>;
+export type MerklMatchMode = "deposit" | "borrow";
+
+function normalizeMerklTokenKey(value: string | undefined | null): string | null {
+    if (typeof value !== "string") {
+        return null;
+    }
+
+    const normalized = value.trim().toLowerCase();
+    return normalized.length > 0 ? normalized : null;
+}
+
+function getMerklOpportunityTokenKeys(
+    opportunity: MerklOpportunityLike,
+    mode: MerklMatchMode,
+): string[] {
+    const tokenKeys = Array.from(
+        new Set(
+            (opportunity.tokens ?? [])
+                .map((token) => normalizeMerklTokenKey(token.address))
+                .filter((value): value is string => value != null),
+        ),
+    );
+    const identifierKey = normalizeMerklTokenKey(opportunity.identifier);
+
+    if (mode === "borrow") {
+        if (identifierKey != null) {
+            return [identifierKey];
+        }
+
+        return tokenKeys;
+    }
+
+    if (tokenKeys.length > 0) {
+        return tokenKeys;
+    }
+
+    return identifierKey != null ? [identifierKey] : [];
+}
+
+export function aggregateMerklAprByToken(
+    opportunities: MerklOpportunityLike[] | undefined,
+    mode: MerklMatchMode,
+): Map<string, Decimal> {
+    const totals = new Map<string, Decimal>();
+
+    for (const opportunity of opportunities ?? []) {
+        const apr = new Decimal(opportunity.apr ?? 0);
+        if (!apr.isFinite() || apr.lessThanOrEqualTo(0)) {
+            continue;
+        }
+
+        for (const tokenKey of getMerklOpportunityTokenKeys(opportunity, mode)) {
+            const current = totals.get(tokenKey) ?? new Decimal(0);
+            totals.set(tokenKey, current.add(apr.div(100)));
+        }
+    }
+
+    return totals;
+}
+
+export function getMerklTokenIncentiveApy(
+    tokenAddress: string,
+    opportunities: MerklOpportunityLike[] | undefined,
+    mode: MerklMatchMode,
+): Decimal {
+    const tokenKey = normalizeMerklTokenKey(tokenAddress);
+    if (tokenKey == null) {
+        return new Decimal(0);
+    }
+
+    return aggregateMerklAprByToken(opportunities, mode).get(tokenKey) ?? new Decimal(0);
+}
 
 /**
  * Returns the native yield for a token — the rate provided by the asset issuer.
@@ -364,26 +436,7 @@ export function getMerklDepositIncentives(
     tokenAddress: string,
     opportunities: MerklOpportunityLike[] | undefined,
 ): Decimal {
-    if (!opportunities?.length) return new Decimal(0);
-
-    const address = tokenAddress.toLowerCase();
-
-    const relevant = opportunities.filter((opp) =>
-        opp.tokens.some((t) => t.address.toLowerCase() === address),
-    );
-
-    if (!relevant.length) return new Decimal(0);
-
-    let bestApr = 0;
-    for (const opp of relevant) {
-        for (const t of opp.tokens) {
-            if (t.address.toLowerCase() === address) {
-                bestApr = Math.max(bestApr, opp.apr ?? 0);
-            }
-        }
-    }
-
-    return new Decimal(bestApr / 100);
+    return getMerklTokenIncentiveApy(tokenAddress, opportunities, "deposit");
 }
 
 /**
@@ -394,19 +447,7 @@ export function getMerklBorrowIncentives(
     tokenAddress: string,
     opportunities: MerklOpportunityLike[] | undefined,
 ): Decimal {
-    if (!opportunities?.length) return new Decimal(0);
-
-    const address = tokenAddress.toLowerCase();
-
-    const relevant = opportunities.filter(
-        (opp) => opp.identifier.toLowerCase() === address,
-    );
-
-    if (!relevant.length) return new Decimal(0);
-
-    const bestApr = relevant.reduce((max, opp) => Math.max(max, opp.apr ?? 0), 0);
-
-    return new Decimal(bestApr / 100);
+    return getMerklTokenIncentiveApy(tokenAddress, opportunities, "borrow");
 }
 
 /**

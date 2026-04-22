@@ -4,6 +4,7 @@ import { JsonRpcProvider } from "ethers";
 import { Api } from "../src/classes/Api";
 import { Market } from "../src/classes/Market";
 import { getChainRpcConfig } from "../src/chains";
+import { CURVANCE_DAO_FEE_RECEIVER, CURVANCE_FEE_BPS } from "../src/feePolicy";
 import { getRpcDebugSnapshot, isRetryableReadProvider, resetRpcDebugState } from "../src/retry-provider";
 import { all_markets, setup_config, setupChain } from "../src/setup";
 
@@ -190,6 +191,34 @@ test("setupChain supports user-specific public reads without a signer", async (t
     assert.equal(captured.signer, null);
     assert.equal(captured.account, account);
     assert.equal(captured.provider, setup_config.readProvider);
+});
+
+test("setupChain defaults Monad mainnet to the live Curvance fee policy", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async () => [] as any) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    await setupChain("monad-mainnet", null, "https://api.example");
+
+    assert.equal(
+        setup_config.feePolicy.getFeeBps({
+            operation: "zap",
+            inputToken: "0x0000000000000000000000000000000000000001" as any,
+            outputToken: "0x0000000000000000000000000000000000000002" as any,
+            inputAmount: 1n,
+            currentLeverage: null,
+            targetLeverage: null,
+        }),
+        CURVANCE_FEE_BPS,
+    );
+    assert.equal(setup_config.feePolicy.feeReceiver, CURVANCE_DAO_FEE_RECEIVER);
 });
 
 test("setupChain wraps explicit read-provider overrides with chain fallbacks", async (t) => {

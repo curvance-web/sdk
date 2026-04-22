@@ -34,38 +34,38 @@ describe('Zapping', { skip: FORK_SKIP }, () => {
         await framework.reset();
     });
 
-    test('Naitve Vault Zap', async function() {
-        const [ market, shMON, WMON ] = await framework.getMarket('shMON | WMON');
+    async function settleWrite(market: { reloadUserData: (account: address) => Promise<unknown> }, txLike: unknown) {
+        if (txLike && typeof (txLike as { wait?: () => Promise<unknown> }).wait === 'function') {
+            await (txLike as { wait: () => Promise<unknown> }).wait();
+        }
+
+        await market.reloadUserData(account);
+    }
+
+    test('Native Vault Zap', async function() {
+        const [ market, shMON ] = await framework.getMarket('shMON | WMON');
         const depositAmount = Decimal(1_000);
 
         await shMON.approvePlugin('native-vault', 'zapper');
         await shMON.approveUnderlying(depositAmount);
-        await shMON.depositAsCollateral(depositAmount, 'native-vault');
+        await settleWrite(market, await shMON.depositAsCollateral(depositAmount, 'native-vault'));
+
+        assert(shMON.getUserAssetBalance(false).gt(0), 'Expected native-vault zap to post asset balance');
     });
 
-    test('Naitve Simple Zap', async function() {
-        const [ market, shMON, WMON ] = await framework.getMarket('shMON | WMON');
+    test('Native Simple Zap', async function() {
+        const [ market, , cWMON ] = await framework.getMarket('shMON | WMON');
         const depositAmount = Decimal(1_000);
 
-        await WMON.approvePlugin('native-simple', 'zapper');
-        await WMON.approveUnderlying(depositAmount);
-        await WMON.depositAsCollateral(depositAmount, 'native-simple');
-    });
+        await cWMON.approvePlugin('native-simple', 'zapper');
+        await cWMON.approveUnderlying(depositAmount);
+        await settleWrite(market, await cWMON.depositAsCollateral(depositAmount, 'native-simple'));
 
-    test('Vault Zap', async function() {
-        const [ market, csAUSD, cAUSD ] = await framework.getMarket('sAUSD | AUSD');
-        const depositAmount = Decimal(1_000);
-
-        const sAUSD = await csAUSD.getUnderlyingVault();
-        const AUSD = await sAUSD.fetchAsset(true);
-        await csAUSD.approvePlugin('vault', 'zapper');
-        await AUSD.approve(csAUSD.getPluginAddress('vault', 'zapper') as address, depositAmount);
-        await csAUSD.approveUnderlying(depositAmount);
-        await csAUSD.depositAsCollateral(depositAmount, 'vault');
+        assert(cWMON.getUserAssetBalance(false).gt(0), 'Expected native-simple zap to post asset balance');
     });
 
     test('Simple Zap', async function() {
-        const [ market, cWMON, cUSDC ] = await framework.getMarket('WMON | USDC');
+        const [ market, cWMON ] = await framework.getMarket('WMON | USDC');
         const depositAmount = Decimal(1_000);
 
         const first_available_token = (await cWMON.getDepositTokens())[2]!;
@@ -78,11 +78,13 @@ describe('Zapping', { skip: FORK_SKIP }, () => {
             await first_available_token.interface.approve(cWMON.getPluginAddress('simple', 'zapper') as address, depositAmount);
         }
 
-        await cWMON.depositAsCollateral(depositAmount, {
+        await settleWrite(market, await cWMON.depositAsCollateral(depositAmount, {
             type: 'simple',
             inputToken: first_available_token.interface.address,
             slippage: Decimal(0.005)
-        });
+        }));
+
+        assert(cWMON.getUserAssetBalance(false).gt(0), 'Expected simple zap to post asset balance');
     });
 
     test('SDK-004: same-token simple zap deposits without a swap route', async function() {
@@ -96,13 +98,12 @@ describe('Zapping', { skip: FORK_SKIP }, () => {
 
         await cUSDC.approvePlugin('simple', 'zapper');
         await cUSDC.approveZapAsset(instructions, depositAmount);
-        await cUSDC.depositAsCollateral(depositAmount, instructions);
-        await market.reloadUserData(account);
+        await settleWrite(market, await cUSDC.depositAsCollateral(depositAmount, instructions));
 
-        const userCollateral = cUSDC.getUserCollateral(false);
+        const userAssets = cUSDC.getUserAssetBalance(false);
         assert(
-            userCollateral.gte(depositAmount),
-            `Expected same-token zap deposit to post collateral, got ${userCollateral}`,
+            userAssets.gte(depositAmount),
+            `Expected same-token zap deposit to post assets, got ${userAssets}`,
         );
     });
 

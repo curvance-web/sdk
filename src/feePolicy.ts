@@ -259,3 +259,26 @@ export const NO_FEE_POLICY: FeePolicy = Object.freeze({
     feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
     getFeeBps: () => 0n,
 });
+
+let monadMainnetFeePolicy: FeePolicy | null = null;
+
+export function getMonadMainnetFeePolicy(): FeePolicy {
+    monadMainnetFeePolicy ??= Object.freeze(
+        flatFeePolicy({
+            bps: CURVANCE_FEE_BPS,
+            feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+            chain: 'monad-mainnet',
+        }),
+    );
+
+    return monadMainnetFeePolicy;
+}
+
+export function defaultFeePolicyForChain(chain: ChainRpcPrefix): FeePolicy {
+    switch (chain) {
+        case 'monad-mainnet':
+            return getMonadMainnetFeePolicy();
+        default:
+            return NO_FEE_POLICY;
+    }
+}

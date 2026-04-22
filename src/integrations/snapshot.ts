@@ -153,7 +153,11 @@ export async function takePortfolioSnapshot(
             for (const market of groupedMarkets) {
                 const dynamic = dynamicMarket.find((m) => m.address === market.address);
                 const user = userData.markets.find((m) => m.address === market.address);
-                if (!dynamic || !user) continue;
+                if (!dynamic || !user) {
+                    throw new Error(
+                        `Fresh snapshot refresh missing market state for ${market.address}.`,
+                    );
+                }
                 market.applyState(dynamic, user);
             }
         }

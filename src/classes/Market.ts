@@ -1,4 +1,4 @@
-import { BPS, ChangeRate, contractSetup, EMPTY_ADDRESS, getRateSeconds, requireAccount, toBigInt, toDecimal, UINT256_MAX, WAD, WAD_DECIMAL } from "../helpers";
+import { aggregateMerklAprByToken, BPS, ChangeRate, contractSetup, EMPTY_ADDRESS, getRateSeconds, requireAccount, toBigInt, toDecimal, UINT256_MAX, WAD, WAD_DECIMAL } from "../helpers";
 import { Contract } from "ethers";
 import { DynamicMarketData, ProtocolReader, StaticMarketData, UserMarket, UserMarketSummary } from "./ProtocolReader";
 import { AccountSnapshot, CToken } from "./CToken";
@@ -381,6 +381,7 @@ export class Market {
     }
 
     hasUserActivity() {
+        this.requireFullUserTokenData("determining user activity");
         return this.tokens.some((token) =>
             token.cache.userAssetBalance > 0n ||
             token.cache.userShareBalance > 0n ||
@@ -453,6 +454,7 @@ export class Market {
             throw new Error(`Could not reload market state for ${this.address}.`);
         }
 
+        this.account = account;
         this.applyState(dynamic, user);
     }
 
@@ -464,6 +466,7 @@ export class Market {
             throw new Error(`Could not reload market user summary for ${this.address}.`);
         }
 
+        this.account = account;
         this.applyUserSummary(user);
     }
 
@@ -509,6 +512,7 @@ export class Market {
                     throw new Error(`Could not reload market state for ${market.address}.`);
                 }
 
+                market.account = account;
                 market.applyState(dynamic, user);
             }
         }
@@ -533,6 +537,7 @@ export class Market {
                     throw new Error(`Could not reload market user summary for ${market.address}.`);
                 }
 
+                market.account = account;
                 market.applyUserSummary(user);
             }
         }
@@ -556,23 +561,6 @@ export class Market {
                     plugins: 'plugins' in data ? data.plugins as { [key: string]: address } : {},
                 });
             }
-        }
-
-        return index;
-    }
-
-    private static buildOpportunityIndex(opportunities: MerklOpportunity[]): Map<string, MerklOpportunity> {
-        const index = new Map<string, MerklOpportunity>();
-
-        for (const opportunity of opportunities) {
-            const key = opportunity.identifier.toLowerCase();
-            const existing = index.get(key);
-            if (existing != undefined) {
-                existing.apr += opportunity.apr;
-                continue;
-            }
-
-            index.set(key, { ...opportunity });
         }
 
         return index;
@@ -861,6 +849,7 @@ export class Market {
      */
     async previewPositionHealthRepay(token: BorrowableCToken, amount: TokenInput) {
         const user = this.getAccountOrThrow();
+        const repayAmount = amount.eq(0) ? token.getUserDebt(false) : amount;
         const data = await this.reader.getPositionHealth(
             this.address,
             user,
@@ -869,7 +858,7 @@ export class Market {
             false,
             0n,
             true,
-            FormatConverter.decimalToBigInt(amount, token.decimals),
+            FormatConverter.decimalToBigInt(repayAmount, token.decimals),
             0n
         );
 
@@ -975,8 +964,8 @@ export class Market {
             fetchMerklOpportunities({ action: 'BORROW', chainId }).catch(() => [] as MerklOpportunity[]),
         ]);
         const deployIndex = this.buildDeployDataIndex(resolvedSetup);
-        const lendOppIndex = this.buildOpportunityIndex(merklLendOpps);
-        const borrowOppIndex = this.buildOpportunityIndex(merklBorrowOpps);
+        const lendOppApyByToken = aggregateMerklAprByToken(merklLendOpps, "deposit");
+        const borrowOppApyByToken = aggregateMerklAprByToken(merklBorrowOpps, "borrow");
         const yieldIndex = this.buildYieldIndex(yields);
         const dynamicByAddress = this.buildMarketPayloadIndex(all_data.dynamicMarket);
         const userByAddress = this.buildMarketPayloadIndex(all_data.userData.markets);
@@ -1022,14 +1011,14 @@ export class Market {
 
             for(const token of market.tokens) {
                 const tokenKey = token.address.toLowerCase();
-                const lendOpp = lendOppIndex.get(tokenKey);
-                if(lendOpp != undefined) {
-                    token.incentiveSupplyApy = new Decimal(lendOpp.apr / 100);
+                const lendApy = lendOppApyByToken.get(tokenKey);
+                if(lendApy != undefined) {
+                    token.incentiveSupplyApy = lendApy;
                 }
 
-                const borrowOpp = borrowOppIndex.get(tokenKey);
-                if(borrowOpp != undefined) {
-                    token.incentiveBorrowApy = new Decimal(borrowOpp.apr / 100);
+                const borrowApy = borrowOppApyByToken.get(tokenKey);
+                if(borrowApy != undefined) {
+                    token.incentiveBorrowApy = borrowApy;
                 }
 
                 const api_yield = yieldIndex.get(token.asset.symbol.toUpperCase());

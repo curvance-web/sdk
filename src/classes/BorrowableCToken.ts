@@ -78,7 +78,23 @@ export class BorrowableCToken extends CToken {
     async getMaxBorrowable(inUSD: true): Promise<USD>;
     async getMaxBorrowable(inUSD: boolean = false): Promise<USD | TokenInput> {
         const credit_usd = this.market.userRemainingCredit;
-        return inUSD ? credit_usd : this.convertUsdToTokens(credit_usd, true);
+        const safeCreditUsd =
+            credit_usd.isFinite() && credit_usd.greaterThan(0)
+                ? credit_usd
+                : new Decimal(0);
+
+        if (inUSD) {
+            return safeCreditUsd;
+        }
+
+        if (safeCreditUsd.eq(0)) {
+            return new Decimal(0);
+        }
+
+        const maxBorrowable = this.convertUsdToTokens(safeCreditUsd, true);
+        return maxBorrowable.isFinite() && maxBorrowable.greaterThan(0)
+            ? maxBorrowable
+            : new Decimal(0);
     };
 
     override async depositAsCollateral(amount: TokenInput, zap: ZapperInstructions = 'none',  receiver: address | null = null) {

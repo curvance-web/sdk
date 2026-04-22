@@ -15,14 +15,6 @@ function resolveDefaultOracleManagerAddress(): address | undefined {
     return (getSetupConfig() as any)?.contracts?.OracleManager as address | undefined;
 }
 
-function resolveDefaultSigner(): curvance_signer | null {
-    return (getSetupConfig() as any)?.signer ?? null;
-}
-
-function resolveDefaultReadProvider(): curvance_read_provider | undefined {
-    return (getSetupConfig() as any)?.readProvider as curvance_read_provider | undefined;
-}
-
 export interface IERC20 {
     balanceOf(account: address): Promise<bigint>;
     transfer(to: address, amount: bigint): Promise<TransactionResponse>;
@@ -66,7 +58,7 @@ export class ERC20 {
                 : resolveReadProvider(provider, `ERC20 ${address}`);
 
         this.provider = resolvedProvider;
-        this.signer = signer ?? legacySigner ?? resolveDefaultSigner();
+        this.signer = signer ?? legacySigner ?? null;
         this.address = address;
         this.cache = cache;
         this.oracleManagerAddress = oracleManagerAddress ?? resolveDefaultOracleManagerAddress();
@@ -92,9 +84,10 @@ export class ERC20 {
     }
 
     async transfer(to: address, amount: TokenInput) {
+        const signer = requireSigner(this.signer);
         const decimals = this.decimals ?? await this.contract.decimals();
         const tokens = toBigInt(amount, decimals);
-        return contractSetup<IERC20>(requireSigner(this.signer), this.address, ERC20_ABI).transfer(to, tokens);
+        return contractSetup<IERC20>(signer, this.address, ERC20_ABI).transfer(to, tokens);
     }
 
     async rawTransfer(to: address, amount: bigint) {
@@ -102,9 +95,10 @@ export class ERC20 {
     }
 
     async approve(spender: address, amount: TokenInput | null) {
+        const signer = requireSigner(this.signer);
         const decimals = this.decimals ?? await this.fetchDecimals();
         const tokens = amount == null ? UINT256_MAX : toBigInt(amount, decimals);
-        return contractSetup<IERC20>(requireSigner(this.signer), this.address, ERC20_ABI).approve(spender, tokens);
+        return contractSetup<IERC20>(signer, this.address, ERC20_ABI).approve(spender, tokens);
     }
 
     async fetchName() {

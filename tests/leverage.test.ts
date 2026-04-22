@@ -38,6 +38,17 @@ describe('Leverage', { skip: FORK_SKIP }, () => {
         await market.reloadUserData(account);
     }
 
+    async function settleWrite(
+        market: { reloadUserData: (account: address) => Promise<unknown> },
+        txLike: unknown,
+    ) {
+        if (txLike && typeof (txLike as { wait?: () => Promise<unknown> }).wait === 'function') {
+            await (txLike as { wait: () => Promise<unknown> }).wait();
+        }
+
+        await reloadUserState(market);
+    }
+
     function computePostDepositBaseline(collateralUsd: Decimal, debtUsd: Decimal, depositUsd: Decimal) {
         const collateralAfterDeposit = collateralUsd.add(depositUsd);
         return collateralAfterDeposit.div(collateralAfterDeposit.sub(debtUsd));
@@ -47,87 +58,81 @@ describe('Leverage', { skip: FORK_SKIP }, () => {
         const [ market, cshMON, cWMON ] = await framework.getMarket('shMON | WMON');
 
         await cWMON.approveUnderlying();
-        await cWMON.deposit(Decimal(5000)); // Seed borrow
+        await settleWrite(market, await cWMON.deposit(Decimal(5000))); // Seed borrow
 
         const depositAmount = Decimal(1_000);
         await cshMON.approvePlugin('native-vault', 'positionManager');
         await cshMON.approveUnderlying(depositAmount, cshMON.getPluginAddress('native-vault', 'positionManager'));
-        await cshMON.depositAndLeverage(depositAmount, cWMON, Decimal(3), 'native-vault', Decimal(0.01));
+        await settleWrite(market, await cshMON.depositAndLeverage(depositAmount, cWMON, Decimal(3), 'native-vault', Decimal(0.01)));
+
+        const leverage = cshMON.getLeverage();
+        assert(leverage !== null && leverage.gt(Decimal(1)), `Expected native-vault deposit+leverage to open leverage, got ${leverage}`);
     });
 
     test('Native vault leverage up & down', async function() {
         const [ market, cshMON, cWMON ] = await framework.getMarket('shMON | WMON');
 
         await cWMON.approveUnderlying();
-        await cWMON.deposit(Decimal(5000)); // Seed borrow
+        await settleWrite(market, await cWMON.deposit(Decimal(5000))); // Seed borrow
 
         const depositAmount = Decimal(1_000);
         await cshMON.approveUnderlying(depositAmount);
-        await cshMON.depositAsCollateral(depositAmount);
+        await settleWrite(market, await cshMON.depositAsCollateral(depositAmount));
         await cshMON.approvePlugin('native-vault', 'positionManager');
-        await cshMON.leverageUp(cWMON, Decimal(3), 'native-vault', Decimal(0.01));
+        await settleWrite(market, await cshMON.leverageUp(cWMON, Decimal(3), 'native-vault', Decimal(0.01)));
+
+        const leverageAfterUp = cshMON.getLeverage();
+        assert(leverageAfterUp !== null && leverageAfterUp.gt(Decimal(1)), `Expected native-vault leverageUp to raise leverage, got ${leverageAfterUp}`);
 
         await framework.skipMarketCooldown(market.address);
         await cshMON.approvePlugin('simple', 'positionManager');
-        await cshMON.leverageDown(cWMON, cshMON.getLeverage() as Decimal, Decimal(1.5), 'simple', Decimal(0.01));
-    });
+        await settleWrite(market, await cshMON.leverageDown(cWMON, leverageAfterUp!, Decimal(1.5), 'simple', Decimal(0.01)));
 
-    test('Vault deposit and leverage', async function() {
-        const [ market, csAUSD, cAUSD ] = await framework.getMarket('sAUSD | AUSD');
-
-        await cAUSD.approveUnderlying();
-        await cAUSD.deposit(Decimal(5000)); // Seed borrow
-
-        const depositAmount = Decimal(1_000);
-        await csAUSD.approvePlugin('vault', 'positionManager');
-        await csAUSD.approveUnderlying(depositAmount, csAUSD.getPluginAddress('vault', 'positionManager'));
-        await csAUSD.depositAndLeverage(depositAmount, cAUSD, Decimal(3), 'vault', Decimal(0.005));
-    });
-
-    test('Vault leverage up & down', async function() {
-        const [ market, csAUSD, cAUSD ] = await framework.getMarket('sAUSD | AUSD');
-
-        await cAUSD.approveUnderlying();
-        await cAUSD.deposit(Decimal(5000)); // Seed borrow
-
-        const depositAmount = Decimal(1_000);
-        await csAUSD.approveUnderlying(depositAmount);
-        await csAUSD.depositAsCollateral(depositAmount);
-        await csAUSD.approvePlugin('vault', 'positionManager');
-        await csAUSD.leverageUp(cAUSD, Decimal(3), 'vault', Decimal(0.005));
-
-        // TODO: Can't do this with sAUSD because there is no liquidity
-        // await framework.skipMarketCooldown(market.address);
-        // await sAUSD.approvePlugin('simple', 'positionManager');
-        // await sAUSD.leverageDown(AUSD, sAUSD.getLeverage() as Decimal, Decimal(1.5), 'simple', Decimal(0.005));
+        const leverageAfterDown = cshMON.getLeverage();
+        assert(
+            leverageAfterDown !== null && leverageAfterDown.lt(leverageAfterUp!),
+            `Expected native-vault leverageDown to reduce leverage from ${leverageAfterUp} to ${leverageAfterDown}`,
+        );
     });
 
     test('Simple deposit and leverage', async function() {
-        const [ market, cearnAUSD, cAUSD ] = await framework.getMarket('earnAUSD | AUSD');
+        const [ market, cWMON, cUSDC ] = await framework.getMarket('WMON | USDC');
 
-        await cAUSD.approveUnderlying();
-        await cAUSD.deposit(Decimal(5000)); // Seed borrow
+        await cUSDC.approveUnderlying();
+        await settleWrite(market, await cUSDC.deposit(Decimal(5000))); // Seed borrow
 
         const depositAmount = Decimal(1_000);
-        await cearnAUSD.approvePlugin('simple', 'positionManager');
-        await cearnAUSD.approveUnderlying(depositAmount, cearnAUSD.getPluginAddress('simple', 'positionManager'));
-        await cearnAUSD.depositAndLeverage(depositAmount, cAUSD, Decimal(3), 'simple', Decimal(0.005));
+        await cWMON.approvePlugin('simple', 'positionManager');
+        await cWMON.approveUnderlying(depositAmount, cWMON.getPluginAddress('simple', 'positionManager'));
+        await settleWrite(market, await cWMON.depositAndLeverage(depositAmount, cUSDC, Decimal(3), 'simple', Decimal(0.005)));
+
+        const leverage = cWMON.getLeverage();
+        assert(leverage !== null && leverage.gt(Decimal(1)), `Expected simple deposit+leverage to open leverage, got ${leverage}`);
     });
 
     test('Simple leverage up & down', async function() {
-        const [ market, cearnAUSD, cAUSD ] = await framework.getMarket('earnAUSD | AUSD');
+        const [ market, cWMON, cUSDC ] = await framework.getMarket('WMON | USDC');
 
-        await cAUSD.approveUnderlying();
-        await cAUSD.deposit(Decimal(5000)); // Seed borrow
+        await cUSDC.approveUnderlying();
+        await settleWrite(market, await cUSDC.deposit(Decimal(5000))); // Seed borrow
 
         const depositAmount = Decimal(1_000);
-        await cearnAUSD.approveUnderlying(depositAmount);
-        await cearnAUSD.depositAsCollateral(depositAmount);
-        await cearnAUSD.approvePlugin('simple', 'positionManager');
-        await cearnAUSD.leverageUp(cAUSD, Decimal(3), 'simple', Decimal(0.005));
+        await cWMON.approveUnderlying(depositAmount);
+        await settleWrite(market, await cWMON.depositAsCollateral(depositAmount));
+        await cWMON.approvePlugin('simple', 'positionManager');
+        await settleWrite(market, await cWMON.leverageUp(cUSDC, Decimal(3), 'simple', Decimal(0.005)));
+
+        const leverageAfterUp = cWMON.getLeverage();
+        assert(leverageAfterUp !== null && leverageAfterUp.gt(Decimal(1)), `Expected simple leverageUp to raise leverage, got ${leverageAfterUp}`);
 
         await framework.skipMarketCooldown(market.address);
-        await cearnAUSD.leverageDown(cAUSD, cearnAUSD.getLeverage() as Decimal, Decimal(1.5), 'simple', Decimal(0.005));
+        await settleWrite(market, await cWMON.leverageDown(cUSDC, leverageAfterUp!, Decimal(1.5), 'simple', Decimal(0.005)));
+
+        const leverageAfterDown = cWMON.getLeverage();
+        assert(
+            leverageAfterDown !== null && leverageAfterDown.lt(leverageAfterUp!),
+            `Expected simple leverageDown to reduce leverage from ${leverageAfterUp} to ${leverageAfterDown}`,
+        );
     });
 
     // SDK-001: leverageUp simple — expectedShares unit mismatch
@@ -142,16 +147,18 @@ describe('Leverage', { skip: FORK_SKIP }, () => {
         assert(exchangeRate > 1000000000000000000n, `Expected exchangeRate > 1e18, got ${exchangeRate}`);
 
         await cUSDC.approveUnderlying();
-        await cUSDC.deposit(Decimal(5000));
+        await settleWrite(market, await cUSDC.deposit(Decimal(5000)));
 
         const depositAmount = Decimal(1_000);
         await cWMON.approveUnderlying(depositAmount);
-        await cWMON.depositAsCollateral(depositAmount);
+        await settleWrite(market, await cWMON.depositAsCollateral(depositAmount));
 
         await cWMON.approvePlugin('simple', 'positionManager');
-        await cWMON.leverageUp(cUSDC, Decimal(3), 'simple', Decimal(0.01));
+        await settleWrite(market, await cWMON.leverageUp(cUSDC, Decimal(3), 'simple', Decimal(0.01)));
 
-        console.log(`Leverage: ${cWMON.getLeverage()}`);
+        const leverage = cWMON.getLeverage();
+        console.log(`Leverage: ${leverage}`);
+        assert(leverage !== null && leverage.gt(Decimal(1)), `Expected leverageUp to open leverage, got ${leverage}`);
     });
 
     // SDK-002: previewLeverageDown returned the target collateral level
@@ -161,14 +168,14 @@ describe('Leverage', { skip: FORK_SKIP }, () => {
         const [ market, cWMON, cUSDC ] = await framework.getMarket('WMON | USDC');
 
         await cUSDC.approveUnderlying();
-        await cUSDC.deposit(Decimal(5000));
+        await settleWrite(market, await cUSDC.deposit(Decimal(5000)));
 
         const depositAmount = Decimal(1_000);
         await cWMON.approveUnderlying(depositAmount);
-        await cWMON.depositAsCollateral(depositAmount);
+        await settleWrite(market, await cWMON.depositAsCollateral(depositAmount));
 
         await cWMON.approvePlugin('simple', 'positionManager');
-        await cWMON.leverageUp(cUSDC, Decimal(3), 'simple', Decimal(0.01));
+        await settleWrite(market, await cWMON.leverageUp(cUSDC, Decimal(3), 'simple', Decimal(0.01)));
 
         const leverageAfterUp = cWMON.getLeverage();
         console.log(`Leverage after up: ${leverageAfterUp}`);

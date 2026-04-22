@@ -7,7 +7,7 @@ import { wrapProviderWithRetries } from "./retry-provider";
 import { chain_config } from "./chains";
 import { Api } from "./classes/Api";
 import { validateApiUrl } from "./validation";
-import { FeePolicy, NO_FEE_POLICY } from "./feePolicy";
+import { FeePolicy, defaultFeePolicyForChain } from "./feePolicy";
 
 export interface SetupConfigSnapshot {
     chain: ChainRpcPrefix;
@@ -34,7 +34,7 @@ const successful_setup_results = new Map<number, {
 
 export interface SetupChainOptions {
     /** Optional fee policy for SDK-initiated DEX swaps (zaps + leverage).
-     *  Defaults to NO_FEE_POLICY (zero fees) for backward compatibility. */
+     *  Defaults to the chain's live Curvance fee policy when required. */
     feePolicy?: FeePolicy;
     /** Optional dedicated account for user-specific reads when no signer is available. */
     account?: address | null;
@@ -65,7 +65,7 @@ function createSetupConfig(
         provider: signer ?? readProvider,
         contracts: getContractAddresses(chain),
         api_url,
-        feePolicy: options.feePolicy ?? NO_FEE_POLICY,
+        feePolicy: options.feePolicy ?? defaultFeePolicyForChain(chain),
     };
 }
 

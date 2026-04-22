@@ -3,7 +3,10 @@ import assert from 'node:assert';
 import {
     flatFeePolicy,
     NO_FEE_POLICY,
+    CURVANCE_FEE_BPS,
     CURVANCE_DAO_FEE_RECEIVER,
+    defaultFeePolicyForChain,
+    getMonadMainnetFeePolicy,
     type FeePolicyContext,
     type TokenClass,
 } from '../src/feePolicy';
@@ -41,6 +44,21 @@ describe('FeePolicy', () => {
 
         test('feeReceiver is the Curvance DAO address', () => {
             assert.strictEqual(NO_FEE_POLICY.feeReceiver, CURVANCE_DAO_FEE_RECEIVER);
+        });
+    });
+
+    describe('defaultFeePolicyForChain', () => {
+        test('defaults monad-mainnet to the live Curvance swap fee policy', () => {
+            const policy = defaultFeePolicyForChain('monad-mainnet');
+            assert.strictEqual(policy, getMonadMainnetFeePolicy());
+            assert.strictEqual(policy.getFeeBps(baseCtx()), CURVANCE_FEE_BPS);
+            assert.strictEqual(policy.feeReceiver, CURVANCE_DAO_FEE_RECEIVER);
+        });
+
+        test('keeps non-Monad chains on the no-fee default', () => {
+            const policy = defaultFeePolicyForChain('arb-sepolia');
+            assert.strictEqual(policy, NO_FEE_POLICY);
+            assert.strictEqual(policy.getFeeBps(baseCtx()), 0n);
         });
     });
 

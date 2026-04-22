@@ -12,18 +12,6 @@ function resolveDefaultOracleManagerAddress(): address | undefined {
     return (getSetupConfig() as any)?.contracts?.OracleManager as address | undefined;
 }
 
-function resolveDefaultSigner(): curvance_signer | null {
-    return (getSetupConfig() as any)?.signer ?? null;
-}
-
-function resolveDefaultAccount(): address | null {
-    return (getSetupConfig() as any)?.account ?? null;
-}
-
-function resolveDefaultReadProvider(): curvance_read_provider | undefined {
-    return (getSetupConfig() as any)?.readProvider as curvance_read_provider | undefined;
-}
-
 export class NativeToken {
     name   : string;
     symbol  : string;
@@ -52,8 +40,8 @@ export class NativeToken {
         this.symbol = config.native_symbol;
         this.name = config.native_name || config.native_symbol;
         this.provider = resolvedProvider;
-        this.signer = signer ?? legacySigner ?? resolveDefaultSigner();
-        this.account = account ?? legacyAccount ?? resolveDefaultAccount();
+        this.signer = signer ?? legacySigner ?? null;
+        this.account = account ?? legacyAccount ?? null;
         this.oracleManagerAddress = oracleManagerAddress ?? resolveDefaultOracleManagerAddress();
     }
 

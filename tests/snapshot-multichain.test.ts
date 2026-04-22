@@ -235,6 +235,29 @@ test("takePortfolioSnapshot refresh keeps same-chain readers with different prov
     assert.deepEqual(calls, ["A", "B"]);
 });
 
+test("takePortfolioSnapshot refresh fails closed when a refreshed market payload is missing", async () => {
+    const market = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Missing Market",
+        chain: "monad-mainnet",
+        reader: {
+            batchKey: "monad-mainnet:missing-reader",
+            getAllDynamicState: async () => ({
+                dynamicMarket: [],
+                userData: { markets: [] },
+            }),
+        },
+    });
+
+    await assert.rejects(
+        () => takePortfolioSnapshot(ACCOUNT as any, {
+            markets: [market],
+            refresh: true,
+        }),
+        /Fresh snapshot refresh missing market state/i,
+    );
+});
+
 test("takePortfolioSnapshot promotes summary-scoped markets back to full user data", async () => {
     let scope: "summary" | "full" = "summary";
     let reloads = 0;

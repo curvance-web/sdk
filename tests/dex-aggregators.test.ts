@@ -219,3 +219,65 @@ test("MultiDexAgg.quoteMin picks the route with the highest guaranteed output", 
 
     assert.equal(minOut, 80n);
 });
+
+test("MultiDexAgg.quoteAction picks the route with the highest guaranteed output", async () => {
+    const conservativeAction = { aggregator: "conservative" } as any;
+    const optimisticAction = { aggregator: "optimistic" } as any;
+
+    const conservative = {
+        dao: FEE_RECEIVER,
+        router: TOKEN_IN,
+        getAvailableTokens: async () => [],
+        quoteAction: async () => ({
+            action: conservativeAction,
+            quote: {
+                to: TOKEN_IN,
+                calldata: "0x" as bytes,
+                min_out: 80n,
+                out: 90n,
+            },
+        }),
+        quoteMin: async () => 80n,
+        quote: async () => ({
+            to: TOKEN_IN,
+            calldata: "0x" as bytes,
+            min_out: 80n,
+            out: 90n,
+        }),
+    } as any;
+
+    const optimistic = {
+        dao: FEE_RECEIVER,
+        router: TOKEN_OUT,
+        getAvailableTokens: async () => [],
+        quoteAction: async () => ({
+            action: optimisticAction,
+            quote: {
+                to: TOKEN_OUT,
+                calldata: "0x" as bytes,
+                min_out: 50n,
+                out: 100n,
+            },
+        }),
+        quoteMin: async () => 50n,
+        quote: async () => ({
+            to: TOKEN_OUT,
+            calldata: "0x" as bytes,
+            min_out: 50n,
+            out: 100n,
+        }),
+    } as any;
+
+    const multi = new MultiDexAgg([optimistic, conservative]);
+    const { action, quote } = await multi.quoteAction(
+        WALLET,
+        TOKEN_IN,
+        TOKEN_OUT,
+        1_000n,
+        50n,
+    );
+
+    assert.equal(action, conservativeAction);
+    assert.equal(quote.min_out, 80n);
+    assert.equal(quote.out, 90n);
+});

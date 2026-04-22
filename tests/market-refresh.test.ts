@@ -129,6 +129,65 @@ test("reloadUserMarkets batches addresses and applies responses by address", asy
         { market: MARKET_A, dynamic: MARKET_A, user: MARKET_A },
         { market: MARKET_B, dynamic: MARKET_B, user: MARKET_B },
     ]);
+    assert.equal(marketA.account, ACCOUNT);
+    assert.equal(marketB.account, ACCOUNT);
+});
+
+test("reloadUserData binds the refreshed account for downstream helpers", async () => {
+    const { market } = createUserRefreshMarket();
+
+    market.account = null;
+    market.reader = {
+        getMarketStates: async () => ({
+            dynamicMarkets: [{ address: MARKET_A, tokens: [] }],
+            userMarkets: [{
+                address: MARKET_A,
+                collateral: 31n,
+                maxDebt: 32n,
+                debt: 33n,
+                positionHealth: 34n,
+                cooldown: 35n,
+                errorCodeHit: false,
+                priceStale: false,
+                tokens: [{
+                    address: TOKEN_A as any,
+                    userAssetBalance: 20n * WAD,
+                    userShareBalance: 21n * WAD,
+                    userUnderlyingBalance: 22n * WAD,
+                    userCollateral: 23n * WAD,
+                    userDebt: 24n * WAD,
+                    liquidationPrice: 25n * WAD,
+                }],
+            }],
+        }),
+    } as any;
+
+    await market.reloadUserData(ACCOUNT as any);
+
+    assert.equal(market.account, ACCOUNT);
+});
+
+test("reloadUserSummary binds the refreshed account for downstream helpers", async () => {
+    const { market } = createUserRefreshMarket();
+
+    market.account = null;
+    market.reader = {
+        getMarketSummaries: async () => ([{
+            address: MARKET_A,
+            collateral: 31n,
+            maxDebt: 32n,
+            debt: 33n,
+            positionHealth: 34n,
+            cooldown: 35n,
+            errorCodeHit: false,
+            priceStale: false,
+        }]),
+    } as any;
+
+    await market.reloadUserSummary(ACCOUNT as any);
+
+    assert.equal(market.account, ACCOUNT);
+    assert.equal(market.userDataScope, "summary");
 });
 
 test("reloadUserMarkets keeps same-chain readers with different providers separate", async () => {
@@ -317,6 +376,18 @@ test("summary-only user refresh rejects market-level getters that depend on toke
     assert.throws(() => market.getUserDepositsChange("day"), /summary-only refresh/i);
     assert.throws(() => market.getUserDebtChange("day"), /summary-only refresh/i);
     assert.throws(() => market.getUserNetChange("day"), /summary-only refresh/i);
+});
+
+test("summary-only user refresh fail-closes user-activity helpers", () => {
+    const market = createMarket({ userAssetBalance: 1n, userDebt: 2n });
+    market.address = MARKET_A as any;
+    Object.defineProperty(market, "userDataScope", {
+        value: "summary",
+        configurable: true,
+    });
+
+    assert.throws(() => market.hasUserActivity(), /summary-only refresh/i);
+    assert.throws(() => Market.getActiveUserMarkets([market]), /summary-only refresh/i);
 });
 
 test("getSnapshots runs token queries concurrently and preserves order", async () => {

@@ -198,7 +198,7 @@ export class MultiDexAgg implements IDexAgg {
             )
         );
 
-        return this._pickBest(results, tokenIn, tokenOut, amount, (quote) => quote.out);
+        return this._pickBest(results, tokenIn, tokenOut, amount, (quote) => quote.min_out);
     }
 
     // -----------------------------------------------------------------------

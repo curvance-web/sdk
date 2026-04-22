@@ -217,8 +217,20 @@ test("Market.getAll forwards chainId to Merkl and aggregates duplicate opportuni
 
         if (params.action === "LEND") {
             return [
-                { identifier: TOKEN_A, apr: 12, name: "lend-first", type: "merkl", tokens: [] },
-                { identifier: TOKEN_A.toUpperCase(), apr: 34, name: "lend-second", type: "merkl", tokens: [] },
+                {
+                    identifier: MARKET_A,
+                    apr: 12,
+                    name: "lend-first",
+                    type: "merkl",
+                    tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
+                },
+                {
+                    identifier: MARKET_B,
+                    apr: 34,
+                    name: "lend-second",
+                    type: "merkl",
+                    tokens: [{ address: TOKEN_A.toUpperCase(), symbol: "TOKA" }],
+                },
             ];
         }
 

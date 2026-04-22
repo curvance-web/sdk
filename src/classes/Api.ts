@@ -23,6 +23,21 @@ export type MilestoneResponse = {
 export type Milestones = { [key: string]: MilestoneResponse };
 export type Incentives = { [key: address]: Array<IncentiveResponse> };
 
+function isRewardsResponse(
+    value: unknown,
+): value is { milestones: Array<MilestoneResponse>; incentives: Array<IncentiveResponse> } {
+    if (typeof value !== "object" || value == null) {
+        return false;
+    }
+
+    const maybeRewards = value as {
+        milestones?: unknown;
+        incentives?: unknown;
+    };
+
+    return Array.isArray(maybeRewards.milestones) && Array.isArray(maybeRewards.incentives);
+}
+
 function resolveDefaultSetupConfig(context: string): SetupConfigSnapshot {
     const config = (require("../setup") as typeof import("../setup")).setup_config;
     if (config == undefined) {
@@ -90,10 +105,12 @@ export class Api {
 
         let rewards;
         try {
-            rewards = await fetchWithTimeout(`${api_url}/v1/rewards/active/${chain}`).then(res => res.json()) as {
-                milestones: Array<MilestoneResponse>
-                incentives: Array<IncentiveResponse>
-            };
+            const payload = await fetchWithTimeout(`${api_url}/v1/rewards/active/${chain}`).then(res => res.json());
+            if (!isRewardsResponse(payload)) {
+                throw new Error("Invalid rewards response structure");
+            }
+
+            rewards = payload;
         } catch(e) {
             console.error("Failed to fetch rewards data from API:", e);
             rewards = {
