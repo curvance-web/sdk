@@ -3,7 +3,7 @@ import { Market } from "./classes/Market";
 import { address, curvance_provider, curvance_read_provider, curvance_signer } from './types';
 import { ProtocolReader } from "./classes/ProtocolReader";
 import { OracleManager } from "./classes/OracleManager";
-import { wrapProviderWithRetries } from "./retry-provider";
+import { getRetryableProviderTarget, wrapProviderWithRetries } from "./retry-provider";
 import { chain_config } from "./chains";
 import { Api } from "./classes/Api";
 import { validateApiUrl } from "./validation";
@@ -83,7 +83,8 @@ async function validateSignerProviderChain(chain: ChainRpcPrefix, signer: curvan
     }
 
     const expectedChainId = BigInt(chain_config[chain].chainId);
-    const network = await signer.provider.getNetwork();
+    const signerProvider = getRetryableProviderTarget(signer.provider as curvance_read_provider);
+    const network = await signerProvider.getNetwork();
     const actualChainId = BigInt(network.chainId);
 
     if (actualChainId !== expectedChainId) {

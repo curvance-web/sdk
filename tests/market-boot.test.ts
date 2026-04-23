@@ -209,6 +209,53 @@ test("Market.getAll fails clearly when a static market is missing dynamic state"
     );
 });
 
+test("Market.getAll joins rewards by market address case-insensitively", async () => {
+    Api.fetchNativeYields = async () => [];
+    merklModule.fetchMerklOpportunities = async () => [];
+    const milestone = {
+        market: MARKET_A.toUpperCase() as any,
+        tvl: 1,
+        multiplier: 2,
+        fail_multiplier: 3,
+        chain_network: "monad-mainnet",
+        start_date: "2026-01-01",
+        end_date: "2026-01-02",
+        duration_in_days: 1,
+    };
+    const incentive = {
+        market: MARKET_A.toUpperCase() as any,
+        type: "supply",
+        rate: 4,
+        description: "reward",
+        image: "stars-rewards",
+    };
+
+    const reader = {
+        getAllMarketData: async () => ({
+            staticMarket: [createStaticMarket(MARKET_A, TOKEN_A)],
+            dynamicMarket: [createDynamicMarket(MARKET_A, TOKEN_A, 111n)],
+            userData: {
+                locks: [],
+                markets: [createUserMarket(MARKET_A, TOKEN_A, 11n)],
+            },
+        }),
+    } as any;
+
+    const markets = await Market.getAll(
+        reader,
+        {} as any,
+        {} as any,
+        null,
+        ACCOUNT as any,
+        { [MARKET_A.toUpperCase()]: milestone },
+        { [MARKET_A.toUpperCase()]: [incentive] },
+        createSetup() as any,
+    );
+
+    assert.equal(markets[0]?.milestone, milestone);
+    assert.deepEqual(markets[0]?.incentives, [incentive]);
+});
+
 test("Market.getAll forwards chainId to Merkl and aggregates duplicate opportunities during boot", async () => {
     Api.fetchNativeYields = async () => [];
     const merklCalls: Array<{ action: string | undefined; chainId: number | undefined }> = [];

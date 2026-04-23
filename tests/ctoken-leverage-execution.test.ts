@@ -4,8 +4,10 @@ import Decimal from 'decimal.js';
 import {
     BorrowableCToken,
     CToken,
+    AdaptorTypes,
     FormatConverter,
     LEVERAGE,
+    Redstone,
     amplifyContractSlippage,
 } from '../src';
 import type { FeePolicyContext } from '../src/feePolicy';
@@ -177,6 +179,70 @@ function createSimpleExecutionHarness({
 }
 
 describe('CToken simple leverage execution', () => {
+    test('getPriceUpdates refreshes peer Redstone assets in the same market position', async (t) => {
+        const originalBuildMultiCallAction = Redstone.buildMultiCallAction;
+        const calls: string[] = [];
+        const makeToken = (address: string, asset: string, adapters: bigint[]) => {
+            const token = Object.create(CToken.prototype) as CToken;
+            (token as any).address = address;
+            Object.defineProperty(token, 'adapters', {
+                get: () => adapters,
+            });
+            (token as any).cache = { asset: { address: asset } };
+            (token as any).getAsset = (asErc20: boolean) => {
+                if (asErc20) {
+                    throw new Error('ERC20 asset not needed in this test');
+                }
+                return asset;
+            };
+            return token;
+        };
+        const current = makeToken(
+            '0x0000000000000000000000000000000000000101',
+            '0x0000000000000000000000000000000000000a01',
+            [AdaptorTypes.REDSTONE_CORE],
+        );
+        const peer = makeToken(
+            '0x0000000000000000000000000000000000000102',
+            '0x0000000000000000000000000000000000000a02',
+            [AdaptorTypes.REDSTONE_CORE],
+        );
+        const duplicateAsset = makeToken(
+            '0x0000000000000000000000000000000000000103',
+            '0x0000000000000000000000000000000000000a02',
+            [AdaptorTypes.REDSTONE_CORE],
+        );
+        const chainlinkOnly = makeToken(
+            '0x0000000000000000000000000000000000000104',
+            '0x0000000000000000000000000000000000000a04',
+            [AdaptorTypes.CHAINLINK],
+        );
+        (current as any).market = {
+            tokens: [current, peer, duplicateAsset, chainlinkOnly],
+        };
+
+        Redstone.buildMultiCallAction = (async (token: CToken) => {
+            calls.push(token.address);
+            return {
+                target: token.address,
+                isPriceUpdate: true,
+                data: `0x${token.address.slice(2).padStart(64, '0')}`,
+            } as any;
+        }) as typeof Redstone.buildMultiCallAction;
+
+        t.after(() => {
+            Redstone.buildMultiCallAction = originalBuildMultiCallAction;
+        });
+
+        const updates = await current.getPriceUpdates();
+
+        assert.deepEqual(calls, [current.address, peer.address]);
+        assert.deepEqual(
+            updates.map((update) => update.target),
+            [current.address, peer.address],
+        );
+    });
+
     test('oracleRoute targets manager multicall action when execution is submitted to a manager', async () => {
         const token = Object.create(CToken.prototype) as CToken;
         const multicalls: unknown[] = [];

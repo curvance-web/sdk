@@ -964,6 +964,12 @@ export class Market {
             fetchMerklOpportunities({ action: 'BORROW', chainId }).catch(() => [] as MerklOpportunity[]),
         ]);
         const deployIndex = this.buildDeployDataIndex(resolvedSetup);
+        const milestonesByAddress = new Map(
+            Object.entries(milestones).map(([market, milestone]) => [market.toLowerCase(), milestone]),
+        );
+        const incentivesByAddress = new Map(
+            Object.entries(incentives).map(([market, marketIncentives]) => [market.toLowerCase(), marketIncentives]),
+        );
         const lendOppApyByToken = aggregateMerklAprByToken(merklLendOpps, "deposit");
         const borrowOppApyByToken = aggregateMerklAprByToken(merklBorrowOpps, "borrow");
         const yieldIndex = this.buildYieldIndex(yields);
@@ -1002,11 +1008,14 @@ export class Market {
                 reader,
                 resolvedSetup,
             );
-            if(milestones[market.address] != undefined) {
-                market.milestone = milestones[market.address]!;
+            const rewardKey = market.address.toLowerCase();
+            const milestone = milestonesByAddress.get(rewardKey);
+            if(milestone != undefined) {
+                market.milestone = milestone;
             }
-            if(incentives[market.address] != undefined) {
-                market.incentives = incentives[market.address]!;
+            const marketIncentives = incentivesByAddress.get(rewardKey);
+            if(marketIncentives != undefined) {
+                market.incentives = marketIncentives;
             }
 
             for(const token of market.tokens) {

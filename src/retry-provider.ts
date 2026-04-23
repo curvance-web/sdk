@@ -169,6 +169,52 @@ function getProviderUrl(provider: JsonRpcProvider): string | null {
     return normalizeRpcUrl(connection?.url);
 }
 
+export function getRetryableProviderTarget(provider: curvance_read_provider): curvance_read_provider {
+    return (provider as any)._isRetryable
+        ? ((provider as any)._retryableTarget as curvance_read_provider | undefined) ?? provider
+        : provider;
+}
+
+function normalizeReadFallbacks(
+    provider: curvance_read_provider,
+    readFallback: JsonRpcProvider | JsonRpcProvider[] | null,
+): JsonRpcProvider[] {
+    const fallbackProviders = Array.isArray(readFallback)
+        ? readFallback
+        : readFallback
+            ? [readFallback]
+            : [];
+    const primaryUrl = getProviderUrl(provider as JsonRpcProvider);
+    const seenUrls = new Set<string>();
+    const seenProviders = new Set<curvance_read_provider>([provider]);
+
+    if (primaryUrl != null) {
+        seenUrls.add(primaryUrl);
+    }
+
+    const normalized: JsonRpcProvider[] = [];
+    for (const fallback of fallbackProviders) {
+        const unwrappedFallback = getRetryableProviderTarget(fallback as curvance_read_provider) as JsonRpcProvider;
+        const fallbackUrl = getProviderUrl(unwrappedFallback);
+
+        if (seenProviders.has(unwrappedFallback)) {
+            continue;
+        }
+
+        if (fallbackUrl != null) {
+            if (seenUrls.has(fallbackUrl)) {
+                continue;
+            }
+            seenUrls.add(fallbackUrl);
+        }
+
+        seenProviders.add(unwrappedFallback);
+        normalized.push(unwrappedFallback);
+    }
+
+    return normalized;
+}
+
 function getEndpointId(url: string | null, label: string): string {
     return url ?? label;
 }
@@ -943,20 +989,18 @@ export function wrapProviderWithRetries(
     provider: curvance_read_provider,
     readFallback: JsonRpcProvider | JsonRpcProvider[] | null = null,
 ): curvance_read_provider {
-    const hasFallback = Array.isArray(readFallback) ? readFallback.length > 0 : readFallback != null;
-    if (hasFallback) {
+    const unwrappedProvider = getRetryableProviderTarget(provider);
+    const normalizedFallbacks = normalizeReadFallbacks(unwrappedProvider, readFallback);
+    if (normalizedFallbacks.length > 0) {
         // Fallback is per-invocation — create a dedicated instance so the
         // fallback providers aren't shared across setupChain calls.
         const retryProvider = new RetryableProvider(
             getGlobalRetryProvider().getConfig(),
-            readFallback,
+            normalizedFallbacks,
         );
-        const unwrappedProvider = (provider as any)._isRetryable
-            ? ((provider as any)._retryableTarget as curvance_read_provider | undefined) ?? provider
-            : provider;
         return retryProvider.wrapProvider(unwrappedProvider);
     }
-    return getGlobalRetryProvider().wrapProvider(provider);
+    return getGlobalRetryProvider().wrapProvider(unwrappedProvider);
 }
 
 /**

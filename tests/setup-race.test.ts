@@ -5,7 +5,7 @@ import { Api } from "../src/classes/Api";
 import { Market } from "../src/classes/Market";
 import { getChainRpcConfig } from "../src/chains";
 import { CURVANCE_DAO_FEE_RECEIVER, CURVANCE_FEE_BPS } from "../src/feePolicy";
-import { getRpcDebugSnapshot, isRetryableReadProvider, resetRpcDebugState } from "../src/retry-provider";
+import { getRpcDebugSnapshot, isRetryableReadProvider, resetRpcDebugState, wrapProviderWithRetries } from "../src/retry-provider";
 import { all_markets, setup_config, setupChain } from "../src/setup";
 
 function defer<T>() {
@@ -330,6 +330,85 @@ test("setupChain re-wraps an already retry-wrapped explicit read provider per in
     assert.ok(isRetryableReadProvider(firstWrapped));
     assert.ok(isRetryableReadProvider(setup_config.readProvider));
     assert.notEqual(setup_config.readProvider, firstWrapped);
+});
+
+test("setupChain validates a retry-wrapped signer against its primary wallet transport", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const walletPrimary = new JsonRpcProvider("https://wallet-primary.example");
+    walletPrimary.getNetwork = async () => {
+        throw new Error("wallet getNetwork timeout");
+    };
+    const healthyFallback = new JsonRpcProvider("https://healthy-fallback.example");
+    healthyFallback.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
+    const wrappedWalletProvider = wrapProviderWithRetries(walletPrimary, healthyFallback);
+    const fakeSigner = {
+        address: "0x000000000000000000000000000000000000dEaD",
+        provider: wrappedWalletProvider,
+    } as any;
+
+    let rewardsCalls = 0;
+    let marketCalls = 0;
+    Api.getRewards = (async () => {
+        rewardsCalls += 1;
+        return { milestones: {}, incentives: {} };
+    }) as typeof Api.getRewards;
+    Market.getAll = (async () => {
+        marketCalls += 1;
+        return [] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+        resetRpcDebugState();
+    });
+
+    await assert.rejects(
+        () => setupChain("monad-mainnet", fakeSigner, "https://api.example"),
+        /wallet getNetwork timeout/i,
+    );
+    assert.equal(rewardsCalls, 0);
+    assert.equal(marketCalls, 0);
+});
+
+test("setupChain removes fallback origins that duplicate the selected read primary", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const monadRpc = getChainRpcConfig("monad-mainnet");
+    const primaryOverride = new JsonRpcProvider(monadRpc.primary);
+
+    resetRpcDebugState();
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async () => [] as any) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+        resetRpcDebugState();
+    });
+
+    await setupChain("monad-mainnet", null, "https://api.example", {
+        readProvider: primaryOverride,
+    });
+
+    const primaryUrl = monadRpc.primary.replace(/\/+$/, "");
+    const snapshot = getRpcDebugSnapshot();
+    const primary = snapshot.endpoints.find((e) => e.role === "primary");
+    const fallbackUrls = snapshot.endpoints
+        .filter((e) => e.role === "fallback")
+        .map((e) => e.url)
+        .filter((url): url is string => url != null);
+
+    assert.equal(primary?.url, primaryUrl);
+    assert.equal(
+        fallbackUrls.filter((url) => url === primaryUrl).length,
+        0,
+        "selected primary RPC must not also appear as fallback",
+    );
+    for (const fallback of monadRpc.fallbacks.map((url) => url.replace(/\/+$/, ""))) {
+        assert.ok(fallbackUrls.includes(fallback));
+    }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

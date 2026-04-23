@@ -2317,13 +2317,38 @@ export class CToken extends Calldata<ICToken> {
         return this.simulateCallData(calldata, override);
     }
 
-    async getPriceUpdates(): Promise<MulticallAction[]> {
-        let price_updates = [];
-        if(this.adapters.includes(AdaptorTypes.REDSTONE_CORE)) {
-            const redstone = await Redstone.buildMultiCallAction(this);
-            price_updates.push(redstone);
+    private getRedstonePriceUpdateTokens(): CToken[] {
+        const candidates = (this.market?.tokens?.length ? this.market.tokens : [this]) as CToken[];
+        const seenAssets = new Set<string>();
+        const tokens: CToken[] = [];
+
+        for (const token of candidates) {
+            if (!token.adapters?.includes(AdaptorTypes.REDSTONE_CORE)) {
+                continue;
+            }
+
+            let assetAddress: address;
+            try {
+                assetAddress = token.getAsset(false);
+            } catch {
+                assetAddress = (token as any).cache?.asset?.address ?? token.address;
+            }
+
+            const key = assetAddress.toLowerCase();
+            if (seenAssets.has(key)) {
+                continue;
+            }
+
+            seenAssets.add(key);
+            tokens.push(token);
         }
 
-        return price_updates;
+        return tokens;
+    }
+
+    async getPriceUpdates(): Promise<MulticallAction[]> {
+        return Promise.all(
+            this.getRedstonePriceUpdateTokens().map((token) => Redstone.buildMultiCallAction(token)),
+        );
     }
 }

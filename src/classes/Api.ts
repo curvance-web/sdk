@@ -21,7 +21,7 @@ export type MilestoneResponse = {
     duration_in_days: number;
 }
 export type Milestones = { [key: string]: MilestoneResponse };
-export type Incentives = { [key: address]: Array<IncentiveResponse> };
+export type Incentives = { [key: string]: Array<IncentiveResponse> };
 
 function isRewardsResponse(
     value: unknown,
@@ -36,6 +36,19 @@ function isRewardsResponse(
     };
 
     return Array.isArray(maybeRewards.milestones) && Array.isArray(maybeRewards.incentives);
+}
+
+function normalizeMarketKey(market: string): string {
+    return market.toLowerCase();
+}
+
+function isNativeYieldRow(value: unknown): value is { symbol: string; apy: number } {
+    if (typeof value !== "object" || value == null) {
+        return false;
+    }
+
+    const row = value as { symbol?: unknown; apy?: unknown };
+    return typeof row.symbol === "string" && typeof row.apy === "number" && Number.isFinite(row.apy);
 }
 
 function resolveDefaultSetupConfig(context: string): SetupConfigSnapshot {
@@ -87,7 +100,7 @@ export class Api {
                     return [];
                 }
     
-                return yields.native_apy;
+                return yields.native_apy.filter(isNativeYieldRow);
             } catch (error) {
                 console.error("Error fetching native yields:", error);
                 return [];
@@ -120,11 +133,11 @@ export class Api {
         }
 
         for(const milestone of rewards.milestones) {
-            milestones[milestone.market] = milestone;
+            milestones[normalizeMarketKey(milestone.market)] = milestone;
         }
 
         for(const incentive of rewards.incentives) {
-            const market = incentive.market as address;
+            const market = normalizeMarketKey(incentive.market);
             if(!(market in incentives)) {
                 incentives[market] = [];
             }
