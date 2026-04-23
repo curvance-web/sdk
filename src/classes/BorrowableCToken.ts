@@ -9,6 +9,8 @@ import irm_abi from '../abis/IDynamicIRM.json';
 import Decimal from "decimal.js";
 import FormatConverter from "./FormatConverter";
 
+const REPAY_DEBT_BUFFER_TIME = 100n;
+
 export interface IBorrowableCToken extends ICToken {
     borrow(amount: bigint, receiver: address): Promise<TransactionResponse>;
     repay(amount: bigint): Promise<TransactionResponse>;
@@ -229,11 +231,15 @@ export class BorrowableCToken extends CToken {
     async repay(amount: TokenInput) {
         const assets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
         const repayAssets = assets === 0n
-            ? await this.fetchDebtBalanceAtTimestamp(100n, false)
+            ? await this.fetchDebtBalanceAtTimestamp(this.getBufferedRepayTimestamp(), false)
             : assets;
         await this.checkRepayApproval(repayAssets);
         const calldata = this.getCallData("repay", [ assets ]);
         return this.oracleRoute(calldata);
+    }
+
+    private getBufferedRepayTimestamp(): bigint {
+        return BigInt(Math.floor(Date.now() / 1000)) + REPAY_DEBT_BUFFER_TIME;
     }
 
     async fetchInterestFee() {

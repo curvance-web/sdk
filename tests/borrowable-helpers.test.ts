@@ -101,27 +101,33 @@ test("BorrowableCToken.repay fails before submit when debt-token allowance is mi
 });
 
 test("BorrowableCToken.repay preflights projected full-repay debt before encoding amount=0", async () => {
+    const originalDateNow = Date.now;
+    Date.now = () => 1_700_000_000_000;
     const insufficient = createRepayToken(100n * WAD, 101n * WAD);
 
-    await assert.rejects(
-        () => insufficient.repay(Decimal(0)),
-        /Please approve the USDC token for cUSDC repay/i,
-    );
-    assert.deepEqual(insufficient.__state.debtChecks, [{
-        account: OWNER,
-        token: CTOKEN,
-        timestamp: 100n,
-    }]);
-    assert.equal(insufficient.__state.oracleRouteCalled, false);
+    try {
+        await assert.rejects(
+            () => insufficient.repay(Decimal(0)),
+            /Please approve the USDC token for cUSDC repay/i,
+        );
+        assert.deepEqual(insufficient.__state.debtChecks, [{
+            account: OWNER,
+            token: CTOKEN,
+            timestamp: 1_700_000_100n,
+        }]);
+        assert.equal(insufficient.__state.oracleRouteCalled, false);
 
-    const sufficient = createRepayToken(101n * WAD, 101n * WAD);
-    await sufficient.repay(Decimal(0));
+        const sufficient = createRepayToken(101n * WAD, 101n * WAD);
+        await sufficient.repay(Decimal(0));
 
-    assert.deepEqual(sufficient.__state.callDataCalls, [{
-        method: "repay",
-        args: [0n],
-    }]);
-    assert.equal(sufficient.__state.oracleRouteCalled, true);
+        assert.deepEqual(sufficient.__state.callDataCalls, [{
+            method: "repay",
+            args: [0n],
+        }]);
+        assert.equal(sufficient.__state.oracleRouteCalled, true);
+    } finally {
+        Date.now = originalDateNow;
+    }
 });
 
 test("BorrowableCToken refresh helpers use assetsHeld as the IRM denominator", async () => {

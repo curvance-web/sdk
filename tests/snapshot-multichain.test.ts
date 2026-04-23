@@ -19,6 +19,7 @@ function createToken(symbol: string, isBorrowable = false) {
         isBorrowable,
         getUserAssetBalance: (_inUsd: boolean) => Decimal(10),
         getUserCollateral: (_inUsd: boolean) => Decimal(4),
+        getUserCollateralAssets: () => Decimal(4),
         getUserDebt: (_inUsd: boolean) => Decimal(isBorrowable ? 2 : 0),
         getPrice: (_inUsd: boolean) => Decimal(1),
         getApy: () => Decimal(0.05),
@@ -115,6 +116,26 @@ test("takePortfolioSnapshot labels mixed explicit market sets as multi", async (
 
     assert.equal(snapshot.chain, "multi");
     assert.equal(snapshot.markets.length, 2);
+});
+
+test("snapshotMarket reports collateral token amounts as assets and exposes raw shares separately", () => {
+    const market = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Monad Market",
+        chain: "monad-mainnet",
+    });
+    market.tokens = [{
+        ...createToken("cMON", false),
+        getUserCollateral: (inUsd: boolean) => inUsd ? Decimal(18) : Decimal(6),
+        getUserCollateralAssets: () => Decimal(9),
+        getPrice: () => Decimal(2),
+    }] as any;
+
+    const snapshot = snapshotMarket(market);
+
+    assert.equal(snapshot.positions[0]?.collateralUSD, 18);
+    assert.equal(snapshot.positions[0]?.collateralTokens, 9);
+    assert.equal(snapshot.positions[0]?.collateralShares, 6);
 });
 
 test("takePortfolioSnapshot refresh groups explicit markets by deployment key", async () => {

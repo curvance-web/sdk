@@ -456,6 +456,18 @@ export class CToken extends Calldata<ICToken> {
         return (shares * this.totalAssets) / this.totalSupply;
     }
 
+    formatAssets(assets: bigint): TokenInput {
+        return FormatConverter.bigIntToDecimal(assets, this.asset.decimals);
+    }
+
+    formatShares(shares: bigint): TokenInput {
+        return FormatConverter.bigIntToDecimal(shares, this.decimals);
+    }
+
+    formatSharesAsAssets(shares: bigint): TokenInput {
+        return this.formatAssets(this.virtualConvertToAssets(shares));
+    }
+
     /**
      * Convert assets to shares using cached totalSupply/totalAssets.
      * @param bufferBps Optional downward buffer in BPS to account for
@@ -590,7 +602,12 @@ export class CToken extends Calldata<ICToken> {
     getUserShareBalance(inUSD: false): TokenInput;
     getUserShareBalance(inUSD: boolean): USD | TokenInput {
         const userShareBalance = this.readFreshUserCache("userShareBalance", "reading token user share balance");
-        return inUSD ? this.convertTokensToUsd(userShareBalance, false) : FormatConverter.bigIntToDecimal(userShareBalance, this.decimals);
+        return inUSD ? this.convertTokensToUsd(userShareBalance, false) : this.formatShares(userShareBalance);
+    }
+
+    getUserShareBalanceAssets(): TokenInput {
+        const userShareBalance = this.readFreshUserCache("userShareBalance", "reading token user share balance as assets");
+        return this.formatSharesAsAssets(userShareBalance);
     }
 
     /** @returns User assets in USD (this is the raw balance that the token exchanges too) or token */
@@ -598,7 +615,7 @@ export class CToken extends Calldata<ICToken> {
     getUserAssetBalance(inUSD: false): TokenInput;
     getUserAssetBalance(inUSD: boolean): USD | TokenInput {
         const userAssetBalance = this.readFreshUserCache("userAssetBalance", "reading token user asset balance");
-        return inUSD ? this.convertTokensToUsd(userAssetBalance) : FormatConverter.bigIntToDecimal(userAssetBalance, this.asset.decimals);
+        return inUSD ? this.convertTokensToUsd(userAssetBalance) : this.formatAssets(userAssetBalance);
     }
 
     /** @returns User underlying assets in USD or token */
@@ -606,7 +623,7 @@ export class CToken extends Calldata<ICToken> {
     getUserUnderlyingBalance(inUSD: false): TokenInput;
     getUserUnderlyingBalance(inUSD: boolean): USD | TokenInput {
         const userUnderlyingBalance = this.readFreshUserCache("userUnderlyingBalance", "reading token user underlying balance");
-        return inUSD ? this.convertTokensToUsd(userUnderlyingBalance) : FormatConverter.bigIntToDecimal(userUnderlyingBalance, this.decimals);
+        return inUSD ? this.convertTokensToUsd(userUnderlyingBalance) : this.formatAssets(userUnderlyingBalance);
     }
 
     /** @returns Token Collateral Cap in USD or USD WAD */
@@ -641,8 +658,16 @@ export class CToken extends Calldata<ICToken> {
     getUserCollateral(inUSD: true): USD;
     getUserCollateral(inUSD: false): TokenInput;
     getUserCollateral(inUSD: boolean): USD | TokenInput {
-        const userCollateral = this.readFreshUserCache("userCollateral", "reading token user collateral");
-        return inUSD ? this.convertTokensToUsd(userCollateral, false) : FormatConverter.bigIntToDecimal(userCollateral, this.decimals);
+        const userCollateral = this.getUserCollateralShares();
+        return inUSD ? this.convertTokensToUsd(userCollateral, false) : this.formatShares(userCollateral);
+    }
+
+    getUserCollateralShares(): bigint {
+        return this.readFreshUserCache("userCollateral", "reading token user collateral shares");
+    }
+
+    getUserCollateralAssets(): TokenInput {
+        return this.formatSharesAsAssets(this.getUserCollateralShares());
     }
 
     fetchUserCollateral(): Promise<bigint>;
@@ -1029,6 +1054,9 @@ export class CToken extends Calldata<ICToken> {
         const collateral = await this.fetchUserCollateral();
         const available_shares = balance - collateral;
         const max_shares = available_shares < shares ? available_shares : shares;
+        if(max_shares <= 0n) {
+            throw new Error("No cToken shares available to post as collateral.");
+        }
 
         const calldata = this.getCallData("postCollateral", [max_shares]);
         const tx = await this.oracleRoute(calldata);
@@ -1188,7 +1216,7 @@ export class CToken extends Calldata<ICToken> {
         return this.contract.convertToAssets(shares);
     }
 
-    async convertToShares(assets: bigint, bufferBps: bigint = 2n) {
+    async convertToShares(assets: bigint, bufferBps: bigint = LEVERAGE.SHARES_BUFFER_BPS) {
         const shares = await this.contract.convertToShares(assets);
         return bufferBps > 0n ? shares * (10000n - bufferBps) / 10000n : shares;
     }
@@ -2332,9 +2360,15 @@ export class CToken extends Calldata<ICToken> {
             if(!zapper) {
                 throw new Error(`No zapper contract found for type '${zapType}' on ${this.symbol}`);
             }
-            await this._checkZapperApproval(zapper);
-            if (collateralize && receiver && receiver.toLowerCase() !== signer.address.toLowerCase()) {
-                await this._checkDelegateApproval(receiver, zapper.address, `${zapper.type} Zapper`);
+
+            if (collateralize) {
+                const receiverAddress = receiver ?? signer.address as address;
+                if (receiverAddress.toLowerCase() === signer.address.toLowerCase()) {
+                    await this._checkZapperApproval(zapper);
+                } else {
+                    await this._checkDelegateApproval(receiverAddress, signer.address as address, "the connected signer");
+                    await this._checkDelegateApproval(receiverAddress, zapper.address, `${zapper.type} Zapper`);
+                }
             }
         } else if (collateralize && receiver && receiver.toLowerCase() !== signer.address.toLowerCase()) {
             await this._checkDelegateApproval(receiver, signer.address as address, "the connected signer");

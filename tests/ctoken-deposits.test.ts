@@ -356,7 +356,7 @@ describe('Approval preflights â€” single-path execution', () => {
         );
     });
 
-    test('deposit blocks submission when zapper delegate approval is missing', async () => {
+    test('depositAsCollateral blocks submission when self-collateral zapper delegate approval is missing', async () => {
         const token = createExecutionToken();
         (token as any).getZapper = () => ({ type: 'simple' });
         (token as any).isPluginApproved = async () => false;
@@ -369,11 +369,49 @@ describe('Approval preflights â€” single-path execution', () => {
         });
 
         await assert.rejects(
-            () => token.deposit(Decimal(1), 'simple' as any),
+            () => token.depositAsCollateral(Decimal(1), {
+                type: 'simple',
+                inputToken: NATIVE_ADDRESS,
+                slippage: new Decimal('0.005'),
+            }),
             /Please approve the simple Zapper to be able to move cWMON on your behalf\./i,
         );
         assert.equal(token.__state.assetChecked, false);
         assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('deposit zaps do not require cToken delegate approval when not collateralizing', async () => {
+        const token = createExecutionToken();
+        (token as any).getZapper = () => ({
+            type: 'simple',
+            address: SIMPLE_ZAPPER,
+        });
+        (token as any).isPluginApproved = async () => {
+            throw new Error('non-collateral zaps should not check delegate approval');
+        };
+        (token as any).getAsset = () => ({
+            allowance: async () => {
+                token.__state.assetChecked = true;
+                return 10n ** 30n;
+            },
+            symbol: 'WMON',
+        });
+        Object.defineProperty(ERC20.prototype, 'decimals', {
+            configurable: true,
+            get() {
+                return 6n;
+            },
+        });
+        ERC20.prototype.allowance = async () => 10n ** 30n;
+
+        await token.deposit(Decimal(1), {
+            type: 'simple',
+            inputToken: INPUT_TOKEN,
+            slippage: new Decimal('0.005'),
+        });
+
+        assert.equal(token.__state.assetChecked, false);
+        assert.equal(token.__state.oracleRouteCalled, true);
     });
 
     test('deposit blocks simple ERC20 zaps on the zap input allowance target, not the deposit asset', async () => {
@@ -423,7 +461,13 @@ describe('Approval preflights â€” single-path execution', () => {
 
     test('deposit skips ERC20 allowance checks for native simple zaps', async () => {
         const token = createExecutionToken();
-        (token as any).isPluginApproved = async () => true;
+        (token as any).getZapper = () => ({
+            type: 'simple',
+            address: SIMPLE_ZAPPER,
+        });
+        (token as any).isPluginApproved = async () => {
+            throw new Error('non-collateral native zaps should not check delegate approval');
+        };
         (token as any).getAsset = () => ({
             allowance: async () => {
                 throw new Error('deposit asset allowance should not be checked for native zaps');
@@ -521,10 +565,12 @@ describe('Approval preflights â€” single-path execution', () => {
         assert.equal(token.__state.oracleRouteCalled, false);
     });
 
-    test('depositAsCollateral fails before zap submit when third-party receiver has not delegated zapper', async () => {
+    test('depositAsCollateral fails before zap submit when third-party receiver has not delegated signer', async () => {
         const token = createExecutionToken();
         const delegateChecks: Array<{ owner: string; delegate: string }> = [];
-        (token as any).isPluginApproved = async () => true;
+        (token as any).isPluginApproved = async () => {
+            throw new Error('third-party collateral zaps should not check signer-to-zapper approval');
+        };
         (token as any).getZapper = () => ({
             type: 'simple',
             address: SIMPLE_ZAPPER,
@@ -549,9 +595,61 @@ describe('Approval preflights â€” single-path execution', () => {
                 },
                 RECEIVER as any,
             ),
+            /Please approve the connected signer as a delegate for cWMON/i,
+        );
+        assert.deepEqual(delegateChecks, [{ owner: RECEIVER, delegate: OWNER }]);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('depositAsCollateral fails before zap submit when third-party receiver has not delegated zapper', async () => {
+        const token = createExecutionToken();
+        const delegateChecks: Array<{ owner: string; delegate: string }> = [];
+        (token as any).isPluginApproved = async () => {
+            throw new Error('third-party collateral zaps should not check signer-to-zapper approval');
+        };
+        (token as any).getZapper = () => ({
+            type: 'simple',
+            address: SIMPLE_ZAPPER,
+        });
+        (token as any).contract = {
+            isDelegate: async (owner: string, delegate: string) => {
+                delegateChecks.push({ owner, delegate });
+                return delegate === OWNER;
+            },
+        };
+        ERC20.prototype.allowance = async function () {
+            throw new Error(`unexpected ERC20 allowance check for ${this.address}`);
+        };
+
+        await assert.rejects(
+            () => token.depositAsCollateral(
+                Decimal(1),
+                {
+                    type: 'simple',
+                    inputToken: NATIVE_ADDRESS,
+                    slippage: new Decimal('0.005'),
+                },
+                RECEIVER as any,
+            ),
             /Please approve simple Zapper as a delegate for cWMON/i,
         );
-        assert.deepEqual(delegateChecks, [{ owner: RECEIVER, delegate: SIMPLE_ZAPPER }]);
+        assert.deepEqual(delegateChecks, [
+            { owner: RECEIVER, delegate: OWNER },
+            { owner: RECEIVER, delegate: SIMPLE_ZAPPER },
+        ]);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('postCollateral fails before submit when no unposted shares are available', async () => {
+        const token = createExecutionToken();
+        (token as any).balanceOf = async () => 5n * WAD;
+        (token as any).fetchUserCollateral = async () => 5n * WAD;
+
+        await assert.rejects(
+            () => token.postCollateral(Decimal(1)),
+            /No cToken shares available to post as collateral/i,
+        );
+        assert.deepEqual(token.__state.callDataCalls, []);
         assert.equal(token.__state.oracleRouteCalled, false);
     });
 
@@ -748,6 +846,17 @@ describe('Preservation — sibling getters must keep returning shares / raw unit
         assert.equal(result.toString(), FormatConverter.bigIntToDecimal(7n * WAD, 18n).toString());
     });
 
+    test('getUserCollateralAssets converts raw collateral shares to underlying assets for display', () => {
+        const ctoken = createCToken({
+            totalSupply: 100n * WAD,
+            totalAssets: 150n * WAD,
+            userCollateral: 6n * WAD,
+        });
+
+        assert.equal(ctoken.getUserCollateral(false).toString(), '6');
+        assert.equal(ctoken.getUserCollateralAssets().toString(), '9');
+    });
+
     test('getUserShareBalance(false) returns share-denominated Decimal, not asset-scaled', () => {
         // API returns `FormatConverter.bigIntToDecimal(userShareBalance, this.decimals)`,
         // i.e. share-formatted. Pin the share semantic — a regression that
@@ -758,6 +867,17 @@ describe('Preservation — sibling getters must keep returning shares / raw unit
         });
         const result = ctoken.getUserShareBalance(false);
         assert.equal(result.toString(), FormatConverter.bigIntToDecimal(3n * WAD, 18n).toString());
+    });
+
+    test('formatSharesAsAssets exposes an explicit display bridge from share units to asset units', () => {
+        const ctoken = createCToken({
+            totalSupply: 100n * WAD,
+            totalAssets: 125n * WAD,
+        });
+
+        assert.equal(ctoken.formatShares(8n * WAD).toString(), '8');
+        assert.equal(ctoken.formatAssets(10n * WAD).toString(), '10');
+        assert.equal(ctoken.formatSharesAsAssets(8n * WAD).toString(), '10');
     });
 
     test('getDebt(false) returns cache.debt (assets, unchanged)', () => {

@@ -20,6 +20,7 @@ import { buildLocalSimpleZapTokens } from "./helpers";
  *  Must match KyberSwapChecker.REQUIRED_FLAGS on-chain. */
 const REQUIRED_FLAGS = 0x280n;
 const CHECKER_FEE_BPS = 4n;
+const KYBER_SWAP_SELECTOR = '0xe21fd0e9';
 
 /** ABI type string for KyberSwap MetaAggregationRouterV2's SwapExecutionParams struct. */
 const SWAP_PARAMS_TYPE =
@@ -48,6 +49,13 @@ function validateSwapCalldata(
     if (!feeBps || feeBps === 0n || !feeReceiver) return;
 
     try {
+        const selector = calldata.slice(0, 10).toLowerCase();
+        if (selector !== KYBER_SWAP_SELECTOR) {
+            throw new Error(
+                `KyberSwap calldata selector=${selector}, expected ${KYBER_SWAP_SELECTOR}`
+            );
+        }
+
         // Strip 4-byte selector (0x + 8 hex chars = 10 chars)
         const encoded = '0x' + calldata.slice(10);
         const coder = AbiCoder.defaultAbiCoder();
@@ -88,8 +96,9 @@ function validateSwapCalldata(
         // If this is our own validation error, rethrow
         if (e.message?.startsWith('KyberSwap calldata')) throw e;
         // ABI decode failure — calldata structure doesn't match expected format.
-        // Log but don't block — the on-chain checker will catch structural issues.
-        console.warn('Failed to validate KyberSwap calldata structure:', e.message);
+        // The on-chain checker remains the final guard, but the SDK should
+        // fail before returning malformed checker-rejected calldata.
+        throw new Error(`KyberSwap calldata could not be decoded for fee validation: ${e.message}`);
     }
 }
 

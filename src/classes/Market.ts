@@ -806,7 +806,7 @@ export class Market {
         const user = this.getAccountOrThrow();
         const redeemShares = ctoken.convertTokenInputToShares(amount);
         const redeemAssets = FormatConverter.decimalToBigInt(amount, ctoken.asset.decimals);
-        const existing_collateral = ctoken.cache.userCollateral;
+        const existing_collateral = ctoken.getUserCollateralShares();
 
         if(redeemShares > existing_collateral) {
             throw new Error(`Insufficient collateral: Existing (${existing_collateral}) < Redeem amount (${redeemShares})`);

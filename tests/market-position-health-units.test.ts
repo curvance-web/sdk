@@ -79,6 +79,34 @@ describe('Market position health units', () => {
         );
     });
 
+    test('previewPositionHealthRedeem respects token user-cache freshness', async () => {
+        const market = Object.create(Market.prototype) as Market;
+        const token = Object.create(CToken.prototype) as CToken;
+
+        (market as any).address = MARKET;
+        (market as any).account = ACCOUNT;
+        (market as any).getAccountOrThrow = () => ACCOUNT;
+        (market as any).reader = {
+            getPositionHealth: async () => {
+                throw new Error('reader should not be called with stale token cache');
+            },
+        };
+
+        (token as any).address = CTOKEN;
+        (token as any).market = market;
+        (token as any).cache = {
+            asset: { decimals: 18 },
+            userCollateral: toWad(100),
+        };
+        (token as any).convertTokenInputToShares = () => toWad(1);
+        token.invalidateUserCache(['userCollateral' as any]);
+
+        await assert.rejects(
+            market.previewPositionHealthRedeem(token, Decimal(1)),
+            /summary-only refresh on market/i,
+        );
+    });
+
     test('previewPositionHealthRepay passes the reader closeout sentinel for Decimal(0)', async () => {
         const market = Object.create(Market.prototype) as Market;
         const token = Object.create(BorrowableCToken.prototype) as BorrowableCToken;

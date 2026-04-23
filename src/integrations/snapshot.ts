@@ -13,6 +13,7 @@ export interface PositionSnapshot {
     depositTokens: number;
     collateralUSD: number;
     collateralTokens: number;
+    collateralShares: number;
     debtUSD: number;
     debtTokens: number;
     assetPriceUSD: number;
@@ -119,7 +120,8 @@ export function snapshotMarket(market: Market): MarketSnapshot {
             depositUSD: token.getUserAssetBalance(true).toNumber(),
             depositTokens: token.getUserAssetBalance(false).toNumber(),
             collateralUSD: token.getUserCollateral(true).toNumber(),
-            collateralTokens: token.getUserCollateral(false).toNumber(),
+            collateralTokens: token.getUserCollateralAssets().toNumber(),
+            collateralShares: token.getUserCollateral(false).toNumber(),
             debtUSD: token.getUserDebt(true).toNumber(),
             debtTokens: token.getUserDebt(false).toNumber(),
             assetPriceUSD: token.getPrice(true).toNumber(),

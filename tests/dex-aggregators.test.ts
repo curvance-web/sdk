@@ -414,6 +414,32 @@ test("KyberSwap.quote rejects current router calldata with the wrong fee amount"
     );
 });
 
+test("KyberSwap.quote rejects current router calldata with the wrong selector", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+
+    await assert.rejects(
+        () => withMockedKyberFetch(
+            kyber,
+            "0x12345678" as bytes,
+            () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+        ),
+        /KyberSwap calldata selector=0x12345678, expected 0xe21fd0e9/,
+    );
+});
+
+test("KyberSwap.quote rejects current router calldata that cannot be decoded", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+
+    await assert.rejects(
+        () => withMockedKyberFetch(
+            kyber,
+            `${KYBER_SWAP_SELECTOR}00` as bytes,
+            () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+        ),
+        /KyberSwap calldata could not be decoded for fee validation/,
+    );
+});
+
 test("validation rejects negative unsigned API integers and 10000 BPS swap slippage", () => {
     assert.equal(safeBigInt("42", "test amount"), 42n);
     assert.throws(
