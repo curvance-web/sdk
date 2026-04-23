@@ -15,6 +15,8 @@ const WAD = 10n ** 18n;
 const ACCOUNT = '0x00000000000000000000000000000000000000aa';
 const COLLATERAL = '0x00000000000000000000000000000000000000c1';
 const DEBT = '0x00000000000000000000000000000000000000d1';
+const WRAPPED_NATIVE = '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A';
+const USDC_ASSET = '0x00000000000000000000000000000000000000d2';
 
 function createPreviewStub(targetLeverage: Decimal) {
     return {
@@ -37,7 +39,7 @@ function createPreviewStub(targetLeverage: Decimal) {
     };
 }
 
-function createVaultExecutionHarness() {
+function createVaultExecutionHarness({ borrowAsset = WRAPPED_NATIVE }: { borrowAsset?: string } = {}) {
     const token = Object.create(CToken.prototype) as CToken;
     const borrow = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
     const leverageCalls: Array<{ action: unknown; slippage: bigint }> = [];
@@ -98,11 +100,14 @@ function createVaultExecutionHarness() {
     (token as any).ensureUnderlyingAmount = async (amount: Decimal) => amount;
     (token as any).previewLeverageUp = (_newLeverage: Decimal) => createPreviewStub(_newLeverage);
     (token as any).previewDepositAndLeverage = (_newLeverage: Decimal) => createPreviewStub(_newLeverage);
+    (token as any).getVaultAsset = async (asErc20: boolean) => asErc20
+        ? { address: WRAPPED_NATIVE, decimals: 18n }
+        : WRAPPED_NATIVE;
 
     (borrow as any).market = (token as any).market;
     (borrow as any).address = DEBT;
     (borrow as any).cache = {
-        asset: { address: DEBT, decimals: 18n },
+        asset: { address: borrowAsset, decimals: 18n },
         decimals: 18n,
         assetPrice: WAD,
         assetPriceLower: WAD,
@@ -181,6 +186,25 @@ describe('vault leverage behavior', () => {
         assert.equal((leverageCalls[0]?.action as any).expectedShares, 321n);
     });
 
+    test('leverageUp vault fails closed when the borrow asset is not the vault underlying', async () => {
+        const { token, borrow, leverageCalls } = createVaultExecutionHarness({ borrowAsset: USDC_ASSET });
+        const original = PositionManager.getVaultExpectedShares;
+        PositionManager.getVaultExpectedShares = async () => {
+            throw new Error('expected shares should not be quoted for invalid vault borrow assets');
+        };
+
+        try {
+            await assert.rejects(
+                () => token.leverageUp(borrow, Decimal(3), 'vault', Decimal(0.01)),
+                /vault leverage requires borrow asset/i,
+            );
+        } finally {
+            PositionManager.getVaultExpectedShares = original;
+        }
+
+        assert.equal(leverageCalls.length, 0);
+    });
+
     test('depositAndLeverage vault applies the drift slippage buffer', async () => {
         const { token, borrow, depositCalls } = createVaultExecutionHarness();
         const original = PositionManager.getVaultExpectedShares;
@@ -199,6 +223,25 @@ describe('vault leverage behavior', () => {
         assert.equal(depositCalls[0]?.slippage, expectedSlippage);
         assert.equal(depositCalls[0]?.assets, 5_000_000_000_000_000_000n);
         assert.equal((depositCalls[0]?.action as any).expectedShares, 456n);
+    });
+
+    test('depositAndLeverage native-vault fails closed when the borrow asset is not wrapped native', async () => {
+        const { token, borrow, depositCalls } = createVaultExecutionHarness({ borrowAsset: USDC_ASSET });
+        const original = PositionManager.getVaultExpectedShares;
+        PositionManager.getVaultExpectedShares = async () => {
+            throw new Error('expected shares should not be quoted for invalid native-vault borrow assets');
+        };
+
+        try {
+            await assert.rejects(
+                () => token.depositAndLeverage(Decimal(5), borrow, Decimal(3), 'native-vault', Decimal(0.01)),
+                /native-vault leverage requires borrow asset/i,
+            );
+        } finally {
+            PositionManager.getVaultExpectedShares = original;
+        }
+
+        assert.equal(depositCalls.length, 0);
     });
 
     test('getVaultExpectedShares buffers the inner previewDeposit result before convertToShares', async () => {

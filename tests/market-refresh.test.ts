@@ -6,6 +6,7 @@ import { ProtocolReader } from "../src/classes/ProtocolReader";
 import { refreshActiveUserMarkets, refreshActiveUserMarketSummaries } from "../src/setup";
 
 const ACCOUNT = "0x00000000000000000000000000000000000000aa";
+const OTHER_ACCOUNT = "0x00000000000000000000000000000000000000bb";
 const MARKET_A = "0x00000000000000000000000000000000000000a1";
 const MARKET_B = "0x00000000000000000000000000000000000000b2";
 const TOKEN_A = "0x00000000000000000000000000000000000000d1";
@@ -334,6 +335,47 @@ test("reloadUserSummary binds the refreshed account for downstream helpers", asy
 
     assert.equal(market.account, ACCOUNT);
     assert.equal(market.userDataScope, "summary");
+});
+
+test("reloadUserData rejects signer-backed refreshes for a different account before RPC", async () => {
+    const { market } = createUserRefreshMarket();
+    let readerCalled = false;
+
+    market.signer = { address: ACCOUNT } as any;
+    market.account = ACCOUNT as any;
+    market.reader = {
+        getMarketStates: async () => {
+            readerCalled = true;
+            throw new Error("reader should not be called for signer/account mismatch");
+        },
+    } as any;
+
+    await assert.rejects(
+        () => market.reloadUserData(OTHER_ACCOUNT as any),
+        /Cannot refresh signer-backed market/i,
+    );
+    assert.equal(readerCalled, false);
+    assert.equal(market.account, ACCOUNT);
+});
+
+test("reloadUserMarkets rejects signer-backed grouped refreshes for a different account before RPC", async () => {
+    let readerCalled = false;
+    const reader = {
+        getMarketStates: async () => {
+            readerCalled = true;
+            throw new Error("reader should not be called for signer/account mismatch");
+        },
+    };
+    const market = createRefreshHelperMarket(MARKET_A, TOKEN_A, reader);
+    market.signer = { address: ACCOUNT } as any;
+    market.account = ACCOUNT as any;
+
+    await assert.rejects(
+        () => Market.reloadUserMarkets([market], OTHER_ACCOUNT as any),
+        /Cannot refresh signer-backed market/i,
+    );
+    assert.equal(readerCalled, false);
+    assert.equal(market.account, ACCOUNT);
 });
 
 test("reloadUserMarkets keeps same-chain readers with different providers separate", async () => {

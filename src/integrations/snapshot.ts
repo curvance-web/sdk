@@ -159,6 +159,10 @@ export async function takePortfolioSnapshot(
     const markets = options.markets ?? all_markets;
 
     if (options.refresh && markets.length > 0) {
+        for (const market of markets) {
+            market.assertRefreshAccountCompatible(account);
+        }
+
         for (const { reader, markets: groupedMarkets } of groupMarketsByReaderDeployment(markets)) {
             const { dynamicMarket, userData } = await reader.getAllDynamicState(account);
 
@@ -170,7 +174,7 @@ export async function takePortfolioSnapshot(
                         `Fresh snapshot refresh missing market state for ${market.address}.`,
                     );
                 }
-                market.account = account;
+                market.bindRefreshedAccount(account);
                 market.applyState(dynamic, user);
             }
         }

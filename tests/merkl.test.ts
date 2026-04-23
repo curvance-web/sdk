@@ -88,6 +88,39 @@ test("aggregateMerklAprByToken rolls duplicate lend opportunities up by token me
     assert.ok(apyByToken.get(AUSD.toLowerCase())?.eq(new Decimal(0.25)));
 });
 
+test("aggregateMerklAprByToken skips malformed rows instead of throwing during boot enrichment", () => {
+    const WMON = "0x00000000000000000000000000000000000000a1";
+
+    const apyByToken = aggregateMerklAprByToken([
+        null,
+        { tokens: {} },
+        { identifier: WMON, apr: "not-a-number", tokens: [] },
+        {
+            identifier: "lend-campaign-1",
+            apr: 10,
+            tokens: [{ address: WMON }, null, { address: null }],
+        },
+    ] as any, "deposit");
+
+    assert.equal(apyByToken.size, 1);
+    assert.ok(apyByToken.get(WMON.toLowerCase())?.eq(new Decimal(0.10)));
+});
+
+test("aggregateMerklAprByToken falls back to identifier when token membership is malformed", () => {
+    const WMON = "0x00000000000000000000000000000000000000a1";
+
+    const apyByToken = aggregateMerklAprByToken([
+        {
+            identifier: WMON,
+            apr: 7,
+            tokens: {},
+        },
+    ] as any, "borrow");
+
+    assert.equal(apyByToken.size, 1);
+    assert.ok(apyByToken.get(WMON.toLowerCase())?.eq(new Decimal(0.07)));
+});
+
 test("Merkl helper APYs match the shared rollup semantics used by market hydration", () => {
     const WMON = "0x00000000000000000000000000000000000000a1";
     const USDC = "0x00000000000000000000000000000000000000a2";

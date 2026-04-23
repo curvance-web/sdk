@@ -132,6 +132,23 @@ export class Market {
         return requireAccount(this.account, this.signer);
     }
 
+    assertRefreshAccountCompatible(account: address) {
+        const signerAddress = this.signer?.address as address | undefined;
+        if (signerAddress == null || signerAddress.toLowerCase() === account.toLowerCase()) {
+            return;
+        }
+
+        throw new Error(
+            `Cannot refresh signer-backed market ${this.address} for ${account}; ` +
+            `the active signer is ${signerAddress}.`,
+        );
+    }
+
+    bindRefreshedAccount(account: address) {
+        this.assertRefreshAccountCompatible(account);
+        this.account = account;
+    }
+
     private requireFullUserTokenData(accessLabel: string) {
         if (this.userDataScope !== "summary") {
             return;
@@ -446,6 +463,7 @@ export class Market {
     }
 
     async reloadUserData(account: address) {
+        this.assertRefreshAccountCompatible(account);
         const { dynamicMarkets, userMarkets } = await this.reader.getMarketStates([this.address], account);
         const dynamic = dynamicMarkets[0];
         const user = userMarkets[0];
@@ -454,11 +472,12 @@ export class Market {
             throw new Error(`Could not reload market state for ${this.address}.`);
         }
 
-        this.account = account;
+        this.bindRefreshedAccount(account);
         this.applyState(dynamic, user);
     }
 
     async reloadUserSummary(account: address) {
+        this.assertRefreshAccountCompatible(account);
         const userMarkets = await this.reader.getMarketSummaries([this.address], account);
         const user = userMarkets[0];
 
@@ -466,7 +485,7 @@ export class Market {
             throw new Error(`Could not reload market user summary for ${this.address}.`);
         }
 
-        this.account = account;
+        this.bindRefreshedAccount(account);
         this.applyUserSummary(user);
     }
 
@@ -498,6 +517,10 @@ export class Market {
             return [];
         }
 
+        for (const market of markets) {
+            market.assertRefreshAccountCompatible(account);
+        }
+
         for(const { reader, markets: groupedMarkets } of this.groupByReaderDeployment(markets)) {
             const addresses = groupedMarkets.map((market) => market.address);
             const { dynamicMarkets, userMarkets } = await reader.getMarketStates(addresses, account);
@@ -512,7 +535,7 @@ export class Market {
                     throw new Error(`Could not reload market state for ${market.address}.`);
                 }
 
-                market.account = account;
+                market.bindRefreshedAccount(account);
                 market.applyState(dynamic, user);
             }
         }
@@ -523,6 +546,10 @@ export class Market {
     static async reloadUserMarketSummaries(markets: Market[], account: address): Promise<Market[]> {
         if(markets.length === 0) {
             return [];
+        }
+
+        for (const market of markets) {
+            market.assertRefreshAccountCompatible(account);
         }
 
         for(const { reader, markets: groupedMarkets } of this.groupByReaderDeployment(markets)) {
@@ -537,7 +564,7 @@ export class Market {
                     throw new Error(`Could not reload market user summary for ${market.address}.`);
                 }
 
-                market.account = account;
+                market.bindRefreshedAccount(account);
                 market.applyUserSummary(user);
             }
         }

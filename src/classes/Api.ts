@@ -38,6 +38,47 @@ function isRewardsResponse(
     return Array.isArray(maybeRewards.milestones) && Array.isArray(maybeRewards.incentives);
 }
 
+function isFiniteNumber(value: unknown): value is number {
+    return typeof value === "number" && Number.isFinite(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+    return typeof value === "string" && value.trim().length > 0;
+}
+
+function isMilestoneResponse(value: unknown): value is MilestoneResponse {
+    if (typeof value !== "object" || value == null) {
+        return false;
+    }
+
+    const row = value as Partial<Record<keyof MilestoneResponse, unknown>>;
+    return (
+        isNonEmptyString(row.market) &&
+        isFiniteNumber(row.tvl) &&
+        isFiniteNumber(row.multiplier) &&
+        isFiniteNumber(row.fail_multiplier) &&
+        isNonEmptyString(row.chain_network) &&
+        isNonEmptyString(row.start_date) &&
+        isNonEmptyString(row.end_date) &&
+        isFiniteNumber(row.duration_in_days)
+    );
+}
+
+function isIncentiveResponse(value: unknown): value is IncentiveResponse {
+    if (typeof value !== "object" || value == null) {
+        return false;
+    }
+
+    const row = value as Partial<Record<keyof IncentiveResponse, unknown>>;
+    return (
+        isNonEmptyString(row.market) &&
+        isNonEmptyString(row.type) &&
+        isFiniteNumber(row.rate) &&
+        isNonEmptyString(row.description) &&
+        isNonEmptyString(row.image)
+    );
+}
+
 function normalizeMarketKey(market: string): string {
     return market.toLowerCase();
 }
@@ -132,11 +173,11 @@ export class Api {
             };
         }
 
-        for(const milestone of rewards.milestones) {
+        for(const milestone of rewards.milestones.filter(isMilestoneResponse)) {
             milestones[normalizeMarketKey(milestone.market)] = milestone;
         }
 
-        for(const incentive of rewards.incentives) {
+        for(const incentive of rewards.incentives.filter(isIncentiveResponse)) {
             const market = normalizeMarketKey(incentive.market);
             if(!(market in incentives)) {
                 incentives[market] = [];

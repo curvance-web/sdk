@@ -213,6 +213,8 @@ describe('Approval preflights â€” single-path execution', () => {
             __state: {
                 oracleRouteCalled: boolean;
                 assetChecked: boolean;
+                zapAssets: bigint | null;
+                zapCollateralize: boolean | null;
             };
         };
 
@@ -241,17 +243,23 @@ describe('Approval preflights â€” single-path execution', () => {
         (token as any).__state = {
             oracleRouteCalled: false,
             assetChecked: false,
+            zapAssets: null,
+            zapCollateralize: null,
         };
         (token as any).ensureUnderlyingAmount = async (amount: Decimal) => amount;
         (token as any).requireSigner = () => ({ address: OWNER } as any);
         (token as any).getAccountOrThrow = () => OWNER;
         (token as any).getCallData = () => '0xdeadbeef';
         (token as any).zap = async (
-            _assets: bigint,
+            assets: bigint,
             _zap: unknown,
-            _collateralize: boolean,
+            collateralize: boolean,
             defaultCalldata: string,
-        ) => ({ calldata: defaultCalldata, calldata_overrides: {} });
+        ) => {
+            token.__state.zapAssets = assets;
+            token.__state.zapCollateralize = collateralize;
+            return { calldata: defaultCalldata, calldata_overrides: {} };
+        };
         (token as any).oracleRoute = async () => {
             token.__state.oracleRouteCalled = true;
             return {} as any;
@@ -437,6 +445,7 @@ describe('Approval preflights â€” single-path execution', () => {
         (token as any).getVaultAsset = async () => ({
             address: VAULT_ASSET,
             symbol: 'MON',
+            decimals: 18n,
             allowance: async (owner: string, spender: string) => {
                 vaultAllowanceCheck = { owner, spender };
                 return 0n;
@@ -453,6 +462,40 @@ describe('Approval preflights â€” single-path execution', () => {
         });
         assert.equal(token.__state.assetChecked, false);
         assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('depositAsCollateral treats bare vault zaps as zap paths for units and cap checks', async () => {
+        const token = createExecutionToken();
+        let capChecked = false;
+        (token as any).isPluginApproved = async () => true;
+        (token as any).getRemainingCollateral = () => {
+            capChecked = true;
+            throw new Error('non-zap collateral cap check should not run for vault zaps');
+        };
+        (token as any).getVaultAsset = async () => ({
+            address: VAULT_ASSET,
+            symbol: 'MON',
+            decimals: 6n,
+            allowance: async () => 10n ** 30n,
+        });
+
+        await token.depositAsCollateral(Decimal('1.23'), 'vault' as any);
+
+        assert.equal(capChecked, false);
+        assert.equal(token.__state.zapAssets, 1_230_000n);
+        assert.equal(token.__state.zapCollateralize, true);
+        assert.equal(token.__state.oracleRouteCalled, true);
+    });
+
+    test('simulateDepositAsCollateral sizes bare native-vault zaps as native value', async () => {
+        const token = createExecutionToken();
+        (token as any).simulateOracleRoute = async () => ({ success: true });
+
+        const result = await token.simulateDepositAsCollateral(Decimal('1.25'), 'native-vault' as any);
+
+        assert.deepEqual(result, { success: true });
+        assert.equal(token.__state.zapAssets, 1_250_000_000_000_000_000n);
+        assert.equal(token.__state.zapCollateralize, true);
     });
 });
 

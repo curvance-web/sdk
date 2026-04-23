@@ -334,7 +334,11 @@ export type MerklOpportunityLike = {
 export type ApyOverrides = Record<string, { value: number }>;
 export type MerklMatchMode = "deposit" | "borrow";
 
-function normalizeMerklTokenKey(value: string | undefined | null): string | null {
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value != null;
+}
+
+function normalizeMerklTokenKey(value: unknown): string | null {
     if (typeof value !== "string") {
         return null;
     }
@@ -344,13 +348,18 @@ function normalizeMerklTokenKey(value: string | undefined | null): string | null
 }
 
 function getMerklOpportunityTokenKeys(
-    opportunity: MerklOpportunityLike,
+    opportunity: unknown,
     mode: MerklMatchMode,
 ): string[] {
+    if (!isRecord(opportunity)) {
+        return [];
+    }
+
+    const tokens = Array.isArray(opportunity.tokens) ? opportunity.tokens : [];
     const tokenKeys = Array.from(
         new Set(
-            (opportunity.tokens ?? [])
-                .map((token) => normalizeMerklTokenKey(token.address))
+            tokens
+                .map((token) => isRecord(token) ? normalizeMerklTokenKey(token.address) : null)
                 .filter((value): value is string => value != null),
         ),
     );
@@ -371,15 +380,33 @@ function getMerklOpportunityTokenKeys(
     return identifierKey != null ? [identifierKey] : [];
 }
 
+function getMerklOpportunityApr(opportunity: unknown): Decimal | null {
+    if (!isRecord(opportunity)) {
+        return null;
+    }
+
+    const { apr } = opportunity;
+    if (typeof apr !== "number" && typeof apr !== "string" && typeof apr !== "bigint") {
+        return null;
+    }
+
+    try {
+        const parsed = new Decimal(typeof apr === "bigint" ? apr.toString() : apr);
+        return parsed.isFinite() && parsed.greaterThan(0) ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
 export function aggregateMerklAprByToken(
-    opportunities: MerklOpportunityLike[] | undefined,
+    opportunities: unknown[] | undefined,
     mode: MerklMatchMode,
 ): Map<string, Decimal> {
     const totals = new Map<string, Decimal>();
 
     for (const opportunity of opportunities ?? []) {
-        const apr = new Decimal(opportunity.apr ?? 0);
-        if (!apr.isFinite() || apr.lessThanOrEqualTo(0)) {
+        const apr = getMerklOpportunityApr(opportunity);
+        if (apr == null) {
             continue;
         }
 

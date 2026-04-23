@@ -361,6 +361,64 @@ export class CToken extends Calldata<ICToken> {
         return contractSetup<ICToken>(this.requireSigner(), this.address, base_ctoken_abi);
     }
 
+    private getZapType(zap: ZapperInstructions): ZapperTypes {
+        return typeof zap === "object" ? zap.type : zap;
+    }
+
+    private isZapInstruction(zap: ZapperInstructions): boolean {
+        return this.getZapType(zap) !== "none";
+    }
+
+    private async getZapInputDecimals(zap: ZapperInstructions): Promise<bigint> {
+        const zapType = this.getZapType(zap);
+
+        switch (zapType) {
+            case "none":
+                return this.asset.decimals;
+            case "native-vault":
+            case "native-simple":
+                return 18n;
+            case "vault": {
+                const vaultAsset = await this.getVaultAsset(true);
+                return vaultAsset.decimals ?? await vaultAsset.contract.decimals();
+            }
+            case "simple":
+                if (typeof zap !== "object") {
+                    return this.asset.decimals;
+                }
+
+                if (zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
+                    return 18n;
+                }
+
+                const inputErc20 = new ERC20(this.provider, zap.inputToken, undefined, undefined, this.signer);
+                return inputErc20.decimals ?? await inputErc20.contract.decimals();
+        }
+    }
+
+    private async getZapAssetAmount(amount: TokenInput, zap: ZapperInstructions): Promise<bigint> {
+        return FormatConverter.decimalToBigInt(amount, await this.getZapInputDecimals(zap));
+    }
+
+    private async assertVaultLeverageBorrowAssetSupported(
+        borrow: BorrowableCToken,
+        type: "vault" | "native-vault",
+    ) {
+        const expectedAsset = type === "native-vault"
+            ? this.currentChainConfig.wrapped_native
+            : await this.getVaultAsset(false);
+        const actualAsset = borrow.asset.address;
+
+        if (actualAsset.toLowerCase() === expectedAsset.toLowerCase()) {
+            return;
+        }
+
+        throw new Error(
+            `${type} leverage requires borrow asset ${expectedAsset}, received ${actualAsset}. ` +
+            `Use simple leverage for cross-asset borrow routes.`,
+        );
+    }
+
     get adapters() { return this.cache.adapters; }
     get borrowPaused() { return this.cache.borrowPaused }
     get collateralizationPaused() { return this.cache.collateralizationPaused }
@@ -1028,19 +1086,7 @@ export class CToken extends Calldata<ICToken> {
 
     async ensureUnderlyingAmount(amount: TokenInput, zap: ZapperInstructions) : Promise<TokenInput> {
         const balance = await this.getZapBalance(zap);
-        const isZapping = typeof zap === 'object' && zap.type !== 'none';
-
-        // Use the zap input token's decimals when zapping, otherwise the deposit token's decimals
-        let decimals = this.asset.decimals;
-        if (isZapping && zap.inputToken) {
-            if (zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
-                decimals = 18n;
-            } else {
-                const inputErc20 = new ERC20(this.provider, zap.inputToken as address, undefined, undefined, this.signer);
-                decimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
-            }
-        }
-
+        const decimals = await this.getZapInputDecimals(zap);
         const assets = FormatConverter.decimalToBigInt(amount, decimals);
 
         if(assets > balance) {
@@ -1518,6 +1564,9 @@ export class CToken extends Calldata<ICToken> {
         try {
             this.requireSigner();
             const manager = this.getPositionManager(type);
+            if (type === 'vault' || type === 'native-vault') {
+                await this.assertVaultLeverageBorrowAssetSupported(borrow, type);
+            }
 
             let calldata: bytes;
             await this._getLeverageSnapshot(borrow);
@@ -1793,6 +1842,9 @@ export class CToken extends Calldata<ICToken> {
 
             depositAmount = await this.ensureUnderlyingAmount(depositAmount, 'none');
             const manager = this.getPositionManager(type);
+            if (type === 'vault' || type === 'native-vault') {
+                await this.assertVaultLeverageBorrowAssetSupported(borrow, type);
+            }
 
             let calldata: bytes;
 
@@ -1909,17 +1961,8 @@ export class CToken extends Calldata<ICToken> {
             const signer = this.requireSigner();
             receiver ??= signer.address as address;
 
-            const isZapping = typeof zap === 'object' && zap.type !== 'none';
             const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
-            let zapAssets = depositAssets;
-            if (isZapping && (zap as any).inputToken) {
-                const isNative = (zap as any).inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
-                const zapDecimals = isNative ? 18n : (() => {
-                    const inputErc20 = new ERC20(this.provider, (zap as any).inputToken as address, undefined, undefined, this.signer);
-                    return inputErc20.decimals ?? inputErc20.contract.decimals();
-                })();
-                zapAssets = FormatConverter.decimalToBigInt(amount, await zapDecimals);
-            }
+            const zapAssets = await this.getZapAssetAmount(amount, zap);
 
             const default_calldata = this.getCallData("deposit", [depositAssets, receiver]);
             const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, false, default_calldata);
@@ -1940,17 +1983,8 @@ export class CToken extends Calldata<ICToken> {
             const signer = this.requireSigner();
             receiver ??= signer.address as address;
 
-            const isZapping = typeof zap === 'object' && zap.type !== 'none';
             const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
-            let zapAssets = depositAssets;
-            if (isZapping && (zap as any).inputToken) {
-                const isNative = (zap as any).inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
-                const zapDecimals = isNative ? 18n : (() => {
-                    const inputErc20 = new ERC20(this.provider, (zap as any).inputToken as address, undefined, undefined, this.signer);
-                    return inputErc20.decimals ?? inputErc20.contract.decimals();
-                })();
-                zapAssets = FormatConverter.decimalToBigInt(amount, await zapDecimals);
-            }
+            const zapAssets = await this.getZapAssetAmount(amount, zap);
 
             const default_calldata = this.getCallData("depositAsCollateral", [depositAssets, receiver]);
             const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, true, default_calldata);
@@ -2016,20 +2050,8 @@ export class CToken extends Calldata<ICToken> {
         amount = await this.ensureUnderlyingAmount(amount, zap);
         const signer = this.requireSigner();
         receiver ??= signer.address as address;
-        // When zapping, the swap amount uses input token decimals, but the
-        // default deposit calldata uses the deposit token decimals.
-        const isZapping = typeof zap === 'object' && zap.type !== 'none';
         const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
-        let zapAssets = depositAssets;
-        if (isZapping && zap.inputToken) {
-            if (zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
-                zapAssets = FormatConverter.decimalToBigInt(amount, 18n);
-            } else {
-                const inputErc20 = new ERC20(this.provider, zap.inputToken as address, undefined, undefined, this.signer);
-                const zapDecimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
-                zapAssets = FormatConverter.decimalToBigInt(amount, zapDecimals);
-            }
-        }
+        const zapAssets = await this.getZapAssetAmount(amount, zap);
         await this._checkDepositApprovals(zap, depositAssets, zapAssets);
 
         const default_calldata = this.getCallData("deposit", [depositAssets, receiver]);
@@ -2042,22 +2064,10 @@ export class CToken extends Calldata<ICToken> {
         amount = await this.ensureUnderlyingAmount(amount, zap);
         const signer = this.requireSigner();
         receiver ??= signer.address as address;
-        // When zapping, the swap amount uses input token decimals, but collateral
-        // cap checks and the default deposit calldata use the deposit token decimals.
-        const isZapping = typeof zap === 'object' && zap.type !== 'none';
         const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
-        let zapAssets = depositAssets;
-        if (isZapping && zap.inputToken) {
-            if (zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
-                zapAssets = FormatConverter.decimalToBigInt(amount, 18n);
-            } else {
-                const inputErc20 = new ERC20(this.provider, zap.inputToken as address, undefined, undefined, this.signer);
-                const zapDecimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
-                zapAssets = FormatConverter.decimalToBigInt(amount, zapDecimals);
-            }
-        }
+        const zapAssets = await this.getZapAssetAmount(amount, zap);
 
-        if (!isZapping) {
+        if (!this.isZapInstruction(zap)) {
             const collateralCapError = "There is not enough collateral left in this tokens collateral cap for this deposit.";
             const remainingCollateral = this.getRemainingCollateral(false);
             if(remainingCollateral == 0n) throw new Error(collateralCapError);

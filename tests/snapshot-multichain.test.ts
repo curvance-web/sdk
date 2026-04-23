@@ -6,6 +6,7 @@ import { ProtocolReader } from "../src/classes/ProtocolReader";
 import { snapshotMarket, takePortfolioSnapshot } from "../src/integrations/snapshot";
 
 const ACCOUNT = "0x00000000000000000000000000000000000000aa";
+const OTHER_ACCOUNT = "0x00000000000000000000000000000000000000bb";
 const MARKET_A = "0x00000000000000000000000000000000000000a1";
 const MARKET_B = "0x00000000000000000000000000000000000000b2";
 const MARKET_C = "0x00000000000000000000000000000000000000c3";
@@ -32,6 +33,7 @@ function createSnapshotMarket({
     reader,
     applyState,
     account = ACCOUNT,
+    signer = null,
 }: {
     address: string;
     name: string;
@@ -39,10 +41,12 @@ function createSnapshotMarket({
     reader?: any;
     applyState?: (dynamic: { address: string }, user: { address: string }) => void;
     account?: string | null;
+    signer?: { address: string } | null;
 }) {
     const market = Object.create(Market.prototype) as Market;
     market.address = address as any;
     market.account = account as any;
+    market.signer = signer as any ?? null;
     market.reader = (reader ?? { batchKey: null, getAllDynamicState: async () => ({ dynamicMarket: [], userData: { markets: [] } }) }) as any;
     market.setup = { chain } as any;
     market.tokens = [createToken(name, true)] as any;
@@ -262,6 +266,34 @@ test("takePortfolioSnapshot refresh fails closed when a refreshed market payload
         }),
         /Fresh snapshot refresh missing market state/i,
     );
+});
+
+test("takePortfolioSnapshot refresh rejects signer-backed markets for a different account before RPC", async () => {
+    let readerCalled = false;
+    const market = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Signer Market",
+        chain: "monad-mainnet",
+        account: ACCOUNT,
+        signer: { address: ACCOUNT },
+        reader: {
+            batchKey: "monad-mainnet:signer-reader",
+            getAllDynamicState: async () => {
+                readerCalled = true;
+                throw new Error("reader should not be called for signer/account mismatch");
+            },
+        },
+    });
+
+    await assert.rejects(
+        () => takePortfolioSnapshot(OTHER_ACCOUNT as any, {
+            markets: [market],
+            refresh: true,
+        }),
+        /Cannot refresh signer-backed market/i,
+    );
+    assert.equal(readerCalled, false);
+    assert.equal(market.account, ACCOUNT);
 });
 
 test("takePortfolioSnapshot rejects full caches bound to a different account unless refreshed", async () => {
