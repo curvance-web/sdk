@@ -119,3 +119,45 @@ test("contractWithGasBuffer merges gas limit into existing transaction overrides
         { value: 5n, gasLimit: 110n },
     ]]);
 });
+
+test("contractWithGasBuffer preserves ethers method helpers on wrapped methods", async () => {
+    const contract = {
+        interface: {
+            getFunction(name: string) {
+                if (name !== "deposit") {
+                    throw new Error(`unexpected function lookup: ${name}`);
+                }
+
+                return {
+                    stateMutability: "payable",
+                    inputs: [{ name: "receiver" }, { name: "amount" }],
+                };
+            },
+        },
+        deposit: Object.assign(
+            async () => "sent",
+            {
+                estimateGas: async () => 100n,
+                staticCall: async (receiver: string, amount: bigint) => ({ receiver, amount, mode: "static" }),
+                populateTransaction: async (receiver: string, amount: bigint) => ({ to: receiver, value: amount }),
+                fragment: { name: "deposit" },
+            },
+        ),
+    };
+
+    const wrapped = contractWithGasBuffer(contract);
+    const method = wrapped.deposit as any;
+
+    assert.equal(await method.estimateGas("0xreceiver", 10n), 100n);
+    assert.deepEqual(await method.staticCall("0xreceiver", 10n), {
+        receiver: "0xreceiver",
+        amount: 10n,
+        mode: "static",
+    });
+    assert.deepEqual(await method.populateTransaction("0xreceiver", 10n), {
+        to: "0xreceiver",
+        value: 10n,
+    });
+    assert.deepEqual(method.fragment, { name: "deposit" });
+    assert.equal(await method("0xreceiver", 10n), "sent");
+});

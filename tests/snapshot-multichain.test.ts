@@ -94,8 +94,8 @@ test("takePortfolioSnapshot uses explicit markets and infers a single-chain labe
     assert.equal(snapshot.chain, "monad-mainnet");
     assert.equal(snapshot.markets.length, 1);
     assert.equal(snapshot.markets[0]?.marketAddress, MARKET_A);
-    assert.equal(snapshot.totalDepositsUSD, 10);
-    assert.equal(snapshot.totalDebtUSD, 2);
+    assert.equal(snapshot.totalDepositsUSD, "10");
+    assert.equal(snapshot.totalDebtUSD, "2");
 });
 
 test("takePortfolioSnapshot labels mixed explicit market sets as multi", async () => {
@@ -133,9 +133,48 @@ test("snapshotMarket reports collateral token amounts as assets and exposes raw 
 
     const snapshot = snapshotMarket(market);
 
-    assert.equal(snapshot.positions[0]?.collateralUSD, 18);
-    assert.equal(snapshot.positions[0]?.collateralTokens, 9);
-    assert.equal(snapshot.positions[0]?.collateralShares, 6);
+    assert.equal(snapshot.positions[0]?.collateralUSD, "18");
+    assert.equal(snapshot.positions[0]?.collateralTokens, "9");
+    assert.equal(snapshot.positions[0]?.collateralShares, "6");
+});
+
+test("snapshotMarket serializes high-precision decimal values as strings", () => {
+    const precise = "900719925474099312345.123456789";
+    const market = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Precision Market",
+        chain: "monad-mainnet",
+    });
+    market.tokens = [{
+        ...createToken("cBIG", true),
+        getUserAssetBalance: () => Decimal(precise),
+        getUserCollateral: () => Decimal(precise),
+        getUserCollateralAssets: () => Decimal(precise),
+        getUserDebt: () => Decimal(precise),
+        getPrice: () => Decimal("123456789.123456789"),
+        getApy: () => Decimal("0.123456789123456789"),
+        getBorrowRate: () => Decimal("0.987654321987654321"),
+    }] as any;
+    Object.defineProperty(market, "userDeposits", {
+        value: Decimal(precise),
+        configurable: true,
+    });
+    Object.defineProperty(market, "userDebt", {
+        value: Decimal(precise),
+        configurable: true,
+    });
+    Object.defineProperty(market, "userNet", {
+        value: Decimal("0"),
+        configurable: true,
+    });
+
+    const snapshot = snapshotMarket(market);
+
+    assert.equal(snapshot.totalDepositsUSD, precise);
+    assert.equal(snapshot.positions[0]?.depositUSD, precise);
+    assert.equal(snapshot.positions[0]?.assetPriceUSD, "123456789.123456789");
+    assert.equal(snapshot.positions[0]?.borrowRate, "0.987654321987654321");
+    assert.equal(typeof snapshot.totalDepositsUSD, "string");
 });
 
 test("takePortfolioSnapshot refresh groups explicit markets by deployment key", async () => {
@@ -287,6 +326,34 @@ test("takePortfolioSnapshot refresh fails closed when a refreshed market payload
         }),
         /Fresh snapshot refresh missing market state/i,
     );
+});
+
+test("takePortfolioSnapshot refresh does not bind account when state application fails", async () => {
+    const market = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Malformed Refresh Market",
+        chain: "monad-mainnet",
+        account: ACCOUNT,
+        reader: {
+            batchKey: "monad-mainnet:malformed-reader",
+            getAllDynamicState: async () => ({
+                dynamicMarket: [{ address: MARKET_A }],
+                userData: { markets: [{ address: MARKET_A }] },
+            }),
+        },
+        applyState: () => {
+            throw new Error("malformed token rows");
+        },
+    });
+
+    await assert.rejects(
+        () => takePortfolioSnapshot(OTHER_ACCOUNT as any, {
+            markets: [market],
+            refresh: true,
+        }),
+        /malformed token rows/i,
+    );
+    assert.equal(market.account, ACCOUNT);
 });
 
 test("takePortfolioSnapshot refresh rejects signer-backed markets for a different account before RPC", async () => {

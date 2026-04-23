@@ -150,6 +150,45 @@ test("setupChain lets a newer success supersede an older success that published 
     assert.deepEqual(all_markets, newerResult.markets);
 });
 
+test("setupChain preserves call-start order when an older setup validates slowly", async (t) => {
+    const validationA = defer<{ chainId: bigint; name: string }>();
+
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async (_reader, _oracleManager, _provider, _signer, _account, _milestones, _incentives, setup) => {
+        const activeSetup = setup!;
+        return [{ marker: activeSetup.api_url }] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    const olderSetup = setupChain("monad-mainnet", null, "https://api.slow-validation.example", {
+        readProvider: {
+            getNetwork: async () => validationA.promise,
+        } as any,
+    });
+    const newerResult = await setupChain("monad-mainnet", null, "https://api.fast-validation.example", {
+        readProvider: {
+            getNetwork: async () => ({ chainId: 143n, name: "monad-mainnet" }),
+        } as any,
+    });
+
+    assert.equal(setup_config.api_url, "https://api.fast-validation.example");
+    assert.deepEqual(all_markets, newerResult.markets);
+
+    validationA.resolve({ chainId: 143n, name: "monad-mainnet" });
+    const olderResult = await olderSetup;
+
+    assert.equal((olderResult.markets[0] as any).marker, "https://api.slow-validation.example");
+    assert.equal(setup_config.api_url, "https://api.fast-validation.example");
+    assert.deepEqual(all_markets, newerResult.markets);
+});
+
 test("setupChain keeps signer writes separate from dedicated read transport", async (t) => {
     const originalGetRewards = Api.getRewards;
     const originalGetAll = Market.getAll;

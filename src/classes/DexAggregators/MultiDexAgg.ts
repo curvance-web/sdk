@@ -209,13 +209,18 @@ export class MultiDexAgg implements IDexAgg {
      * Wraps a promise with a timeout.
      */
     private _withTimeout<T>(promise: Promise<T>, agg: IDexAgg): Promise<T> {
-        const timeout = new Promise<never>((_, reject) =>
-            setTimeout(
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(
                 () => reject(new Error(`${agg.constructor.name} timed out after ${this.config.quoteTimeoutMs}ms`)),
                 this.config.quoteTimeoutMs
-            )
-        );
-        return Promise.race([promise, timeout]);
+            );
+        });
+        return Promise.race([promise, timeout]).finally(() => {
+            if (timeoutId != undefined) {
+                clearTimeout(timeoutId);
+            }
+        });
     }
 
     /**

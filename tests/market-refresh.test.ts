@@ -314,6 +314,36 @@ test("reloadUserData binds the refreshed account for downstream helpers", async 
     assert.equal(market.account, ACCOUNT);
 });
 
+test("reloadUserData does not bind a new account when state application fails", async () => {
+    const { market, token } = createUserRefreshMarket();
+
+    market.account = ACCOUNT as any;
+    market.reader = {
+        getMarketStates: async () => ({
+            dynamicMarkets: [{ address: MARKET_A, tokens: [{ address: TOKEN_A as any }] }],
+            userMarkets: [{
+                address: MARKET_A,
+                collateral: 31n,
+                maxDebt: 32n,
+                debt: 33n,
+                positionHealth: 34n,
+                cooldown: 35n,
+                errorCodeHit: false,
+                priceStale: false,
+                tokens: [],
+            }],
+        }),
+    } as any;
+
+    await assert.rejects(
+        () => market.reloadUserData(OTHER_ACCOUNT as any),
+        /Token row count mismatch.*user=0/i,
+    );
+
+    assert.equal(market.account, ACCOUNT);
+    assert.equal((token as any).cache.userAssetBalance, 10n * WAD);
+});
+
 test("reloadUserSummary binds the refreshed account for downstream helpers", async () => {
     const { market } = createUserRefreshMarket();
 
@@ -355,6 +385,34 @@ test("reloadUserData rejects signer-backed refreshes for a different account bef
         /Cannot refresh signer-backed market/i,
     );
     assert.equal(readerCalled, false);
+    assert.equal(market.account, ACCOUNT);
+});
+
+test("reloadUserMarkets does not bind refreshed account when grouped state application fails", async () => {
+    const reader = {
+        getMarketStates: async () => ({
+            dynamicMarkets: [{ address: MARKET_A, tokens: [{ address: TOKEN_A as any }] }],
+            userMarkets: [{
+                address: MARKET_A,
+                collateral: 0n,
+                maxDebt: 0n,
+                debt: 0n,
+                positionHealth: 0n,
+                cooldown: 0n,
+                errorCodeHit: false,
+                priceStale: false,
+                tokens: [],
+            }],
+        }),
+    };
+    const market = createRefreshHelperMarket(MARKET_A, TOKEN_A, reader);
+    market.account = ACCOUNT as any;
+
+    await assert.rejects(
+        () => Market.reloadUserMarkets([market], OTHER_ACCOUNT as any),
+        /Token row count mismatch.*user=0/i,
+    );
+
     assert.equal(market.account, ACCOUNT);
 });
 

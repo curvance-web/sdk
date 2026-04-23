@@ -10,13 +10,13 @@ Decimal.set({ precision: 50 });
 export type ChangeRate = "year" | "month" | "week" | "day";
 export type ChainRpcPrefix = keyof typeof chains;
 
-export const BPS = BigInt(1e4);
-export const BPS_SQUARED = BigInt(1e8);
-export const WAD = BigInt(1e18);
-export const WAD_BPS = BigInt(1e22);
-export const RAY = BigInt(1e27);
-export const WAD_SQUARED = BigInt(1e36);
-export const WAD_CUBED_BPS_OFFSET = BigInt(1e50);
+export const BPS = 10_000n;
+export const BPS_SQUARED = BPS * BPS;
+export const WAD = 10n ** 18n;
+export const WAD_BPS = WAD * BPS;
+export const RAY = 10n ** 27n;
+export const WAD_SQUARED = WAD * WAD;
+export const WAD_CUBED_BPS_OFFSET = WAD * WAD * WAD / BPS;
 export const WAD_DECIMAL = new Decimal(WAD);
 
 export const SECONDS_PER_YEAR = 31_536_000n; // 365 days
@@ -558,8 +558,7 @@ export function contractWithGasBuffer<T extends object>(contract: T, bufferPerce
                 return originalMethod;
             }
 
-            // Return a wrapped version of the method
-            return async (...args: any[]) => {
+            const wrappedMethod = async (...args: any[]) => {
                 try {
                     // Gas estimation is only useful on state-changing methods.
                     // Estimating read-only functions adds an unnecessary RPC round-trip
@@ -581,6 +580,32 @@ export function contractWithGasBuffer<T extends object>(contract: T, bufferPerce
                     throw error;
                 }
             };
+
+            return new Proxy(wrappedMethod, {
+                get(methodTarget, property, methodReceiver) {
+                    if (property in methodTarget) {
+                        return Reflect.get(methodTarget, property, methodReceiver);
+                    }
+
+                    const value = Reflect.get(originalMethod as any, property, originalMethod);
+                    return typeof value === "function" ? value.bind(originalMethod) : value;
+                },
+                has(methodTarget, property) {
+                    return property in methodTarget || property in originalMethod;
+                },
+                ownKeys(methodTarget) {
+                    return [...new Set([
+                        ...Reflect.ownKeys(methodTarget),
+                        ...Reflect.ownKeys(originalMethod),
+                    ])];
+                },
+                getOwnPropertyDescriptor(methodTarget, property) {
+                    return (
+                        Reflect.getOwnPropertyDescriptor(methodTarget, property) ??
+                        Reflect.getOwnPropertyDescriptor(originalMethod, property)
+                    );
+                },
+            });
         }
     });
 }

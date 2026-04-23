@@ -506,8 +506,8 @@ export class Market {
             throw new Error(`Could not reload market state for ${this.address}.`);
         }
 
-        this.bindRefreshedAccount(account, allowSignerMismatch);
         this.applyState(dynamic, user);
+        this.bindRefreshedAccount(account, allowSignerMismatch);
     }
 
     async reloadUserSummary(account: address) {
@@ -569,8 +569,8 @@ export class Market {
                     throw new Error(`Could not reload market state for ${market.address}.`);
                 }
 
-                market.bindRefreshedAccount(account);
                 market.applyState(dynamic, user);
+                market.bindRefreshedAccount(account);
             }
         }
 

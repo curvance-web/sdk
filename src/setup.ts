@@ -166,69 +166,69 @@ export async function setupChain(
     // Validate api_url scheme before any network calls
     validateApiUrl(api_url);
 
-    const chainReadProvider = chain_config[chain].provider;
-    const readFallbacks = chain_config[chain].fallbackProviders;
-    let signer: curvance_signer | null = null;
-    let readProviderOverride = options.readProvider ?? null;
-    let readProviderOverrideValidated = false;
-
-    if(provider != null) {
-        if("address" in provider) {
-            signer = provider as curvance_signer;
-            await validateSignerProviderChain(chain, signer);
-            // Wallet-primary for reads: when a wallet is connected, its own
-            // provider is the primary read source. chainReadProvider + chain
-            // fallbacks become the fallback chain via wrapProviderWithRetries
-            // below. This distributes read load across users' wallet RPCs
-            // instead of funneling every Curvance session through one origin,
-            // and matches the pre-`358d46b` architecture the original author
-            // designed (explicitly citing Rabby as the unreliable-wallet case).
-            // Explicit `options.readProvider` wins if set.
-            if(!readProviderOverride && signer.provider) {
-                readProviderOverride = signer.provider as curvance_read_provider;
-                readProviderOverrideValidated = true;
-            }
-        } else {
-            readProviderOverride = provider as curvance_read_provider;
-        }
-    }
-
-    if (readProviderOverride && !readProviderOverrideValidated) {
-        await validateProviderChain(chain, readProviderOverride, "Read provider");
-    }
-
-    const readProvider = wrapProviderWithRetries(
-        readProviderOverride ?? chainReadProvider,
-        readProviderOverride ? [chainReadProvider, ...readFallbacks] : readFallbacks,
-    );
-    const signerAccount = (signer?.address as address | undefined) ?? null;
-    const requestedAccount = options.account ?? null;
-    if (
-        signerAccount != null &&
-        requestedAccount != null &&
-        signerAccount.toLowerCase() !== requestedAccount.toLowerCase()
-    ) {
-        throw new Error(
-            `setupChain('${chain}') cannot boot with signer ${signerAccount} and read account ${requestedAccount}. ` +
-            `Pass a matching account or omit options.account when a signer is connected.`,
-        );
-    }
-    const account = requestedAccount ?? signerAccount;
-
-    const nextSetupConfig = createSetupConfig(
-        chain,
-        readProvider,
-        signer,
-        account,
-        api_url,
-        options,
-    );
-    validateSetupConfig(nextSetupConfig);
-
     const setupInvocation = ++latest_setup_invocation;
     pending_setup_invocations.add(setupInvocation);
 
     try {
+        const chainReadProvider = chain_config[chain].provider;
+        const readFallbacks = chain_config[chain].fallbackProviders;
+        let signer: curvance_signer | null = null;
+        let readProviderOverride = options.readProvider ?? null;
+        let readProviderOverrideValidated = false;
+
+        if(provider != null) {
+            if("address" in provider) {
+                signer = provider as curvance_signer;
+                await validateSignerProviderChain(chain, signer);
+                // Wallet-primary for reads: when a wallet is connected, its own
+                // provider is the primary read source. chainReadProvider + chain
+                // fallbacks become the fallback chain via wrapProviderWithRetries
+                // below. This distributes read load across users' wallet RPCs
+                // instead of funneling every Curvance session through one origin,
+                // and matches the pre-`358d46b` architecture the original author
+                // designed (explicitly citing Rabby as the unreliable-wallet case).
+                // Explicit `options.readProvider` wins if set.
+                if(!readProviderOverride && signer.provider) {
+                    readProviderOverride = signer.provider as curvance_read_provider;
+                    readProviderOverrideValidated = true;
+                }
+            } else {
+                readProviderOverride = provider as curvance_read_provider;
+            }
+        }
+
+        if (readProviderOverride && !readProviderOverrideValidated) {
+            await validateProviderChain(chain, readProviderOverride, "Read provider");
+        }
+
+        const readProvider = wrapProviderWithRetries(
+            readProviderOverride ?? chainReadProvider,
+            readProviderOverride ? [chainReadProvider, ...readFallbacks] : readFallbacks,
+        );
+        const signerAccount = (signer?.address as address | undefined) ?? null;
+        const requestedAccount = options.account ?? null;
+        if (
+            signerAccount != null &&
+            requestedAccount != null &&
+            signerAccount.toLowerCase() !== requestedAccount.toLowerCase()
+        ) {
+            throw new Error(
+                `setupChain('${chain}') cannot boot with signer ${signerAccount} and read account ${requestedAccount}. ` +
+                `Pass a matching account or omit options.account when a signer is connected.`,
+            );
+        }
+        const account = requestedAccount ?? signerAccount;
+
+        const nextSetupConfig = createSetupConfig(
+            chain,
+            readProvider,
+            signer,
+            account,
+            api_url,
+            options,
+        );
+        validateSetupConfig(nextSetupConfig);
+
         const { milestones, incentives } = await Api.getRewards(nextSetupConfig);
         const reader = new ProtocolReader(
             nextSetupConfig.contracts.ProtocolReader as address,

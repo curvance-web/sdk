@@ -725,6 +725,66 @@ test("MultiDexAgg.quoteAction picks the route with the highest guaranteed output
     assert.equal(quote.out, 90n);
 });
 
+test("MultiDexAgg clears quote timeout timers when quotes resolve first", async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    const liveTimers = new Set<object>();
+    const clearedTimers: object[] = [];
+
+    (globalThis as any).setTimeout = () => {
+        const timer = {};
+        liveTimers.add(timer);
+        return timer;
+    };
+    (globalThis as any).clearTimeout = (timer: object) => {
+        clearedTimers.push(timer);
+        liveTimers.delete(timer);
+    };
+
+    try {
+        const fastA = {
+            dao: FEE_RECEIVER,
+            router: TOKEN_IN,
+            getAvailableTokens: async () => [],
+            quoteAction: async () => {
+                throw new Error("not used");
+            },
+            quoteMin: async () => 80n,
+            quote: async () => ({
+                to: TOKEN_IN,
+                calldata: "0x" as bytes,
+                min_out: 80n,
+                out: 90n,
+            }),
+        } as any;
+        const fastB = {
+            dao: FEE_RECEIVER,
+            router: TOKEN_OUT,
+            getAvailableTokens: async () => [],
+            quoteAction: async () => {
+                throw new Error("not used");
+            },
+            quoteMin: async () => 70n,
+            quote: async () => ({
+                to: TOKEN_OUT,
+                calldata: "0x" as bytes,
+                min_out: 70n,
+                out: 70n,
+            }),
+        } as any;
+
+        const multi = new MultiDexAgg([fastA, fastB], { quoteTimeoutMs: 10_000 });
+        const minOut = await multi.quoteMin(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n);
+
+        assert.equal(minOut, 80n);
+        assert.equal(clearedTimers.length, 2);
+        assert.equal(liveTimers.size, 0);
+    } finally {
+        globalThis.setTimeout = originalSetTimeout;
+        globalThis.clearTimeout = originalClearTimeout;
+    }
+});
+
 test("KyberSwap.getAvailableTokens quote closure formats output using output token decimals", async () => {
     const decimalsByAddress = new Map<string, bigint>();
     const provider = createDecimalsProvider(decimalsByAddress);

@@ -4,6 +4,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert';
 import FormatConverter from '../src/classes/FormatConverter';
 import { Decimal } from 'decimal.js';
+import { BPS, BPS_SQUARED, RAY, WAD, WAD_BPS, WAD_CUBED_BPS_OFFSET, WAD_SQUARED } from '../src/helpers';
 
 
 describe('Conversions', () => {
@@ -96,5 +97,15 @@ describe('Conversions', () => {
 
         const tokenB_amount = FormatConverter.tokensToTokens(tokenA, tokenB, true);
         assert.strictEqual(tokenB_amount.equals(new Decimal(602)), true);
+    });
+
+    test('exported fixed-point constants are exact bigints', function() {
+        assert.strictEqual(BPS, 10_000n);
+        assert.strictEqual(BPS_SQUARED, 100_000_000n);
+        assert.strictEqual(WAD, 1_000_000_000_000_000_000n);
+        assert.strictEqual(WAD_BPS, 10_000_000_000_000_000_000_000n);
+        assert.strictEqual(RAY, 1_000_000_000_000_000_000_000_000_000n);
+        assert.strictEqual(WAD_SQUARED.toString(), `1${"0".repeat(36)}`);
+        assert.strictEqual(WAD_CUBED_BPS_OFFSET.toString(), `1${"0".repeat(50)}`);
     });
 });

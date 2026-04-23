@@ -2,6 +2,7 @@ import { Market } from "../classes/Market";
 import { BorrowableCToken } from "../classes/BorrowableCToken";
 import { all_markets, setup_config } from "../setup";
 import { address } from "../types";
+import { Decimal } from "decimal.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -9,27 +10,27 @@ export interface PositionSnapshot {
     tokenAddress: string;
     tokenSymbol: string;
     isBorrowable: boolean;
-    depositUSD: number;
-    depositTokens: number;
-    collateralUSD: number;
-    collateralTokens: number;
-    collateralShares: number;
-    debtUSD: number;
-    debtTokens: number;
-    assetPriceUSD: number;
-    supplyAPY: number;
-    borrowRate: number;
+    depositUSD: string;
+    depositTokens: string;
+    collateralUSD: string;
+    collateralTokens: string;
+    collateralShares: string;
+    debtUSD: string;
+    debtTokens: string;
+    assetPriceUSD: string;
+    supplyAPY: string;
+    borrowRate: string;
 }
 
 export interface MarketSnapshot {
     marketAddress: string;
     marketName: string;
-    totalDepositsUSD: number;
-    totalDebtUSD: number;
-    netUSD: number;
-    positionHealth: number | null;
-    dailyEarnings: number;
-    dailyCost: number;
+    totalDepositsUSD: string;
+    totalDebtUSD: string;
+    netUSD: string;
+    positionHealth: string | null;
+    dailyEarnings: string;
+    dailyCost: string;
     positions: PositionSnapshot[];
 }
 
@@ -37,11 +38,11 @@ export interface PortfolioSnapshot {
     account: string;
     chain: string;
     timestamp: number;
-    totalDepositsUSD: number;
-    totalDebtUSD: number;
-    netUSD: number;
-    dailyEarnings: number;
-    dailyCost: number;
+    totalDepositsUSD: string;
+    totalDebtUSD: string;
+    netUSD: string;
+    dailyEarnings: string;
+    dailyCost: string;
     markets: MarketSnapshot[];
 }
 
@@ -102,8 +103,12 @@ function assertSnapshotAccount(market: Market, account: address) {
 
 // ── Functions ────────────────────────────────────────────────────────────────
 
+function decimalSnapshot(value: Decimal): string {
+    return value.toString();
+}
+
 /**
- * Snapshot a single market's user positions into plain numbers for JSON serialization.
+ * Snapshot a single market's user positions into decimal strings for JSON serialization.
  */
 export function snapshotMarket(market: Market): MarketSnapshot {
     assertSnapshotCompatibleMarket(market);
@@ -117,18 +122,18 @@ export function snapshotMarket(market: Market): MarketSnapshot {
             tokenAddress: token.address,
             tokenSymbol: token.symbol,
             isBorrowable,
-            depositUSD: token.getUserAssetBalance(true).toNumber(),
-            depositTokens: token.getUserAssetBalance(false).toNumber(),
-            collateralUSD: token.getUserCollateral(true).toNumber(),
-            collateralTokens: token.getUserCollateralAssets().toNumber(),
-            collateralShares: token.getUserCollateral(false).toNumber(),
-            debtUSD: token.getUserDebt(true).toNumber(),
-            debtTokens: token.getUserDebt(false).toNumber(),
-            assetPriceUSD: token.getPrice(true).toNumber(),
-            supplyAPY: token.getApy().toNumber(),
+            depositUSD: decimalSnapshot(token.getUserAssetBalance(true)),
+            depositTokens: decimalSnapshot(token.getUserAssetBalance(false)),
+            collateralUSD: decimalSnapshot(token.getUserCollateral(true)),
+            collateralTokens: decimalSnapshot(token.getUserCollateralAssets()),
+            collateralShares: decimalSnapshot(token.getUserCollateral(false)),
+            debtUSD: decimalSnapshot(token.getUserDebt(true)),
+            debtTokens: decimalSnapshot(token.getUserDebt(false)),
+            assetPriceUSD: decimalSnapshot(token.getPrice(true)),
+            supplyAPY: decimalSnapshot(token.getApy()),
             borrowRate: isBorrowable
-                ? (token as BorrowableCToken).getBorrowRate(true).toNumber()
-                : 0,
+                ? decimalSnapshot((token as BorrowableCToken).getBorrowRate(true))
+                : "0",
         });
     }
 
@@ -137,12 +142,12 @@ export function snapshotMarket(market: Market): MarketSnapshot {
     return {
         marketAddress: market.address,
         marketName: market.name,
-        totalDepositsUSD: market.userDeposits.toNumber(),
-        totalDebtUSD: market.userDebt.toNumber(),
-        netUSD: market.userNet.toNumber(),
-        positionHealth: health !== null ? health.toNumber() : null,
-        dailyEarnings: market.getUserDepositsChange("day").toNumber(),
-        dailyCost: market.getUserDebtChange("day").toNumber(),
+        totalDepositsUSD: decimalSnapshot(market.userDeposits),
+        totalDebtUSD: decimalSnapshot(market.userDebt),
+        netUSD: decimalSnapshot(market.userNet),
+        positionHealth: health !== null ? decimalSnapshot(health) : null,
+        dailyEarnings: decimalSnapshot(market.getUserDepositsChange("day")),
+        dailyCost: decimalSnapshot(market.getUserDebtChange("day")),
         positions,
     };
 }
@@ -176,8 +181,8 @@ export async function takePortfolioSnapshot(
                         `Fresh snapshot refresh missing market state for ${market.address}.`,
                     );
                 }
-                market.bindRefreshedAccount(account);
                 market.applyState(dynamic, user);
+                market.bindRefreshedAccount(account);
             }
         }
     } else {
@@ -188,30 +193,30 @@ export async function takePortfolioSnapshot(
     }
 
     const marketSnapshots: MarketSnapshot[] = [];
-    let totalDepositsUSD = 0;
-    let totalDebtUSD = 0;
-    let dailyEarnings = 0;
-    let dailyCost = 0;
+    let totalDepositsUSD = Decimal(0);
+    let totalDebtUSD = Decimal(0);
+    let dailyEarnings = Decimal(0);
+    let dailyCost = Decimal(0);
 
     for (const market of markets) {
         assertSnapshotAccount(market, account);
         const snap = snapshotMarket(market);
         marketSnapshots.push(snap);
-        totalDepositsUSD += snap.totalDepositsUSD;
-        totalDebtUSD += snap.totalDebtUSD;
-        dailyEarnings += snap.dailyEarnings;
-        dailyCost += snap.dailyCost;
+        totalDepositsUSD = totalDepositsUSD.plus(snap.totalDepositsUSD);
+        totalDebtUSD = totalDebtUSD.plus(snap.totalDebtUSD);
+        dailyEarnings = dailyEarnings.plus(snap.dailyEarnings);
+        dailyCost = dailyCost.plus(snap.dailyCost);
     }
 
     return {
         account,
         chain: options.chain ?? inferSnapshotChain(markets),
         timestamp: Date.now(),
-        totalDepositsUSD,
-        totalDebtUSD,
-        netUSD: totalDepositsUSD - totalDebtUSD,
-        dailyEarnings,
-        dailyCost,
+        totalDepositsUSD: decimalSnapshot(totalDepositsUSD),
+        totalDebtUSD: decimalSnapshot(totalDebtUSD),
+        netUSD: decimalSnapshot(totalDepositsUSD.sub(totalDebtUSD)),
+        dailyEarnings: decimalSnapshot(dailyEarnings),
+        dailyCost: decimalSnapshot(dailyCost),
         markets: marketSnapshots,
     };
 }
