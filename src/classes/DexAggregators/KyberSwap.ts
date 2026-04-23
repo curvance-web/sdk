@@ -20,14 +20,15 @@ import { buildLocalSimpleZapTokens } from "./helpers";
  *  Must match KyberSwapChecker.REQUIRED_FLAGS on-chain. */
 const REQUIRED_FLAGS = 0x280n;
 
-/** ABI type string for KyberSwap's SwapExecutionParams struct. */
+/** ABI type string for KyberSwap MetaAggregationRouterV2's SwapExecutionParams struct. */
 const SWAP_PARAMS_TYPE =
     'tuple(address callTarget, address approveTarget, ' +
+    'bytes targetData, ' +
     'tuple(address srcToken, address dstToken, address[] srcReceivers, ' +
     'uint256[] srcAmounts, address[] feeReceivers, uint256[] feeAmounts, ' +
     'address dstReceiver, uint256 amount, uint256 minReturnAmount, ' +
     'uint256 flags, bytes permit) desc, ' +
-    'bytes targetData, bytes clientData)';
+    'bytes clientData)';
 
 /**
  * Decode and validate fee-related fields in KyberSwap swap calldata.

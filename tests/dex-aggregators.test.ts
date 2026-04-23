@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import Decimal from "decimal.js";
+import { AbiCoder } from "ethers";
 import "../src/setup";
 import { KyberSwap } from "../src/classes/DexAggregators/KyberSwap";
 import { Kuru } from "../src/classes/DexAggregators/Kuru";
@@ -29,6 +30,12 @@ const FEE_RECEIVER = "0x0000000000000000000000000000000000000004" as address;
 const MONAD_WMON = "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A" as address;
 const MONAD_USDC = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603" as address;
 const DECIMALS_SELECTOR = "0x313ce567";
+const KYBER_SWAP_SELECTOR = "0xe21fd0e9";
+const KYBER_SWAP_PARAMS_TYPE =
+    "tuple(address callTarget,address approveTarget,bytes targetData," +
+    "tuple(address srcToken,address dstToken,address[] srcReceivers,uint256[] srcAmounts," +
+    "address[] feeReceivers,uint256[] feeAmounts,address dstReceiver,uint256 amount," +
+    "uint256 minReturnAmount,uint256 flags,bytes permit) desc,bytes clientData)";
 
 function stubKyberSwapQuote(kyber: KyberSwap) {
     (kyber as any).quote = async () => ({
@@ -71,6 +78,109 @@ function createDecimalsProvider(decimalsByAddress: Map<string, bigint>) {
             return name;
         },
     };
+}
+
+function encodeKyberSwapCalldata({
+    feeBps,
+    feeReceiver = FEE_RECEIVER,
+}: {
+    feeBps: bigint;
+    feeReceiver?: address;
+}): bytes {
+    const execution = [
+        WALLET,
+        TOKEN_IN,
+        "0x1234",
+        [
+            TOKEN_IN,
+            TOKEN_OUT,
+            [WALLET],
+            [1_000n],
+            [feeReceiver],
+            [feeBps],
+            WALLET,
+            1_000n,
+            900n,
+            0x280n,
+            "0x",
+        ],
+        "0x5678",
+    ];
+
+    return (KYBER_SWAP_SELECTOR + AbiCoder.defaultAbiCoder().encode([KYBER_SWAP_PARAMS_TYPE], [execution]).slice(2)) as bytes;
+}
+
+function jsonResponse(body: unknown, ok = true): any {
+    return {
+        ok,
+        status: ok ? 200 : 500,
+        statusText: ok ? "OK" : "Internal Server Error",
+        async json() {
+            return body;
+        },
+    };
+}
+
+async function withMockedKyberFetch<T>(kyber: KyberSwap, calldata: bytes, run: () => Promise<T>): Promise<T> {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+
+    (globalThis as any).fetch = async () => {
+        calls++;
+
+        if (calls === 1) {
+            return jsonResponse({
+                message: "OK",
+                data: {
+                    routeSummary: {
+                        tokenIn: TOKEN_IN,
+                        tokenOut: TOKEN_OUT,
+                        amountIn: "1000",
+                        amountOut: "1000",
+                        extraFee: {
+                            feeAmount: "0",
+                            chargeFeeBy: "",
+                            isInBps: true,
+                            feeReceiver: FEE_RECEIVER,
+                        },
+                        route: [],
+                    },
+                    routerAddress: kyber.router,
+                },
+                requestId: "routes",
+            });
+        }
+
+        return jsonResponse({
+            code: 0,
+            message: "OK",
+            data: {
+                amountIn: "1000",
+                amountInUsd: "1",
+                amountOut: "1000",
+                amountOutUsd: "1",
+                gas: "0",
+                gasUsd: "0",
+                additionalCostUsd: "0",
+                additionalCostMessage: "",
+                outputChange: {
+                    amount: "0",
+                    percent: 0,
+                    level: 0,
+                },
+                data: calldata,
+                routerAddress: kyber.router,
+                transactionValue: "0",
+            },
+            requestId: "build",
+        });
+    };
+
+    try {
+        return await run();
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
 }
 
 test("KyberSwap.quoteAction expands action.slippage by feeBps when fees are active", async () => {
@@ -197,6 +307,41 @@ test("Kuru.quoteMin returns the minimum output, not the optimistic output", asyn
     );
 
     assert.equal(minOut, 88n);
+});
+
+test("KyberSwap.quote validates current router fee calldata without warning", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+        warnings.push(args.map(String).join(" "));
+    };
+
+    try {
+        const quote = await withMockedKyberFetch(
+            kyber,
+            encodeKyberSwapCalldata({ feeBps: 4n, feeReceiver: FEE_RECEIVER }),
+            () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+        );
+
+        assert.equal(quote.to.toLowerCase(), kyber.router.toLowerCase());
+        assert.deepEqual(warnings, []);
+    } finally {
+        console.warn = originalWarn;
+    }
+});
+
+test("KyberSwap.quote rejects current router calldata with the wrong fee amount", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+
+    await assert.rejects(
+        () => withMockedKyberFetch(
+            kyber,
+            encodeKyberSwapCalldata({ feeBps: 5n, feeReceiver: FEE_RECEIVER }),
+            () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+        ),
+        /KyberSwap calldata feeAmount=5, expected 4/,
+    );
 });
 
 test("MultiDexAgg.quoteMin picks the route with the highest guaranteed output", async () => {
