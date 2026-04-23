@@ -1,6 +1,6 @@
 {
   "name": "curvance",
-  "version": "5.0.0",
+  "version": "5.1.0",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -26,13 +26,16 @@
     "crypto"
   ],
   "scripts": {
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build",
     "up": "npm run build && npm publish",
     "fetch": "ts-node fetch-deployment.ts",
     "build": "node node_modules/typescript/bin/tsc",
     "test": "npm run test:transport",
     "test:all": "node --test --test-concurrency=1 --require ts-node/register tests/*.test.ts",
-    "test:transport": "node --test --test-concurrency=1 --require ts-node/register tests/contract-gas-buffer.test.ts tests/retry-fallback.test.ts tests/rpc-ranking.test.ts tests/rpc-config-shape.test.ts tests/protocol-reader.test.ts tests/setup-race.test.ts tests/query-budget.test.ts tests/conversion.test.ts tests/feePolicy.test.ts tests/market-refresh.test.ts tests/dex-aggregators.test.ts tests/leverage-math.test.ts tests/ctoken-deposits.test.ts tests/leverage-vault-slippage-structure.test.ts",
-    "test:fork": "node --test --test-concurrency=1 --require ts-node/register tests/fork-integration.ts",
+    "test:transport": "node --test --test-concurrency=1 --require ts-node/register tests/contract-gas-buffer.test.ts tests/retry-fallback.test.ts tests/rpc-ranking.test.ts tests/rpc-config-shape.test.ts tests/protocol-reader.test.ts tests/setup-race.test.ts tests/query-budget.test.ts tests/conversion.test.ts tests/erc20.test.ts tests/feePolicy.test.ts tests/api.test.ts tests/market-refresh.test.ts tests/market-boot.test.ts tests/merkl.test.ts tests/detached-context.test.ts tests/market-get-all-indexes.test.ts tests/snapshot-multichain.test.ts tests/dex-aggregators.test.ts tests/calldata-compat.test.ts tests/leverage-math.test.ts tests/ctoken-deposits.test.ts tests/ctoken-collateral-removal.test.ts tests/ctoken-snapshot.test.ts tests/borrowable-helpers.test.ts tests/zapper-calldata.test.ts tests/leverage-vault-behavior.test.ts tests/ctoken-leverage-planning.test.ts tests/ctoken-leverage-execution.test.ts tests/market-leverage-preview.test.ts tests/market-position-health-units.test.ts tests/optimizer-reader.test.ts tests/source-invariants.test.ts",
+    "test:fork": "node --test --test-concurrency=1 --require ts-node/register tests/fork-integration.ts tests/leverage.test.ts tests/zap.test.ts",
+    "test:dist-smoke": "npm run build && node tests/dist-smoke.cjs",
     "test:replay": "ts-node tests/replay.test.ts",
     "test:leverage": "ts-node tests/leverage.test.ts",
     "test:zap": "ts-node tests/zap.test.ts",

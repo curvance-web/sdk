@@ -1,7 +1,10 @@
 import { address, curvance_read_provider } from "../types";
 import { contractSetup } from "../helpers";
 import { Contract } from "ethers";
-import { setup_config } from "../setup";
+
+function resolveDefaultReadProvider(): curvance_read_provider | undefined {
+    return (require("../setup") as typeof import("../setup")).setup_config?.readProvider;
+}
 
 export interface IOracleManager {
     getPrice(asset: address, inUSD: boolean, getLower: boolean): Promise<[bigint, bigint]>;
@@ -12,10 +15,18 @@ export class OracleManager {
     address: address;
     contract: Contract & IOracleManager;
 
-    constructor(address: address, provider: curvance_read_provider = setup_config.readProvider) {
-        this.provider = provider;
+    constructor(address: address, provider?: curvance_read_provider) {
+        const resolvedProvider = provider ?? resolveDefaultReadProvider();
+        if (resolvedProvider == undefined) {
+            throw new Error(
+                `Read provider is not configured for OracleManager ${address}. ` +
+                `Pass a provider explicitly or initialize setupChain() first.`
+            );
+        }
+
+        this.provider = resolvedProvider;
         this.address = address as address;
-        this.contract = contractSetup<IOracleManager>(provider, this.address, [
+        this.contract = contractSetup<IOracleManager>(resolvedProvider, this.address, [
             "function getPrice(address, bool, bool) view returns (uint256, uint256)",
         ]);
     }

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import Decimal from "decimal.js";
 import { UINT256_MAX } from "../src/helpers";
+import protocolReaderAbi from "../src/abis/ProtocolReader.json";
 import {
     ProtocolReader,
     __resetProtocolReaderCache,
@@ -21,6 +23,17 @@ const ACCOUNT = "0x00000000000000000000000000000000000000aa";
 
 function createReader(): ProtocolReader {
     return Object.create(ProtocolReader.prototype) as ProtocolReader;
+}
+
+function setReaderKeys(
+    reader: ProtocolReader,
+    readerAddress: string = MARKET,
+    namespace: string | null = null,
+) {
+    (reader as any).address = readerAddress as any;
+    (reader as any).batchKey =
+        namespace == null ? null : `${namespace}:${readerAddress.toLowerCase()}`;
+    (reader as any).staticMarketCacheKey = (reader as any).batchKey;
 }
 
 function createDynamicMarket(
@@ -97,6 +110,57 @@ function createStaticMarket(
     };
 }
 
+function createRawStaticMarket(
+    marketAddress: string = MARKET,
+    tokenAddress: string = TOKEN,
+) {
+    const market = createStaticMarket(marketAddress, tokenAddress);
+    const token = market.tokens[0]!;
+
+    return {
+        _address: market.address,
+        adapters: market.adapters,
+        cooldownLength: market.cooldownLength,
+        tokens: [{
+            _address: token.address,
+            name: token.name,
+            symbol: token.symbol,
+            decimals: token.decimals,
+            asset: {
+                _address: token.asset.address,
+                name: token.asset.name,
+                symbol: token.asset.symbol,
+                decimals: token.asset.decimals,
+                totalSupply: token.asset.totalSupply,
+            },
+            adapters: token.adapters,
+            isBorrowable: token.isBorrowable,
+            borrowPaused: token.borrowPaused,
+            collateralizationPaused: token.collateralizationPaused,
+            mintPaused: token.mintPaused,
+            collateralCap: token.collateralCap,
+            debtCap: token.debtCap,
+            isListed: token.isListed,
+            collRatio: token.collRatio,
+            maxLeverage: token.maxLeverage,
+            collReqSoft: token.collReqSoft,
+            collReqHard: token.collReqHard,
+            liqIncBase: token.liqIncBase,
+            liqIncCurve: token.liqIncCurve,
+            liqIncMin: token.liqIncMin,
+            liqIncMax: token.liqIncMax,
+            closeFactorBase: token.closeFactorBase,
+            closeFactorCurve: token.closeFactorCurve,
+            closeFactorMin: token.closeFactorMin,
+            closeFactorMax: token.closeFactorMax,
+            irmTargetRate: token.irmTargetRate,
+            irmMaxRate: token.irmMaxRate,
+            irmTargetUtilization: token.irmTargetUtilization,
+            interestFee: token.interestFee,
+        }],
+    };
+}
+
 function createUserData(): UserData {
     return {
         locks: [{ lockIndex: 1n, amount: 2n, unlockTime: 3n }],
@@ -107,6 +171,7 @@ function createUserData(): UserData {
             debt: 0n,
             positionHealth: UINT256_MAX,
             cooldown: 1200n,
+            errorCodeHit: true,
             priceStale: true,
             tokens: [{
                 address: TOKEN as any,
@@ -120,6 +185,17 @@ function createUserData(): UserData {
         }],
     };
 }
+
+test("ProtocolReader ABI exposes targeted refresh methods", () => {
+    const functionNames = new Set(
+        (protocolReaderAbi as Array<{ type: string; name?: string }>)
+            .filter((item) => item.type === "function")
+            .map((item) => item.name),
+    );
+
+    assert.equal(functionNames.has("getMarketStates"), true);
+    assert.equal(functionNames.has("getMarketSummaries"), true);
+});
 
 test("public loads synthesize empty user state from static market data", async () => {
     const reader = createReader();
@@ -163,6 +239,136 @@ test("public loads synthesize empty user state from static market data", async (
     assert.equal(data.userData.markets[0]?.tokens[0]?.liquidationPrice, UINT256_MAX);
     assert.equal(data.userData.markets[1]?.address, MARKET_B);
     assert.equal(data.userData.markets[1]?.tokens[0]?.address, TOKEN_B);
+});
+
+test("getStaticMarketData caches static market data within the reader namespace", async () => {
+    const reader = createReader();
+    let calls = 0;
+
+    setReaderKeys(reader, MARKET, "monad-mainnet");
+    reader.contract = {
+        getStaticMarketData: async () => {
+            calls += 1;
+            return [createRawStaticMarket()];
+        },
+    } as any;
+
+    const first = await reader.getStaticMarketData();
+    const second = await reader.getStaticMarketData();
+
+    assert.equal(calls, 1);
+    assert.equal(first[0]?.tokens[0]?.asset.totalSupply, 100n);
+    assert.deepEqual(second, first);
+});
+
+test("getStaticMarketData keeps caches isolated across namespaces", async () => {
+    let calls = 0;
+    const contract = {
+        getStaticMarketData: async () => {
+            calls += 1;
+            return [createRawStaticMarket()];
+        },
+    } as any;
+
+    const monadReader = createReader();
+    setReaderKeys(monadReader, MARKET, "monad-mainnet");
+    monadReader.contract = contract;
+
+    const arbitrumReader = createReader();
+    setReaderKeys(arbitrumReader, MARKET, "arbitrum-sepolia");
+    arbitrumReader.contract = contract;
+
+    await monadReader.getStaticMarketData();
+    await arbitrumReader.getStaticMarketData();
+
+    assert.equal(calls, 2);
+});
+
+test("same-chain readers with different providers keep static cache isolated", async () => {
+    const providerA = { label: "provider-a" } as any;
+    const providerB = { label: "provider-b" } as any;
+
+    let callsA = 0;
+    const readerA = new ProtocolReader(MARKET as any, providerA, "monad-mainnet");
+    readerA.contract = {
+        getStaticMarketData: async () => {
+            callsA += 1;
+            return [createRawStaticMarket(MARKET, TOKEN)];
+        },
+    } as any;
+
+    let callsB = 0;
+    const readerB = new ProtocolReader(MARKET as any, providerB, "monad-mainnet");
+    readerB.contract = {
+        getStaticMarketData: async () => {
+            callsB += 1;
+            return [createRawStaticMarket(MARKET_B, TOKEN_B)];
+        },
+    } as any;
+
+    const firstA = await readerA.getStaticMarketData();
+    const firstB = await readerB.getStaticMarketData();
+    const secondA = await readerA.getStaticMarketData();
+    const secondB = await readerB.getStaticMarketData();
+
+    assert.notEqual(readerA.batchKey, readerB.batchKey);
+    assert.equal(firstA[0]?.address, MARKET);
+    assert.equal(firstB[0]?.address, MARKET_B);
+    assert.equal(secondA[0]?.address, MARKET);
+    assert.equal(secondB[0]?.address, MARKET_B);
+    assert.equal(callsA, 1);
+    assert.equal(callsB, 1);
+});
+
+test("getStaticMarketData forceRefresh bypasses the short-lived cache", async () => {
+    const reader = createReader();
+    let calls = 0;
+
+    setReaderKeys(reader, MARKET, "monad-mainnet");
+    reader.contract = {
+        getStaticMarketData: async () => {
+            calls += 1;
+            return [createRawStaticMarket()];
+        },
+    } as any;
+
+    await reader.getStaticMarketData();
+    await reader.getStaticMarketData({ forceRefresh: true });
+
+    assert.equal(calls, 2);
+});
+
+test("connected getAllMarketData reuses cached static market data between boots", async () => {
+    const reader = createReader();
+    const counters = {
+        static: 0,
+        combined: 0,
+    };
+
+    setReaderKeys(reader, MARKET, "monad-mainnet");
+    reader.contract = {
+        getStaticMarketData: async () => {
+            counters.static += 1;
+            return [createRawStaticMarket()];
+        },
+    } as any;
+    reader.getAllDynamicState = async () => {
+        counters.combined += 1;
+        return {
+            dynamicMarket: [createDynamicMarket()],
+            userData: createUserData(),
+        };
+    };
+
+    const first = await reader.getAllMarketData(ACCOUNT as any);
+    const second = await reader.getAllMarketData(ACCOUNT as any);
+
+    assert.deepEqual(counters, {
+        static: 1,
+        combined: 2,
+    });
+    assert.equal(first.staticMarket[0]?.tokens[0]?.symbol, "TOK");
+    assert.equal(second.userData.markets[0]?.tokens[0]?.userDebt, 5n);
 });
 
 test("account loads use static + combined dynamic state without separate dynamic/user reads", async () => {
@@ -258,6 +464,7 @@ test("getAllDynamicState normalizes combined market and user payloads", async ()
 
     assert.equal(data.dynamicMarket[0]?.tokens[0]?.exchangeRate, 2n);
     assert.equal(data.userData.locks[0]?.unlockTime, 3n);
+    assert.equal(data.userData.markets[0]?.errorCodeHit, true);
     assert.equal(data.userData.markets[0]?.priceStale, true);
     assert.equal(data.userData.markets[0]?.tokens[0]?.userDebt, 5n);
 });
@@ -314,8 +521,67 @@ test("getAllDynamicState normalizes tuple payloads from ethers result arrays", a
 
     assert.equal(data.dynamicMarket[0]?.tokens[0]?.totalAssets, 20n);
     assert.equal(data.userData.locks[0]?.lockIndex, 9n);
+    assert.equal(data.userData.markets[0]?.errorCodeHit, false);
     assert.equal(data.userData.markets[0]?.priceStale, false);
     assert.equal(data.userData.markets[0]?.tokens[0]?.liquidationPrice, 11n);
+});
+
+test("getMarketSummaries normalizes market-summary payloads", async () => {
+    const reader = createReader();
+    reader.contract = {
+        getMarketSummaries: async () => ({
+            userMarkets: [{
+                _address: MARKET,
+                collateral: 1n,
+                maxDebt: 2n,
+                debt: 3n,
+                positionHealth: 4n,
+                cooldown: 5n,
+                errorCodeHit: true,
+            }],
+        }),
+    } as any;
+
+    const data = await reader.getMarketSummaries([MARKET as any], ACCOUNT as any);
+
+    assert.deepEqual(data, [{
+        address: MARKET,
+        collateral: 1n,
+        maxDebt: 2n,
+        debt: 3n,
+        positionHealth: 4n,
+        cooldown: 5n,
+        errorCodeHit: true,
+        priceStale: true,
+    }]);
+});
+
+test("getMarketSummaries normalizes direct array payloads", async () => {
+    const reader = createReader();
+    reader.contract = {
+        getMarketSummaries: async () => [{
+            _address: MARKET,
+            collateral: 1n,
+            maxDebt: 2n,
+            debt: 3n,
+            positionHealth: 4n,
+            cooldown: 5n,
+            errorCodeHit: false,
+        }],
+    } as any;
+
+    const data = await reader.getMarketSummaries([MARKET as any], ACCOUNT as any);
+
+    assert.deepEqual(data, [{
+        address: MARKET,
+        collateral: 1n,
+        maxDebt: 2n,
+        debt: 3n,
+        positionHealth: 4n,
+        cooldown: 5n,
+        errorCodeHit: false,
+        priceStale: false,
+    }]);
 });
 
 test("getMarketStates normalizes targeted refresh payloads", async () => {
@@ -367,6 +633,7 @@ test("getMarketStates normalizes targeted refresh payloads", async () => {
 
     assert.equal(data.dynamicMarkets[0]?.tokens[0]?.assetPrice, 6n);
     assert.equal(data.userMarkets[0]?.tokens[0]?.userCollateral, 9n);
+    assert.equal(data.userMarkets[0]?.errorCodeHit, false);
     assert.equal(data.userMarkets[0]?.priceStale, false);
 });
 
@@ -418,74 +685,43 @@ test("getMarketStates normalizes tuple payloads from ethers result arrays", asyn
     const data = await reader.getMarketStates([MARKET as any], ACCOUNT as any);
 
     assert.equal(data.dynamicMarkets[0]?.tokens[0]?.borrowRate, 9n);
+    assert.equal(data.userMarkets[0]?.errorCodeHit, true);
     assert.equal(data.userMarkets[0]?.priceStale, true);
     assert.equal(data.userMarkets[0]?.tokens[0]?.userAssetBalance, 6n);
 });
 
-test("getMarketStates falls back to legacy calls when the selector is not deployed", async () => {
+test("getMarketSummaries surfaces contract errors when targeted refresh is unavailable", async () => {
     const reader = createReader();
-    let targetedCalls = 0;
-    let dynamicCalls = 0;
-    let userCalls = 0;
-
     reader.contract = {
-        getMarketStates: async () => {
-            targetedCalls += 1;
-            const error: any = new Error("execution reverted (no data present; likely require(false) occurred)");
-            error.shortMessage = "execution reverted (no data present; likely require(false) occurred)";
-            error.reason = "require(false)";
-            error.transaction = {
-                data: "0xaa78b4d400000000000000000000000000000000000000000000000000000000",
-            };
-            throw error;
+        getMarketSummaries: async () => {
+            throw new Error("targeted refresh unavailable");
         },
     } as any;
 
+    await assert.rejects(
+        reader.getMarketSummaries([MARKET as any], ACCOUNT as any),
+        /targeted refresh unavailable/,
+    );
+});
+
+test("getMarketStates surfaces contract errors when targeted refresh is unavailable", async () => {
+    const reader = createReader();
+    reader.contract = {
+        getMarketStates: async () => {
+            throw new Error("targeted refresh unavailable");
+        },
+    } as any;
     reader.getDynamicMarketData = async () => {
-        dynamicCalls += 1;
-        return [
-            createDynamicMarket(MARKET, TOKEN),
-            createDynamicMarket(MARKET_B, TOKEN_B),
-        ];
+        throw new Error("legacy fallback must stay dead");
     };
     reader.getUserData = async () => {
-        userCalls += 1;
-        return {
-            locks: [],
-            markets: [
-                createUserData().markets[0]!,
-                {
-                    address: MARKET_B as any,
-                    collateral: 10n,
-                    maxDebt: 11n,
-                    debt: 12n,
-                    positionHealth: 13n,
-                    cooldown: 14n,
-                    priceStale: false,
-                    tokens: [{
-                        address: TOKEN_B as any,
-                        userAssetBalance: 15n,
-                        userShareBalance: 16n,
-                        userUnderlyingBalance: 17n,
-                        userCollateral: 18n,
-                        userDebt: 19n,
-                        liquidationPrice: 20n,
-                    }],
-                },
-            ],
-        };
+        throw new Error("legacy fallback must stay dead");
     };
 
-    const first = await reader.getMarketStates([MARKET_B as any], ACCOUNT as any);
-    const second = await reader.getMarketStates([MARKET as any], ACCOUNT as any);
-
-    assert.equal(targetedCalls, 1);
-    assert.equal(dynamicCalls, 2);
-    assert.equal(userCalls, 2);
-    assert.equal(first.dynamicMarkets[0]?.address, MARKET_B);
-    assert.equal(first.userMarkets[0]?.tokens[0]?.userDebt, 19n);
-    assert.equal(second.dynamicMarkets[0]?.address, MARKET);
-    assert.equal(second.userMarkets[0]?.tokens[0]?.userDebt, 5n);
+    await assert.rejects(
+        reader.getMarketStates([MARKET as any], ACCOUNT as any),
+        /targeted refresh unavailable/,
+    );
 });
 
 // ---------------------------------------------------------------------------
@@ -545,6 +781,25 @@ test("hypotheticalRedemptionOf defaults bufferTime to 0n when not provided", asy
     assert.equal(captured.bufferTime, 0n, "default must remain 0n for backward compatibility");
 });
 
+test("hypotheticalRedemptionOf preserves oracleError and the priceStale alias", async () => {
+    const reader = createReader();
+
+    reader.contract = {
+        hypotheticalRedemptionOf: async () => [11n, 22n, true, true],
+    } as any;
+
+    const ctoken = { address: TOKEN } as any;
+    const result = await reader.hypotheticalRedemptionOf(ACCOUNT as any, ctoken, 1_000n, 60n);
+
+    assert.deepEqual(result, {
+        excess: 11n,
+        deficit: 22n,
+        isPossible: true,
+        oracleError: true,
+        priceStale: true,
+    });
+});
+
 test("hypotheticalBorrowOf forwards bufferTime to the contract call", async () => {
     const reader = createReader();
     let captured: { bufferTime: bigint | null } = { bufferTime: null };
@@ -557,7 +812,7 @@ test("hypotheticalBorrowOf forwards bufferTime to the contract call", async () =
             bufferTime: bigint,
         ) => {
             captured.bufferTime = bufferTime;
-            return [0n, 0n, true, false];
+            return [0n, 0n, true, false, false];
         },
     } as any;
 
@@ -571,53 +826,24 @@ test("hypotheticalBorrowOf forwards bufferTime to the contract call", async () =
     );
 });
 
-test("getMarketStates selector-support probe caches across instances at the same address", async () => {
-    // Every setupChain() constructs a fresh ProtocolReader. If selector-support
-    // is per-instance, each chain-switch (or re-setup) re-probes — and after
-    // the retry-provider's unknown-error cascade fix, one probe costs primary
-    // + every fallback provider. Cache by address so the second instance
-    // short-circuits straight to the legacy path.
-    const PROBE_ADDRESS = "0x00000000000000000000000000000000000000cc";
+test("hypotheticalBorrowOf decodes loanSizeError separately from oracleError", async () => {
+    const reader = createReader();
 
-    const reader1 = createReader();
-    (reader1 as any).address = PROBE_ADDRESS;
-    let reader1ProbeCount = 0;
-    reader1.contract = {
-        getMarketStates: async () => {
-            reader1ProbeCount += 1;
-            const error: any = new Error("execution reverted (no data present; likely require(false) occurred)");
-            error.shortMessage = "execution reverted (no data present; likely require(false) occurred)";
-            error.reason = "require(false)";
-            error.transaction = {
-                data: "0xaa78b4d400000000000000000000000000000000000000000000000000000000",
-            };
-            throw error;
-        },
+    reader.contract = {
+        hypotheticalBorrowOf: async () => [11n, 22n, true, true, false],
     } as any;
-    reader1.getDynamicMarketData = async () => [];
-    reader1.getUserData = async () => ({ locks: [], markets: [] });
 
-    await reader1.getMarketStates([], ACCOUNT as any);
-    assert.equal(reader1ProbeCount, 1, "first instance probes the contract");
+    const ctoken = { address: TOKEN } as any;
+    const result = await reader.hypotheticalBorrowOf(ACCOUNT as any, ctoken, 1_000n, 60n);
 
-    const reader2 = createReader();
-    (reader2 as any).address = PROBE_ADDRESS;
-    let reader2ProbeCount = 0;
-    reader2.contract = {
-        getMarketStates: async () => {
-            reader2ProbeCount += 1;
-            throw new Error("probe should be cached; contract.getMarketStates must not be called again");
-        },
-    } as any;
-    reader2.getDynamicMarketData = async () => [];
-    reader2.getUserData = async () => ({ locks: [], markets: [] });
-
-    await reader2.getMarketStates([], ACCOUNT as any);
-    assert.equal(
-        reader2ProbeCount,
-        0,
-        "second instance at same address reuses cached probe result",
-    );
+    assert.deepEqual(result, {
+        excess: 11n,
+        deficit: 22n,
+        isPossible: true,
+        loanSizeError: true,
+        oracleError: false,
+        priceStale: false,
+    });
 });
 
 test("hypotheticalBorrowOf defaults bufferTime to 0n when not provided", async () => {
@@ -632,7 +858,7 @@ test("hypotheticalBorrowOf defaults bufferTime to 0n when not provided", async (
             bufferTime: bigint,
         ) => {
             captured.bufferTime = bufferTime;
-            return [0n, 0n, true, false];
+            return [0n, 0n, true, false, false];
         },
     } as any;
 
@@ -640,4 +866,140 @@ test("hypotheticalBorrowOf defaults bufferTime to 0n when not provided", async (
     await reader.hypotheticalBorrowOf(ACCOUNT as any, ctoken, 1_000n);
 
     assert.equal(captured.bufferTime, 0n, "default must remain 0n for backward compatibility");
+});
+
+test("hypotheticalLeverageOf preserves loanSizeError and oracleError flags", async () => {
+    const reader = createReader();
+
+    reader.contract = {
+        hypotheticalLeverageOf: async () => [
+            1_000_000_000_000_000_000n,
+            1_500_000_000_000_000_000n,
+            2_000_000_000_000_000_000n,
+            4_000_000n,
+            true,
+            false,
+        ],
+    } as any;
+
+    const depositToken = {
+        address: TOKEN,
+        asset: { decimals: 18 },
+    } as any;
+    const borrowToken = {
+        address: TOKEN_B,
+        asset: { decimals: 6 },
+        decimals: 6,
+    } as any;
+
+    const result = await reader.hypotheticalLeverageOf(
+        ACCOUNT as any,
+        depositToken,
+        borrowToken,
+        Decimal(5),
+    );
+
+    assert.equal(result.currentLeverage.toString(), "1");
+    assert.equal(result.adjustMaxLeverage.toString(), "1.5");
+    assert.equal(result.maxLeverage.toString(), "2");
+    assert.equal(result.maxDebtBorrowable.toString(), "4");
+    assert.equal(result.loanSizeError, true);
+    assert.equal(result.oracleError, false);
+});
+
+test("hypotheticalLiquidityOf forwards the market address and normalizes struct output", async () => {
+    const reader = createReader();
+    let captured: unknown[] | null = null;
+
+    reader.contract = {
+        hypotheticalLiquidityOf: async (...args: unknown[]) => {
+            captured = args;
+            return {
+                result: {
+                    collateral: 1n,
+                    maxDebt: 2n,
+                    debt: 3n,
+                    collateralSurplus: 4n,
+                    liquidityDeficit: 5n,
+                    loanSizeError: true,
+                    oracleError: false,
+                },
+            };
+        },
+    } as any;
+
+    const result = await reader.hypotheticalLiquidityOf(
+        MARKET as any,
+        ACCOUNT as any,
+        TOKEN as any,
+        100n,
+        200n,
+        300n,
+    );
+
+    assert.deepEqual(captured, [
+        MARKET,
+        ACCOUNT,
+        TOKEN,
+        100n,
+        200n,
+        300n,
+    ]);
+    assert.deepEqual(result, {
+        collateral: 1n,
+        maxDebt: 2n,
+        debt: 3n,
+        collateralSurplus: 4n,
+        liquidityDeficit: 5n,
+        loanSizeError: true,
+        oracleError: false,
+    });
+});
+
+test("maxRedemptionOf forwards bufferTime to the contract call", async () => {
+    const reader = createReader();
+    let captured: { bufferTime: bigint | null } = { bufferTime: null };
+
+    reader.contract = {
+        maxRedemptionOf: async (
+            _account: string,
+            _ctoken: string,
+            bufferTime: bigint,
+        ) => {
+            captured.bufferTime = bufferTime;
+            return [777n, 222n, false];
+        },
+    } as any;
+
+    const ctoken = { address: TOKEN } as any;
+    const result = await reader.maxRedemptionOf(ACCOUNT as any, ctoken, 180n);
+
+    assert.equal(captured.bufferTime, 180n);
+    assert.equal(result.maxCollateralizedShares, 777n);
+    assert.equal(result.maxUncollateralizedShares, 222n);
+    assert.equal(result.errorCodeHit, false);
+});
+
+test("maxRedemptionOf defaults bufferTime to 0n when not provided", async () => {
+    const reader = createReader();
+    let captured: { bufferTime: bigint | null } = { bufferTime: null };
+
+    reader.contract = {
+        maxRedemptionOf: async (
+            _account: string,
+            _ctoken: string,
+            bufferTime: bigint,
+        ) => {
+            captured.bufferTime = bufferTime;
+            return [555n, 111n, false];
+        },
+    } as any;
+
+    const ctoken = { address: TOKEN } as any;
+    const result = await reader.maxRedemptionOf(ACCOUNT as any, ctoken);
+
+    assert.equal(captured.bufferTime, 0n);
+    assert.equal(result.maxCollateralizedShares, 555n);
+    assert.equal(result.maxUncollateralizedShares, 111n);
+    assert.equal(result.errorCodeHit, false);
 });

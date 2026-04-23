@@ -1,12 +1,11 @@
-import { Contract, N, TransactionResponse } from "ethers";
+import { Contract, TransactionResponse } from "ethers";
 import { address, bytes, curvance_signer } from "../types";
-import { contractSetup, EMPTY_ADDRESS, EMPTY_BYTES, getChainConfig, NATIVE_ADDRESS } from "../helpers";
+import { contractSetup, EMPTY_ADDRESS, EMPTY_BYTES, getChainConfig, NATIVE_ADDRESS, toContractSwapSlippage } from "../helpers";
 import { CToken } from "./CToken";
 import { Calldata } from "./Calldata";
 import abi from '../abis/SimpleZapper.json';
 import { Zappers } from "./Market";
 import { type SetupConfigSnapshot } from "../setup";
-import FormatConverter from "./FormatConverter";
 
 export interface Swap {
     inputToken: address,
@@ -52,23 +51,25 @@ export class Zapper extends Calldata<IZapper> {
         this.contract = contractSetup<IZapper>(signer, address, abi);
     }
 
-    async nativeZap(ctoken: CToken, amount: bigint, collateralize: boolean) {
-        const calldata = await this.getNativeZapCalldata(ctoken, amount, collateralize);
+    async nativeZap(ctoken: CToken, amount: bigint, collateralize: boolean, receiver: address = this.signer.address as address) {
+        const wrapped = this.type === 'native-simple' || ctoken.isWrappedNative;
+        const calldata = await this.getNativeZapCalldata(ctoken, amount, collateralize, wrapped, receiver);
         return this.executeCallData(calldata, { value: amount });
     }
 
-    async simpleZap(ctoken: CToken, inputToken: address, outputToken: address,  amount: bigint, collateralize: boolean, slippage: bigint) {
-        const calldata = await this.getSimpleZapCalldata(ctoken, inputToken, outputToken, amount, collateralize, slippage);
-        return this.executeCallData(calldata);
+    async simpleZap(ctoken: CToken, inputToken: address, outputToken: address,  amount: bigint, collateralize: boolean, slippage: bigint, receiver: address = this.signer.address as address) {
+        const calldata = await this.getSimpleZapCalldata(ctoken, inputToken, outputToken, amount, collateralize, slippage, receiver);
+        const isNative = inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
+        return this.executeCallData(calldata, isNative ? { value: amount } : {});
     }
 
-    async getSimpleZapCalldata(ctoken: CToken, inputToken: address, outputToken: address, amount: bigint, collateralize: boolean, slippage: bigint) {
+    async getSimpleZapCalldata(ctoken: CToken, inputToken: address, outputToken: address, amount: bigint, collateralize: boolean, slippage: bigint, receiver: address = this.signer.address as address) {
         const isNative = inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
         const config = getChainConfig(this.setup.chain);
 
         // For native MON: if the deposit token IS wrapped native, just wrap (no swap needed)
         if (isNative && outputToken.toLowerCase() === config.wrapped_native.toLowerCase()) {
-            return this.getNativeZapCalldata(ctoken, amount, collateralize, true);
+            return this.getNativeZapCalldata(ctoken, amount, collateralize, true, receiver);
         }
 
         // For native MON into non-WMON tokens: wrap first, then swap WMON → target
@@ -95,7 +96,7 @@ export class Zapper extends Calldata<IZapper> {
                 swap,
                 expected_shares,
                 collateralize,
-                this.signer.address as address
+                receiver
             ]);
         }
 
@@ -119,7 +120,7 @@ export class Zapper extends Calldata<IZapper> {
             inputAmount: amount,
             outputToken: outputToken,
             target: quote.to,
-            slippage: FormatConverter.bpsToBpsWad(slippage),
+            slippage: toContractSwapSlippage(slippage, feeBps),
             call: quote.calldata
         };
 
@@ -131,11 +132,11 @@ export class Zapper extends Calldata<IZapper> {
             swap,
             expected_shares,
             collateralize,
-            this.signer.address as address
+            receiver
         ]);
     }
 
-    async getVaultZapCalldata(ctoken: CToken, amount: bigint, collateralize: boolean, wrapped: boolean = false) {
+    async getVaultZapCalldata(ctoken: CToken, amount: bigint, collateralize: boolean, wrapped: boolean = false, receiver: address = this.signer.address as address) {
         const { underlying_address, expected_shares } = await this.getZapVaultData(ctoken, amount);
 
         const swap: Swap = {
@@ -153,14 +154,14 @@ export class Zapper extends Calldata<IZapper> {
             swap,
             expected_shares,
             collateralize,
-            this.signer.address as address
+            receiver
         ]);
     }
 
     async getZapVaultData(ctoken: CToken, amount: bigint) {
         const vault = await ctoken.getUnderlyingVault();
         const vault_underlying = await vault.fetchAsset(false);
-        const expected_shares = await ctoken.convertToShares(await vault.previewDeposit(amount));
+        const expected_shares = await ctoken.getExpectedVaultShares(amount);
 
         return {
             underlying_address: vault_underlying,
@@ -168,11 +169,13 @@ export class Zapper extends Calldata<IZapper> {
         }
     }
 
-    async getNativeZapCalldata(ctoken: CToken, amount: bigint, collateralize: boolean, wrapped: boolean = false) {
+    async getNativeZapCalldata(ctoken: CToken, amount: bigint, collateralize: boolean, wrapped: boolean = false, receiver: address = this.signer.address as address) {
         const vaultAssets = (ctoken.isVault || ctoken.isNativeVault)
-            ? await ctoken.getUnderlyingVault().previewDeposit(amount)
+            ? await ctoken.getExpectedVaultShares(amount)
             : amount;
-        const expected_shares = await ctoken.convertToShares(vaultAssets);
+        const expected_shares = (ctoken.isVault || ctoken.isNativeVault)
+            ? vaultAssets
+            : await ctoken.convertToShares(vaultAssets);
         const config = getChainConfig(this.setup.chain);
 
         const swap: Swap = {
@@ -190,7 +193,7 @@ export class Zapper extends Calldata<IZapper> {
             swap,
             expected_shares,
             collateralize,
-            this.signer.address as address
+            receiver
         ]);
     }
 }

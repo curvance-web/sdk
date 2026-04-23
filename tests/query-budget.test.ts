@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { refreshActiveUserMarkets } from "../src/setup";
+import { refreshActiveUserMarketSummaries, refreshActiveUserMarkets } from "../src/setup";
 import { Market } from "../src/classes/Market";
 import { ProtocolReader, type DynamicMarketData, type StaticMarketData } from "../src/classes/ProtocolReader";
 
@@ -79,6 +79,20 @@ function createDynamicMarket(address: string = MARKET_A): DynamicMarketData {
             supplyRate: 12n,
             liquidity: 13n,
         }],
+    };
+}
+
+function createRefreshDynamicMarket(address: string) {
+    return {
+        address,
+        tokens: [{ address: TOKEN_A }],
+    };
+}
+
+function createRefreshUserMarket(address: string) {
+    return {
+        address,
+        tokens: [{ address: TOKEN_A }],
     };
 }
 
@@ -176,15 +190,15 @@ test("query budget: connected boot uses static + combined reader calls only", as
     });
 });
 
-test("query budget: refreshActiveUserMarkets batches only active markets", async () => {
+test("query budget: refreshActiveUserMarkets refreshes all requested markets before filtering", async () => {
     const calls: Array<{ addresses: string[]; account: string }> = [];
     const applied: string[] = [];
     const reader = {
         getMarketStates: async (addresses: string[], account: string) => {
             calls.push({ addresses, account });
             return {
-                dynamicMarkets: addresses.map((address) => ({ address })),
-                userMarkets: addresses.map((address) => ({ address })),
+                dynamicMarkets: addresses.map(createRefreshDynamicMarket),
+                userMarkets: addresses.map(createRefreshUserMarket),
             };
         },
     } as any;
@@ -195,8 +209,8 @@ test("query budget: refreshActiveUserMarkets batches only active markets", async
     }) as any;
 
     const walletOnly = createMarket(MARKET_B, reader, { userUnderlyingBalance: 99n });
-    walletOnly.applyState = (() => {
-        throw new Error("wallet-only market should not be refreshed");
+    walletOnly.applyState = ((dynamic: { address: string }, user: { address: string }) => {
+        applied.push(`${dynamic.address}:${user.address}`);
     }) as any;
 
     const activeDebt = createMarket(MARKET_C, reader, { userDebt: 5n });
@@ -208,6 +222,55 @@ test("query budget: refreshActiveUserMarkets batches only active markets", async
 
     assert.deepEqual(refreshed, [activeDeposit, activeDebt]);
     assert.deepEqual(calls, [{
+        addresses: [MARKET_A, MARKET_B, MARKET_C],
+        account: ACCOUNT,
+    }]);
+    assert.deepEqual(applied, [
+        `${MARKET_A}:${MARKET_A}`,
+        `${MARKET_B}:${MARKET_B}`,
+        `${MARKET_C}:${MARKET_C}`,
+    ]);
+});
+
+test("query budget: refreshActiveUserMarkets batches same deployment across reader instances", async () => {
+    const calls: Array<{ source: string; addresses: string[]; account: string }> = [];
+    const applied: string[] = [];
+    const sharedBatchKey = "monad-mainnet:0xreader";
+
+    const readerA = {
+        batchKey: sharedBatchKey,
+        getMarketStates: async (addresses: string[], account: string) => {
+            calls.push({ source: "A", addresses, account });
+            return {
+                dynamicMarkets: addresses.map(createRefreshDynamicMarket),
+                userMarkets: addresses.map(createRefreshUserMarket),
+            };
+        },
+    } as any;
+
+    const readerB = {
+        batchKey: sharedBatchKey,
+        getMarketStates: async () => {
+            calls.push({ source: "B", addresses: [], account: ACCOUNT });
+            throw new Error("same deployment should batch through the first reader instance");
+        },
+    } as any;
+
+    const first = createMarket(MARKET_A, readerA, { userDebt: 1n });
+    first.applyState = ((dynamic: { address: string }, user: { address: string }) => {
+        applied.push(`${dynamic.address}:${user.address}`);
+    }) as any;
+
+    const second = createMarket(MARKET_C, readerB, { userDebt: 2n });
+    second.applyState = ((dynamic: { address: string }, user: { address: string }) => {
+        applied.push(`${dynamic.address}:${user.address}`);
+    }) as any;
+
+    const refreshed = await refreshActiveUserMarkets(ACCOUNT as any, [first, second]);
+
+    assert.deepEqual(refreshed, [first, second]);
+    assert.deepEqual(calls, [{
+        source: "A",
         addresses: [MARKET_A, MARKET_C],
         account: ACCOUNT,
     }]);
@@ -215,6 +278,50 @@ test("query budget: refreshActiveUserMarkets batches only active markets", async
         `${MARKET_A}:${MARKET_A}`,
         `${MARKET_C}:${MARKET_C}`,
     ]);
+});
+
+test("query budget: refreshActiveUserMarketSummaries refreshes all requested markets", async () => {
+    const calls: Array<{ addresses: string[]; account: string }> = [];
+    const applied: string[] = [];
+    const reader = {
+        getMarketSummaries: async (addresses: string[], account: string) => {
+            calls.push({ addresses, account });
+            return addresses.map((address) => ({
+                address,
+                collateral: 1n,
+                maxDebt: 2n,
+                debt: 3n,
+                positionHealth: 4n,
+                cooldown: 5n,
+                errorCodeHit: false,
+                priceStale: false,
+            }));
+        },
+    } as any;
+
+    const activeDeposit = createMarket(MARKET_A, reader, { userAssetBalance: 1n });
+    activeDeposit.applyUserSummary = ((user: { address: string }) => {
+        applied.push(user.address);
+    }) as any;
+
+    const walletOnly = createMarket(MARKET_B, reader, { userUnderlyingBalance: 99n });
+    walletOnly.applyUserSummary = ((user: { address: string }) => {
+        applied.push(user.address);
+    }) as any;
+
+    const activeDebt = createMarket(MARKET_C, reader, { userDebt: 5n });
+    activeDebt.applyUserSummary = ((user: { address: string }) => {
+        applied.push(user.address);
+    }) as any;
+
+    const refreshed = await refreshActiveUserMarketSummaries(ACCOUNT as any, [activeDeposit, walletOnly, activeDebt]);
+
+    assert.deepEqual(refreshed, [activeDeposit, walletOnly, activeDebt]);
+    assert.deepEqual(calls, [{
+        addresses: [MARKET_A, MARKET_B, MARKET_C],
+        account: ACCOUNT,
+    }]);
+    assert.deepEqual(applied, [MARKET_A, MARKET_B, MARKET_C]);
 });
 
 test("query budget: reloadUserData uses one targeted market-state call", async () => {
@@ -226,8 +333,8 @@ test("query budget: reloadUserData uses one targeted market-state call", async (
         getMarketStates: async (addresses: string[], account: string) => {
             calls.push({ addresses, account });
             return {
-                dynamicMarkets: [{ address: MARKET_A }],
-                userMarkets: [{ address: MARKET_A }],
+                dynamicMarkets: [createRefreshDynamicMarket(MARKET_A)],
+                userMarkets: [createRefreshUserMarket(MARKET_A)],
             };
         },
     });

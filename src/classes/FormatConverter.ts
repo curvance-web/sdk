@@ -1,6 +1,5 @@
 import Decimal from "decimal.js";
 import { Percentage, TokenInput, USD } from "../types";
-import { CToken } from "./CToken";
 
 export default class FormatConverter {
     /**
@@ -59,6 +58,10 @@ export default class FormatConverter {
     static usdToDecimalTokens(value: USD, price: USD | bigint, decimals: number | bigint): Decimal {
         if(!Decimal.isDecimal(price)) {
             price = this.bigIntToUsd(price);
+        }
+
+        if (!price.isFinite() || price.lte(0)) {
+            throw new Error("Cannot convert USD to tokens with a non-positive or non-finite price.");
         }
 
         if (typeof decimals === 'bigint') {
@@ -157,7 +160,7 @@ export default class FormatConverter {
      * @returns The BPS value as a bigint
      */
     static percentageToBps(value: Percentage): bigint {
-        return BigInt(value.mul(10_000).toFixed(0));
+        return BigInt(value.mul(10_000).floor().toFixed(0));
     }
 
     /**

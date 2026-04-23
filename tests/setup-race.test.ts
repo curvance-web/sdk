@@ -4,16 +4,26 @@ import { JsonRpcProvider } from "ethers";
 import { Api } from "../src/classes/Api";
 import { Market } from "../src/classes/Market";
 import { getChainRpcConfig } from "../src/chains";
-import { getRpcDebugSnapshot, isRetryableReadProvider, resetRpcDebugState } from "../src/retry-provider";
+import { CURVANCE_DAO_FEE_RECEIVER, CURVANCE_FEE_BPS } from "../src/feePolicy";
+import {
+    configureRetries,
+    DEFAULT_RETRY_CONFIG,
+    getRpcDebugSnapshot,
+    isRetryableReadProvider,
+    resetRpcDebugState,
+    wrapProviderWithRetries,
+} from "../src/retry-provider";
 import { all_markets, setup_config, setupChain } from "../src/setup";
 
 function defer<T>() {
     let resolve!: (value: T) => void;
-    const promise = new Promise<T>((res) => {
+    let reject!: (error?: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
         resolve = res;
+        reject = rej;
     });
 
-    return { promise, resolve };
+    return { promise, resolve, reject };
 }
 
 test("setupChain only publishes the latest invocation", async (t) => {
@@ -32,7 +42,7 @@ test("setupChain only publishes the latest invocation", async (t) => {
 
     Market.getAll = (async (_reader, _oracleManager, _provider, _signer, _account, _milestones, _incentives, setup) => {
         const activeSetup = setup!;
-        return [{ marker: activeSetup.api_url, approvalProtection: activeSetup.approval_protection }] as any;
+        return [{ marker: activeSetup.api_url }] as any;
     }) as typeof Market.getAll;
 
     t.after(() => {
@@ -40,8 +50,8 @@ test("setupChain only publishes the latest invocation", async (t) => {
         Market.getAll = originalGetAll;
     });
 
-    const olderSetup = setupChain("monad-mainnet", null, false, "https://api.older.example");
-    const newerSetup = setupChain("monad-mainnet", null, true, "https://api.newer.example");
+    const olderSetup = setupChain("monad-mainnet", null, "https://api.older.example");
+    const newerSetup = setupChain("monad-mainnet", null, "https://api.newer.example");
 
     rewardsB.resolve({ milestones: {}, incentives: {} });
     const newerResult = await newerSetup;
@@ -50,7 +60,6 @@ test("setupChain only publishes the latest invocation", async (t) => {
     const olderResult = await olderSetup;
 
     assert.equal(setup_config.api_url, "https://api.newer.example");
-    assert.equal(setup_config.approval_protection, true);
     assert.equal(setup_config.signer, null);
     assert.equal(setup_config.account, null);
     assert.equal(setup_config.provider, setup_config.readProvider);
@@ -58,6 +67,126 @@ test("setupChain only publishes the latest invocation", async (t) => {
     assert.notDeepEqual(all_markets, olderResult.markets);
     assert.equal((newerResult.markets[0] as any).marker, "https://api.newer.example");
     assert.equal((olderResult.markets[0] as any).marker, "https://api.older.example");
+});
+
+test("setupChain publishes the newest successful invocation after newer pending setups fail", async (t) => {
+    const rewardsA = defer<{ milestones: Record<string, any>; incentives: Record<string, any> }>();
+    const rewardsB = defer<{ milestones: Record<string, any>; incentives: Record<string, any> }>();
+
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+
+    let rewardsCall = 0;
+
+    Api.getRewards = (async () => {
+        rewardsCall += 1;
+        return rewardsCall === 1 ? rewardsA.promise : rewardsB.promise;
+    }) as typeof Api.getRewards;
+
+    Market.getAll = (async (_reader, _oracleManager, _provider, _signer, _account, _milestones, _incentives, setup) => {
+        const activeSetup = setup!;
+        return [{ marker: activeSetup.api_url }] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    const olderSetup = setupChain("monad-mainnet", null, "https://api.recover.example");
+    const newerSetup = setupChain("monad-mainnet", null, "https://api.fail.example");
+
+    rewardsA.resolve({ milestones: {}, incentives: {} });
+    const olderResult = await olderSetup;
+
+    assert.equal(setup_config.api_url, "https://api.recover.example");
+    assert.deepEqual(all_markets, olderResult.markets);
+
+    rewardsB.promise.catch(() => undefined);
+    rewardsB.reject(new Error("newer setup failed"));
+    await assert.rejects(() => newerSetup, /newer setup failed/i);
+
+    assert.equal(setup_config.api_url, "https://api.recover.example");
+    assert.deepEqual(all_markets, olderResult.markets);
+});
+
+test("setupChain lets a newer success supersede an older success that published while it was pending", async (t) => {
+    const rewardsA = defer<{ milestones: Record<string, any>; incentives: Record<string, any> }>();
+    const rewardsB = defer<{ milestones: Record<string, any>; incentives: Record<string, any> }>();
+
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+
+    let rewardsCall = 0;
+
+    Api.getRewards = (async () => {
+        rewardsCall += 1;
+        return rewardsCall === 1 ? rewardsA.promise : rewardsB.promise;
+    }) as typeof Api.getRewards;
+
+    Market.getAll = (async (_reader, _oracleManager, _provider, _signer, _account, _milestones, _incentives, setup) => {
+        const activeSetup = setup!;
+        return [{ marker: activeSetup.api_url }] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    const olderSetup = setupChain("monad-mainnet", null, "https://api.temporary.example");
+    const newerSetup = setupChain("monad-mainnet", null, "https://api.final.example");
+
+    rewardsA.resolve({ milestones: {}, incentives: {} });
+    const olderResult = await olderSetup;
+
+    assert.equal(setup_config.api_url, "https://api.temporary.example");
+    assert.deepEqual(all_markets, olderResult.markets);
+
+    rewardsB.resolve({ milestones: {}, incentives: {} });
+    const newerResult = await newerSetup;
+
+    assert.equal(setup_config.api_url, "https://api.final.example");
+    assert.deepEqual(all_markets, newerResult.markets);
+});
+
+test("setupChain preserves call-start order when an older setup validates slowly", async (t) => {
+    const validationA = defer<{ chainId: bigint; name: string }>();
+
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async (_reader, _oracleManager, _provider, _signer, _account, _milestones, _incentives, setup) => {
+        const activeSetup = setup!;
+        return [{ marker: activeSetup.api_url }] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    const olderSetup = setupChain("monad-mainnet", null, "https://api.slow-validation.example", {
+        readProvider: {
+            getNetwork: async () => validationA.promise,
+        } as any,
+    });
+    const newerResult = await setupChain("monad-mainnet", null, "https://api.fast-validation.example", {
+        readProvider: {
+            getNetwork: async () => ({ chainId: 143n, name: "monad-mainnet" }),
+        } as any,
+    });
+
+    assert.equal(setup_config.api_url, "https://api.fast-validation.example");
+    assert.deepEqual(all_markets, newerResult.markets);
+
+    validationA.resolve({ chainId: 143n, name: "monad-mainnet" });
+    const olderResult = await olderSetup;
+
+    assert.equal((olderResult.markets[0] as any).marker, "https://api.slow-validation.example");
+    assert.equal(setup_config.api_url, "https://api.fast-validation.example");
+    assert.deepEqual(all_markets, newerResult.markets);
 });
 
 test("setupChain keeps signer writes separate from dedicated read transport", async (t) => {
@@ -95,7 +224,7 @@ test("setupChain keeps signer writes separate from dedicated read transport", as
         Market.getAll = originalGetAll;
     });
 
-    await setupChain("monad-mainnet", fakeSigner, false, "https://api.example");
+    await setupChain("monad-mainnet", fakeSigner, "https://api.example");
 
     assert.equal(setup_config.signer, fakeSigner);
     assert.equal(setup_config.account, fakeSigner.address);
@@ -141,7 +270,7 @@ test("setupChain supports user-specific public reads without a signer", async (t
         Market.getAll = originalGetAll;
     });
 
-    await setupChain("monad-mainnet", null, false, "https://api.example", { account: account as any });
+    await setupChain("monad-mainnet", null, "https://api.example", { account: account as any });
 
     assert.equal(setup_config.signer, null);
     assert.equal(setup_config.account, account);
@@ -151,6 +280,34 @@ test("setupChain supports user-specific public reads without a signer", async (t
     assert.equal(captured.provider, setup_config.readProvider);
 });
 
+test("setupChain defaults Monad mainnet to the live Curvance fee policy", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async () => [] as any) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    await setupChain("monad-mainnet", null, "https://api.example");
+
+    assert.equal(
+        setup_config.feePolicy.getFeeBps({
+            operation: "zap",
+            inputToken: "0x0000000000000000000000000000000000000001" as any,
+            outputToken: "0x0000000000000000000000000000000000000002" as any,
+            inputAmount: 1n,
+            currentLeverage: null,
+            targetLeverage: null,
+        }),
+        CURVANCE_FEE_BPS,
+    );
+    assert.equal(setup_config.feePolicy.feeReceiver, CURVANCE_DAO_FEE_RECEIVER);
+});
+
 test("setupChain wraps explicit read-provider overrides with chain fallbacks", async (t) => {
     const originalGetRewards = Api.getRewards;
     const originalGetAll = Market.getAll;
@@ -158,7 +315,8 @@ test("setupChain wraps explicit read-provider overrides with chain fallbacks", a
         address: "0x000000000000000000000000000000000000dEaD",
     } as any;
     const customReadProvider = new JsonRpcProvider("https://wallet-rpc.example");
-    const customAccount = "0x0000000000000000000000000000000000000def";
+    customReadProvider.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
+    const customAccount = fakeSigner.address;
 
     let captured: {
         provider: any;
@@ -183,7 +341,7 @@ test("setupChain wraps explicit read-provider overrides with chain fallbacks", a
         resetRpcDebugState();
     });
 
-    await setupChain("monad-mainnet", fakeSigner, false, "https://api.example", {
+    await setupChain("monad-mainnet", fakeSigner, "https://api.example", {
         account: customAccount as any,
         readProvider: customReadProvider,
     });
@@ -203,6 +361,143 @@ test("setupChain wraps explicit read-provider overrides with chain fallbacks", a
     assert.ok(urls.includes(monadRpc.primary.replace(/\/+$/, "")));
     for (const fallback of monadRpc.fallbacks.map((url) => url.replace(/\/+$/, ""))) {
         assert.ok(urls.includes(fallback));
+    }
+});
+
+test("setupChain rejects mismatched signer and explicit account", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const fakeSigner = {
+        address: "0x000000000000000000000000000000000000dEaD",
+    } as any;
+
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async () => {
+        throw new Error("should fail before Market.getAll");
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    await assert.rejects(
+        () =>
+            setupChain("monad-mainnet", fakeSigner, "https://api.example", {
+                account: "0x0000000000000000000000000000000000000def" as any,
+            }),
+        /cannot boot with signer .* and read account/i,
+    );
+});
+
+test("setupChain re-wraps an already retry-wrapped explicit read provider per invocation", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const baseProvider = new JsonRpcProvider("https://wallet-rpc.example");
+    baseProvider.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
+
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async () => [] as any) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+        resetRpcDebugState();
+    });
+
+    const firstWrapped = await (async () => {
+        await setupChain("monad-mainnet", null, "https://api.first.example", {
+            readProvider: baseProvider,
+        });
+        return setup_config.readProvider;
+    })();
+
+    await setupChain("monad-mainnet", null, "https://api.second.example", {
+        readProvider: firstWrapped,
+    });
+
+    assert.ok(isRetryableReadProvider(firstWrapped));
+    assert.ok(isRetryableReadProvider(setup_config.readProvider));
+    assert.notEqual(setup_config.readProvider, firstWrapped);
+});
+
+test("setupChain validates a retry-wrapped signer against its primary wallet transport", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const walletPrimary = new JsonRpcProvider("https://wallet-primary.example");
+    walletPrimary.getNetwork = async () => {
+        throw new Error("wallet getNetwork timeout");
+    };
+    const healthyFallback = new JsonRpcProvider("https://healthy-fallback.example");
+    healthyFallback.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
+    const wrappedWalletProvider = wrapProviderWithRetries(walletPrimary, healthyFallback);
+    const fakeSigner = {
+        address: "0x000000000000000000000000000000000000dEaD",
+        provider: wrappedWalletProvider,
+    } as any;
+
+    let rewardsCalls = 0;
+    let marketCalls = 0;
+    Api.getRewards = (async () => {
+        rewardsCalls += 1;
+        return { milestones: {}, incentives: {} };
+    }) as typeof Api.getRewards;
+    Market.getAll = (async () => {
+        marketCalls += 1;
+        return [] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+        resetRpcDebugState();
+    });
+
+    await assert.rejects(
+        () => setupChain("monad-mainnet", fakeSigner, "https://api.example"),
+        /wallet getNetwork timeout/i,
+    );
+    assert.equal(rewardsCalls, 0);
+    assert.equal(marketCalls, 0);
+});
+
+test("setupChain removes fallback origins that duplicate the selected read primary", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const monadRpc = getChainRpcConfig("monad-mainnet");
+    const primaryOverride = new JsonRpcProvider(monadRpc.primary);
+    primaryOverride.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
+
+    resetRpcDebugState();
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async () => [] as any) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+        resetRpcDebugState();
+    });
+
+    await setupChain("monad-mainnet", null, "https://api.example", {
+        readProvider: primaryOverride,
+    });
+
+    const primaryUrl = monadRpc.primary.replace(/\/+$/, "");
+    const snapshot = getRpcDebugSnapshot();
+    const primary = snapshot.endpoints.find((e) => e.role === "primary");
+    const fallbackUrls = snapshot.endpoints
+        .filter((e) => e.role === "fallback")
+        .map((e) => e.url)
+        .filter((url): url is string => url != null);
+
+    assert.equal(primary?.url, primaryUrl);
+    assert.equal(
+        fallbackUrls.filter((url) => url === primaryUrl).length,
+        0,
+        "selected primary RPC must not also appear as fallback",
+    );
+    for (const fallback of monadRpc.fallbacks.map((url) => url.replace(/\/+$/, ""))) {
+        assert.ok(fallbackUrls.includes(fallback));
     }
 });
 
@@ -226,6 +521,7 @@ test("setupChain uses the wallet's own provider as the read primary when signer 
     const originalGetRewards = Api.getRewards;
     const originalGetAll = Market.getAll;
     const walletRpcProvider = new JsonRpcProvider("https://wallet-rpc.example");
+    walletRpcProvider.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
     const fakeSigner = {
         address: "0x000000000000000000000000000000000000dEaD",
         provider: walletRpcProvider,
@@ -241,7 +537,7 @@ test("setupChain uses the wallet's own provider as the read primary when signer 
         resetRpcDebugState();
     });
 
-    await setupChain("monad-mainnet", fakeSigner, false, "https://api.example");
+    await setupChain("monad-mainnet", fakeSigner, "https://api.example");
 
     const snapshot = getRpcDebugSnapshot();
     const monadRpc = getChainRpcConfig("monad-mainnet");
@@ -293,7 +589,7 @@ test("setupChain falls back to chain provider when the signer has no .provider",
         resetRpcDebugState();
     });
 
-    await setupChain("monad-mainnet", fakeSignerNoProvider, false, "https://api.example");
+    await setupChain("monad-mainnet", fakeSignerNoProvider, "https://api.example");
 
     const snapshot = getRpcDebugSnapshot();
     const monadRpc = getChainRpcConfig("monad-mainnet");
@@ -311,11 +607,13 @@ test("explicit readProvider option wins over the signer's own provider", async (
     const originalGetRewards = Api.getRewards;
     const originalGetAll = Market.getAll;
     const walletRpcProvider = new JsonRpcProvider("https://wallet-rpc.example");
+    walletRpcProvider.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
     const fakeSigner = {
         address: "0x000000000000000000000000000000000000dEaD",
         provider: walletRpcProvider,
     } as any;
     const overrideProvider = new JsonRpcProvider("https://override-rpc.example");
+    overrideProvider.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
 
     resetRpcDebugState();
     Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
@@ -327,7 +625,7 @@ test("explicit readProvider option wins over the signer's own provider", async (
         resetRpcDebugState();
     });
 
-    await setupChain("monad-mainnet", fakeSigner, false, "https://api.example", {
+    await setupChain("monad-mainnet", fakeSigner, "https://api.example", {
         readProvider: overrideProvider,
     });
 
@@ -348,4 +646,162 @@ test("explicit readProvider option wins over the signer's own provider", async (
         !fallbackUrls.includes("https://wallet-rpc.example"),
         "wallet's provider must not appear in the fallback chain when an explicit override was given",
     );
+});
+
+test("setupChain fails fast when an explicit read provider is connected to a different chain", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const wrongReadProvider = new JsonRpcProvider("https://wrong-chain.example");
+    wrongReadProvider.getNetwork = async () => ({ chainId: 421614n, name: "arb-sepolia" } as any);
+
+    let rewardsCalls = 0;
+    let marketCalls = 0;
+    Api.getRewards = (async () => {
+        rewardsCalls += 1;
+        return { milestones: {}, incentives: {} };
+    }) as typeof Api.getRewards;
+    Market.getAll = (async () => {
+        marketCalls += 1;
+        return [] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    await assert.rejects(
+        () => setupChain("monad-mainnet", null, "https://api.example", {
+            readProvider: wrongReadProvider,
+        }),
+        /Read provider is connected to chainId 421614 but setupChain\('monad-mainnet'\) expects 143\./i,
+    );
+    assert.equal(rewardsCalls, 0);
+    assert.equal(marketCalls, 0);
+});
+
+test("setupChain times out a hanging explicit readProvider during chain validation", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const hangingReadProvider = new JsonRpcProvider("https://hanging-rpc.example");
+    hangingReadProvider.getNetwork = async () => new Promise(() => undefined);
+
+    let rewardsCalls = 0;
+    let marketCalls = 0;
+    configureRetries({
+        ...DEFAULT_RETRY_CONFIG,
+        maxRetries: 0,
+        baseDelay: 0,
+        maxDelay: 0,
+        timeoutMs: 25,
+    });
+    Api.getRewards = (async () => {
+        rewardsCalls += 1;
+        return { milestones: {}, incentives: {} };
+    }) as typeof Api.getRewards;
+    Market.getAll = (async () => {
+        marketCalls += 1;
+        return [] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+        configureRetries(DEFAULT_RETRY_CONFIG);
+        resetRpcDebugState();
+    });
+
+    const startedAt = Date.now();
+    await assert.rejects(
+        () => setupChain("monad-mainnet", null, "https://api.example", {
+            readProvider: hangingReadProvider,
+        }),
+        /Read provider getNetwork: timeout after 25ms/i,
+    );
+
+    assert.ok(Date.now() - startedAt < 500, "chain validation should use the configured read timeout");
+    assert.equal(rewardsCalls, 0);
+    assert.equal(marketCalls, 0);
+});
+
+test("setupChain treats timeoutMs=0 as timeout disabled during chain validation", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const slowReadProvider = new JsonRpcProvider("https://slow-rpc.example");
+    slowReadProvider.getNetwork = async () => new Promise((resolve) => {
+        setTimeout(() => resolve({ chainId: 143n, name: "monad-mainnet" } as any), 10);
+    });
+
+    let rewardsCalls = 0;
+    let marketCalls = 0;
+    configureRetries({
+        ...DEFAULT_RETRY_CONFIG,
+        maxRetries: 0,
+        baseDelay: 0,
+        maxDelay: 0,
+        timeoutMs: 0,
+    });
+    Api.getRewards = (async () => {
+        rewardsCalls += 1;
+        return { milestones: {}, incentives: {} };
+    }) as typeof Api.getRewards;
+    Market.getAll = (async () => {
+        marketCalls += 1;
+        return [] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+        configureRetries(DEFAULT_RETRY_CONFIG);
+        resetRpcDebugState();
+    });
+
+    await setupChain("monad-mainnet", null, "https://api.example", {
+        readProvider: slowReadProvider,
+    });
+
+    assert.equal(rewardsCalls, 1);
+    assert.equal(marketCalls, 1);
+});
+
+test("setupChain fails fast when the signer provider is connected to a different chain", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const walletRpcProvider = new JsonRpcProvider("https://wallet-rpc.example");
+    walletRpcProvider.getNetwork = async () => ({ chainId: 421614n, name: "arb-sepolia" } as any);
+
+    const overrideProvider = new JsonRpcProvider("https://override-rpc.example");
+    overrideProvider.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
+
+    const fakeSigner = {
+        address: "0x000000000000000000000000000000000000dEaD",
+        provider: walletRpcProvider,
+    } as any;
+
+    let rewardsCalls = 0;
+    let marketCalls = 0;
+
+    Api.getRewards = (async () => {
+        rewardsCalls += 1;
+        return { milestones: {}, incentives: {} };
+    }) as typeof Api.getRewards;
+    Market.getAll = (async () => {
+        marketCalls += 1;
+        return [] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    await assert.rejects(
+        () => setupChain("monad-mainnet", fakeSigner, "https://api.example", {
+            readProvider: overrideProvider,
+        }),
+        /Signer provider is connected to chainId 421614 but setupChain\('monad-mainnet'\) expects 143\./i,
+    );
+    assert.equal(rewardsCalls, 0);
+    assert.equal(marketCalls, 0);
 });

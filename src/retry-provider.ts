@@ -21,6 +21,28 @@ const RPC_PROVIDER_METHODS = new Set([
     'estimateGas',
 ]);
 
+/** Raw JSON-RPC methods that are safe to route through read fallbacks. */
+const READ_RPC_METHODS = new Set([
+    'eth_call',
+    'eth_estimateGas',
+    'eth_getBalance',
+    'eth_getCode',
+    'eth_getStorageAt',
+    'eth_getTransactionCount',
+    'eth_blockNumber',
+    'eth_gasPrice',
+    'eth_feeHistory',
+    'eth_maxPriorityFeePerGas',
+    'eth_getBlockByNumber',
+    'eth_getBlockByHash',
+    'eth_getTransactionByHash',
+    'eth_getTransactionReceipt',
+    'eth_getLogs',
+    'eth_chainId',
+    'net_version',
+    'web3_clientVersion',
+]);
+
 export interface RetryConfig {
     maxRetries: number;
     baseDelay: number; // Base delay in milliseconds
@@ -153,6 +175,7 @@ interface ProviderState {
 
 const rpcDebugListeners = new Set<RpcDebugListener>();
 const rpcDebugStates = new Map<string, RpcEndpointDebugState>();
+const activeRetryProviders = new Set<RetryableProvider>();
 
 function normalizeRpcUrl(url: string | null | undefined): string | null {
     if (!url) {
@@ -165,6 +188,52 @@ function normalizeRpcUrl(url: string | null | undefined): string | null {
 function getProviderUrl(provider: JsonRpcProvider): string | null {
     const connection = (provider as any)._getConnection?.() ?? (provider as any).connection ?? null;
     return normalizeRpcUrl(connection?.url);
+}
+
+export function getRetryableProviderTarget(provider: curvance_read_provider): curvance_read_provider {
+    return (provider as any)._isRetryable
+        ? ((provider as any)._retryableTarget as curvance_read_provider | undefined) ?? provider
+        : provider;
+}
+
+function normalizeReadFallbacks(
+    provider: curvance_read_provider,
+    readFallback: JsonRpcProvider | JsonRpcProvider[] | null,
+): JsonRpcProvider[] {
+    const fallbackProviders = Array.isArray(readFallback)
+        ? readFallback
+        : readFallback
+            ? [readFallback]
+            : [];
+    const primaryUrl = getProviderUrl(provider as JsonRpcProvider);
+    const seenUrls = new Set<string>();
+    const seenProviders = new Set<curvance_read_provider>([provider]);
+
+    if (primaryUrl != null) {
+        seenUrls.add(primaryUrl);
+    }
+
+    const normalized: JsonRpcProvider[] = [];
+    for (const fallback of fallbackProviders) {
+        const unwrappedFallback = getRetryableProviderTarget(fallback as curvance_read_provider) as JsonRpcProvider;
+        const fallbackUrl = getProviderUrl(unwrappedFallback);
+
+        if (seenProviders.has(unwrappedFallback)) {
+            continue;
+        }
+
+        if (fallbackUrl != null) {
+            if (seenUrls.has(fallbackUrl)) {
+                continue;
+            }
+            seenUrls.add(fallbackUrl);
+        }
+
+        seenProviders.add(unwrappedFallback);
+        normalized.push(unwrappedFallback);
+    }
+
+    return normalized;
 }
 
 function getEndpointId(url: string | null, label: string): string {
@@ -234,6 +303,7 @@ class RetryableProvider {
         this.fallbackProviderStates = this.fallbackProviders.map((provider, index) =>
             this.createProviderState(provider, 'fallback', `fallback-${index + 1}`, index),
         );
+        activeRetryProviders.add(this);
     }
 
     private async sleep(ms: number): Promise<void> {
@@ -774,6 +844,24 @@ class RetryableProvider {
         }
     }
 
+    private isReadRpcMethod(method: unknown): method is string {
+        return typeof method === 'string' && READ_RPC_METHODS.has(method);
+    }
+
+    private getPayloadMethods(payload: any): string[] {
+        const payloads = Array.isArray(payload) ? payload : [payload];
+        return payloads.map((entry) => typeof entry?.method === 'string' ? entry.method : 'unknown');
+    }
+
+    private isReadRpcPayload(payload: any): boolean {
+        const methods = this.getPayloadMethods(payload);
+        return methods.length > 0 && methods.every((method) => this.isReadRpcMethod(method));
+    }
+
+    private getRpcContext(methods: string[]): string {
+        return methods.length === 1 ? `RPC ${methods[0]}` : `RPC batch ${methods.join(',')}`;
+    }
+
     wrapProvider(provider: curvance_read_provider): curvance_read_provider {
         // If it's already wrapped, return as-is
         if ((provider as any)._isRetryable) {
@@ -791,39 +879,53 @@ class RetryableProvider {
                 if (prop === '_isRetryable') {
                     return true;
                 }
+
+                if (prop === '_retryableTarget') {
+                    return target;
+                }
                 
                 // Wrap the main RPC send method
                 if (prop === 'send' && typeof original === 'function') {
                     return async (method: string, params: any[]) => {
                         const primaryOp = () => original.apply(target, [method, params]);
+                        const context = `RPC ${method}`;
+
+                        if (!this.isReadRpcMethod(method)) {
+                            return primaryOp();
+                        }
 
                         if (hasFallback) {
                             const fallbackOps = this.fallbackProviderStates.map((state) => ({
                                 state,
                                 operation: () => state.provider.send(method, params),
                             }));
-                            return this.executeWithReadFallback(primaryOp, fallbackOps, `RPC ${method}`, primaryState);
+                            return this.executeWithReadFallback(primaryOp, fallbackOps, context, primaryState);
                         }
 
-                        return this.executeWithRetry(primaryOp, `RPC ${method}`, primaryState);
+                        return this.executeWithRetry(this.withReadTimeout(primaryOp, context), context, primaryState);
                     };
                 }
 
                 // For JsonRpcProvider, also wrap _send if it exists
                 if (prop === '_send' && typeof original === 'function') {
                     return async (payload: any, callback?: any) => {
-                        const method = payload.method || 'unknown';
+                        const methods = this.getPayloadMethods(payload);
+                        const context = this.getRpcContext(methods);
                         const primaryOp = () => original.apply(target, [payload, callback]);
+
+                        if (!this.isReadRpcPayload(payload)) {
+                            return primaryOp();
+                        }
 
                         if (hasFallback) {
                             const fallbackOps = this.fallbackProviderStates.map((state) => ({
                                 state,
                                 operation: () => (state.provider as any)._send(payload, callback),
                             }));
-                            return this.executeWithReadFallback(primaryOp, fallbackOps, `RPC ${method}`, primaryState);
+                            return this.executeWithReadFallback(primaryOp, fallbackOps, context, primaryState);
                         }
 
-                        return this.executeWithRetry(primaryOp, `RPC ${method}`, primaryState);
+                        return this.executeWithRetry(this.withReadTimeout(primaryOp, context), context, primaryState);
                     };
                 }
 
@@ -852,7 +954,7 @@ class RetryableProvider {
                             }
                         }
 
-                        return this.executeWithRetry(primaryOp, `Provider method ${String(prop)}`, primaryState);
+                        return this.executeWithRetry(this.withReadTimeout(primaryOp, `Provider method ${String(prop)}`), `Provider method ${String(prop)}`, primaryState);
                     };
                 }
 
@@ -896,6 +998,10 @@ export function configureRetries(config: Partial<RetryConfig> = {}): void {
     } else {
         globalRetryProvider.updateConfig(config);
     }
+
+    for (const retryProvider of activeRetryProviders) {
+        retryProvider.updateConfig(config);
+    }
 }
 
 /**
@@ -920,6 +1026,10 @@ function getGlobalRetryProvider(): RetryableProvider {
     return globalRetryProvider;
 }
 
+export function getActiveRetryConfig(): RetryConfig {
+    return getGlobalRetryProvider().getConfig();
+}
+
 /**
  * Wrap a provider with the global retry configuration.
  *
@@ -932,17 +1042,18 @@ export function wrapProviderWithRetries(
     provider: curvance_read_provider,
     readFallback: JsonRpcProvider | JsonRpcProvider[] | null = null,
 ): curvance_read_provider {
-    const hasFallback = Array.isArray(readFallback) ? readFallback.length > 0 : readFallback != null;
-    if (hasFallback) {
+    const unwrappedProvider = getRetryableProviderTarget(provider);
+    const normalizedFallbacks = normalizeReadFallbacks(unwrappedProvider, readFallback);
+    if (normalizedFallbacks.length > 0) {
         // Fallback is per-invocation — create a dedicated instance so the
         // fallback providers aren't shared across setupChain calls.
         const retryProvider = new RetryableProvider(
             getGlobalRetryProvider().getConfig(),
-            readFallback,
+            normalizedFallbacks,
         );
-        return retryProvider.wrapProvider(provider);
+        return retryProvider.wrapProvider(unwrappedProvider);
     }
-    return getGlobalRetryProvider().wrapProvider(provider);
+    return getGlobalRetryProvider().wrapProvider(unwrappedProvider);
 }
 
 /**

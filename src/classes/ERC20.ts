@@ -1,12 +1,19 @@
 import { TransactionResponse } from "ethers";
-import { contractSetup, requireSigner, toBigInt, toDecimal, UINT256_MAX, WAD } from "../helpers";
+import { contractSetup, requireSigner, resolveReadProvider, toBigInt, toDecimal, UINT256_MAX, WAD } from "../helpers";
 import { Contract } from "ethers";
-import { StaticMarketAsset } from "./ProtocolReader";
-import { address, curvance_read_provider, curvance_signer, TokenInput, USD } from "../types";
-import { setup_config } from "../setup";
+import type { StaticMarketAsset } from "./ProtocolReader";
+import { address, curvance_provider, curvance_read_provider, curvance_signer, TokenInput, USD } from "../types";
 import { OracleManager } from "./OracleManager";
 import Decimal from "decimal.js";
 import FormatConverter from "./FormatConverter";
+
+function getSetupConfig() {
+    return (require("../setup") as typeof import("../setup")).setup_config;
+}
+
+function resolveDefaultOracleManagerAddress(): address | undefined {
+    return (getSetupConfig() as any)?.contracts?.OracleManager as address | undefined;
+}
 
 export interface IERC20 {
     balanceOf(account: address): Promise<bigint>;
@@ -26,6 +33,7 @@ const ERC20_ABI = [
     "function name() view returns (string)",
     "function symbol() view returns (string)",
     "function decimals() view returns (uint8)",
+    "function totalSupply() view returns (uint256)",
     "function allowance(address owner, address spender) view returns (uint256)",
 ] as const;
 
@@ -38,18 +46,24 @@ export class ERC20 {
     protected oracleManagerAddress: address | undefined;
 
     constructor(
-        provider: curvance_read_provider,
+        provider: curvance_provider,
         address: address,
         cache: StaticMarketAsset | undefined = undefined,
-        oracleManagerAddress: address | undefined = undefined,
-        signer: curvance_signer | null = setup_config.signer,
+        oracleManagerAddress?: address,
+        signer?: curvance_signer | null,
     ) {
-        this.provider = provider;
-        this.signer = signer;
+        const legacySigner = "address" in provider ? provider as curvance_signer : null;
+        const resolvedProvider =
+            legacySigner == null
+                ? provider as curvance_read_provider
+                : resolveReadProvider(provider, `ERC20 ${address}`);
+
+        this.provider = resolvedProvider;
+        this.signer = signer ?? legacySigner ?? null;
         this.address = address;
         this.cache = cache;
-        this.oracleManagerAddress = oracleManagerAddress;
-        this.contract = contractSetup<IERC20>(provider, address, ERC20_ABI);
+        this.oracleManagerAddress = oracleManagerAddress ?? resolveDefaultOracleManagerAddress();
+        this.contract = contractSetup<IERC20>(resolvedProvider, address, ERC20_ABI);
     }
 
     get name() { return this.cache?.name; }
@@ -57,7 +71,7 @@ export class ERC20 {
     get decimals() { return this.cache?.decimals; }
     get totalSupply() { return this.cache?.totalSupply; }
     get image() { return this.cache?.image; }
-    get balance() { return this.cache?.balance ? toDecimal(this.cache.balance, this.cache.decimals) : undefined; }
+    get balance() { return this.cache?.balance != undefined ? toDecimal(this.cache.balance, this.cache.decimals) : undefined; }
     get price() { return this.cache?.price; }
 
     async balanceOf(account: address): Promise<bigint>
@@ -71,9 +85,10 @@ export class ERC20 {
     }
 
     async transfer(to: address, amount: TokenInput) {
+        const signer = requireSigner(this.signer);
         const decimals = this.decimals ?? await this.contract.decimals();
         const tokens = toBigInt(amount, decimals);
-        return contractSetup<IERC20>(requireSigner(this.signer), this.address, ERC20_ABI).transfer(to, tokens);
+        return contractSetup<IERC20>(signer, this.address, ERC20_ABI).transfer(to, tokens);
     }
 
     async rawTransfer(to: address, amount: bigint) {
@@ -81,9 +96,10 @@ export class ERC20 {
     }
 
     async approve(spender: address, amount: TokenInput | null) {
+        const signer = requireSigner(this.signer);
         const decimals = this.decimals ?? await this.fetchDecimals();
         const tokens = amount == null ? UINT256_MAX : toBigInt(amount, decimals);
-        return contractSetup<IERC20>(requireSigner(this.signer), this.address, ERC20_ABI).approve(spender, tokens);
+        return contractSetup<IERC20>(signer, this.address, ERC20_ABI).approve(spender, tokens);
     }
 
     async fetchName() {
@@ -117,8 +133,14 @@ export class ERC20 {
     async getPrice(inTokenInput: true, inUSD: boolean, getLower: boolean): Promise<USD>
     async getPrice(inTokenInput: false, inUSD: boolean, getLower: boolean): Promise<bigint>
     async getPrice(inTokenInput: boolean, inUSD = true, getLower = false): Promise<USD | bigint> {
-        const oracleManagerAddress =
-            this.oracleManagerAddress ?? (setup_config.contracts.OracleManager as address);
+        const oracleManagerAddress = this.oracleManagerAddress;
+        if (oracleManagerAddress == undefined) {
+            throw new Error(
+                `OracleManager address is not configured for ERC20 ${this.address}. ` +
+                `Pass oracleManagerAddress explicitly or initialize setupChain() before constructing this token.`
+            );
+        }
+
         const oracle_manager = new OracleManager(oracleManagerAddress, this.provider);
         const price = await oracle_manager.getPrice(this.address, inUSD, getLower);
 

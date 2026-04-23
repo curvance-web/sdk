@@ -1,16 +1,27 @@
-import { BPS, ChangeRate, contractSetup, EMPTY_ADDRESS, getRateSeconds, requireAccount, toBigInt, toDecimal, UINT256_MAX, WAD, WAD_DECIMAL } from "../helpers";
+import { aggregateMerklAprByToken, BPS, ChangeRate, contractSetup, EMPTY_ADDRESS, getRateSeconds, requireAccount, toBigInt, toDecimal, UINT256_MAX, WAD, WAD_DECIMAL } from "../helpers";
 import { Contract } from "ethers";
-import { DynamicMarketData, ProtocolReader, StaticMarketData, UserMarket } from "./ProtocolReader";
+import {
+    DynamicMarketData,
+    DynamicMarketToken,
+    ProtocolReader,
+    StaticMarketData,
+    StaticMarketToken,
+    UserMarket,
+    UserMarketSummary,
+    UserMarketToken,
+} from "./ProtocolReader";
 import { AccountSnapshot, CToken } from "./CToken";
 import abi from '../abis/MarketManagerIsolated.json';
 import { Decimal } from "decimal.js";
 import { address, curvance_read_provider, curvance_signer, Percentage, TokenInput, USD } from "../types";
 import { OracleManager } from "./OracleManager";
-import { setup_config, type SetupConfigSnapshot } from "../setup";
+import type { SetupConfigSnapshot } from "../setup";
 import { fetchMerklOpportunities, MerklOpportunity } from "../integrations/merkl";
 import { BorrowableCToken } from "./BorrowableCToken";
 import FormatConverter from "./FormatConverter";
 import { Api, IncentiveResponse, Incentives, MilestoneResponse, Milestones } from "./Api";
+import { chain_config } from "../chains";
+import type { PositionManagerTypes } from "./PositionManager";
 
 export type MarketToken = CToken | BorrowableCToken;
 export type PluginTypes = 'zapper' | 'positionManager';
@@ -48,11 +59,26 @@ export interface HypotheticalLiquidityOf {
     oracleError: boolean;
 }
 
+export type UserDataScope = "full" | "summary";
+
 export interface IMarket {
     accountAssets(account: address): Promise<bigint>;
     MIN_HOLD_PERIOD(): Promise<bigint>;
-    hypotheticalLiquidityOf(account: address, cTokenModified: address, redemptionShares: bigint, borrowAssets: bigint): Promise<HypotheticalLiquidityOf>;
     statusOf(account: address): Promise<StatusOf>;
+}
+
+type NativeYield = Awaited<ReturnType<typeof Api.fetchNativeYields>>[number];
+
+function resolveDefaultSetupConfig(context: string): SetupConfigSnapshot {
+    const config = (require("../setup") as typeof import("../setup")).setup_config;
+    if (config == undefined) {
+        throw new Error(
+            `Setup config is not configured for ${context}. ` +
+            `Pass setup/provider context explicitly or initialize setupChain() first.`
+        );
+    }
+
+    return config;
 }
 
 export class Market {
@@ -68,6 +94,7 @@ export class Market {
     cache: { static: StaticMarketData, dynamic: DynamicMarketData, user: UserMarket, deploy: DeployData };
     milestone: MilestoneResponse | null = null;
     incentives: Array<IncentiveResponse> = [];
+    private _userDataScope?: UserDataScope;
 
     constructor(
         provider: curvance_read_provider,
@@ -90,16 +117,11 @@ export class Market {
         this.setup = setup;
         this.contract = contractSetup<IMarket>(provider, this.address, abi);
         this.cache = { static: static_data, dynamic: dynamic_data, user: user_data, deploy: deploy_data };
+        this._userDataScope = "full";
 
-        for(let i = 0; i < static_data.tokens.length; i++) {
+        for(const tokenData of Market.mergeTokenPayloads(static_data, dynamic_data, user_data)) {
             // @NOTE: Merged fields from the 3 types, so you wanna make sure there is no collisions
             // Otherwise we will have some dataloss
-            const tokenData = {
-                ...static_data.tokens[i]!,
-                ...dynamic_data.tokens[i]!,
-                ...user_data.tokens[i]!
-            };
-
             if(tokenData.isBorrowable) {
                 const ctoken = new BorrowableCToken(provider, tokenData.address, tokenData, this);
                 this.tokens.push(ctoken);
@@ -114,6 +136,60 @@ export class Market {
         return requireAccount(this.account, this.signer);
     }
 
+    assertRefreshAccountCompatible(account: address, allowSignerMismatch = false) {
+        if (allowSignerMismatch) {
+            return;
+        }
+
+        const signerAddress = this.signer?.address as address | undefined;
+        if (signerAddress == null || signerAddress.toLowerCase() === account.toLowerCase()) {
+            return;
+        }
+
+        throw new Error(
+            `Cannot refresh signer-backed market ${this.address} for ${account}; ` +
+            `the active signer is ${signerAddress}.`,
+        );
+    }
+
+    bindRefreshedAccount(account: address, allowSignerMismatch = false) {
+        this.assertRefreshAccountCompatible(account, allowSignerMismatch);
+        this.account = account;
+    }
+
+    private requireFullUserTokenData(accessLabel: string) {
+        if (this.userDataScope !== "summary") {
+            return;
+        }
+
+        throw new Error(
+            `Market-level token-derived user data is stale for ${this.address} after a summary-only refresh. ` +
+            `Call market.reloadUserData(account) or Market.reloadUserMarkets(...) before ${accessLabel}.`
+        );
+    }
+
+    private requireValidCachedUserHealth(accessLabel: string) {
+        if (this.cache.user.errorCodeHit || this.cache.user.priceStale) {
+            throw new Error(
+                `Cached market user data for ${this.address} is not reliable for ${accessLabel} because ` +
+                `the reader reported an oracle error or stale price.`
+            );
+        }
+    }
+
+    private cooldownDateFromUnlockTime(unlockTime: bigint, cooldownLength: bigint = this.cooldownLength): Date | null {
+        if (unlockTime === cooldownLength) {
+            return null;
+        }
+
+        const now = BigInt(Math.floor(Date.now() / 1000));
+        if (unlockTime <= now) {
+            return null;
+        }
+
+        return new Date(Number(unlockTime * 1000n));
+    }
+
     /** @returns {string} - The name of the market at deployment. */
     get name() { return this.cache.deploy.name; }
     /** @returns {Plugins} - The address of the market's plugins by deploy name. */
@@ -123,15 +199,27 @@ export class Market {
     /** @returns {bigint[]} - A list of oracle identifiers which can be mapped to AdaptorTypes enum */
     get adapters() { return this.cache.static.adapters; }
     /** @returns {Date | null} - Market cooldown, activated by Collateralization or Borrowing. Lasts as long as {this.cooldownLength} which is currently 20mins */
-    get cooldown() { return this.cache.user.cooldown == this.cooldownLength ? null : new Date(Number(this.cache.user.cooldown * 1000n)); }
+    get cooldown() { return this.cooldownDateFromUnlockTime(this.cache.user.cooldown); }
+    /** @returns The scope of the latest whole-market user refresh. */
+    get userDataScope(): UserDataScope { return this._userDataScope ?? "full"; }
     /** @returns {Decimal} - The user's collateral in Shares. */
-    get userCollateral() { return toDecimal(this.cache.user.collateral, 18n); }
+    get userCollateral() {
+        this.requireValidCachedUserHealth("reading userCollateral");
+        return toDecimal(this.cache.user.collateral, 18n);
+    }
     /** @returns {USD} - The user's debt in USD. */
-    get userDebt() { return toDecimal(this.cache.user.debt, 18n); }
+    get userDebt() {
+        this.requireValidCachedUserHealth("reading userDebt");
+        return toDecimal(this.cache.user.debt, 18n);
+    }
     /** @returns {USD} - The user's maximum debt in USD. */
-    get userMaxDebt() { return toDecimal(this.cache.user.maxDebt, 18n); }
+    get userMaxDebt() {
+        this.requireValidCachedUserHealth("reading userMaxDebt");
+        return toDecimal(this.cache.user.maxDebt, 18n);
+    }
     /** @returns {USD} - The user's remaining credit with a .1% buffer in USD */
     get userRemainingCredit(): USD {
+        this.requireValidCachedUserHealth("reading userRemainingCredit");
         const remaining = this.cache.user.maxDebt - this.cache.user.debt;
         return toDecimal(remaining, 18n).mul(.999);
     }
@@ -141,6 +229,7 @@ export class Market {
      * @returns {Percentage | null} - The user's position health Percentage or null if infinity
      */
     get positionHealth() {
+        this.requireValidCachedUserHealth("reading positionHealth");
         if (this.cache.user.positionHealth == UINT256_MAX) {
             return null;
         }
@@ -153,6 +242,7 @@ export class Market {
      * @returns {USD} - The total user deposits in USD.
      */
     get userDeposits() {
+        this.requireFullUserTokenData("reading userDeposits");
         let total_deposits = Decimal(0);
         for(const token of this.tokens) {
             total_deposits = total_deposits.add(token.getUserAssetBalance(true));
@@ -166,6 +256,7 @@ export class Market {
      * @returns {USD} - The user's net position in USD.
      */
     get userNet() {
+        this.requireFullUserTokenData("reading userNet");
         return this.userDeposits.sub(this.userDebt);
     }
 
@@ -233,6 +324,7 @@ export class Market {
      * @returns What tokens can and cannot be borrowed from
      */
     getBorrowableCTokens() {
+        this.requireFullUserTokenData("reading borrowable token eligibility");
         const result: {
             eligible: BorrowableCToken[],
             ineligible: BorrowableCToken[]
@@ -262,6 +354,7 @@ export class Market {
      * @returns The total user deposits change (ex: 50, which would be $50/day)
      */
     getUserDepositsChange(rate: ChangeRate) {
+        this.requireFullUserTokenData(`reading user deposit change for rate ${rate}`);
         let total_change = Decimal(0);
         for(const token of this.tokens) {
             const amount = token.getUserAssetBalance(true);
@@ -278,6 +371,7 @@ export class Market {
      * @returns The total user debt change (ex: 50, which would be $50/day)
      */
     getUserDebtChange(rate: ChangeRate) {
+        this.requireFullUserTokenData(`reading user debt change for rate ${rate}`);
         let total_change = Decimal(0);
         for(const token of this.tokens) {
             if(!token.isBorrowable) {
@@ -297,6 +391,7 @@ export class Market {
      * @returns The total user net change (ex: 50, which would be $50/day)
      */
     getUserNetChange(rate: ChangeRate) {
+        this.requireFullUserTokenData(`reading user net change for rate ${rate}`);
         const earn = this.getUserDepositsChange(rate);
         const debt = this.getUserDebtChange(rate);
         return earn.sub(debt);
@@ -344,6 +439,7 @@ export class Market {
     }
 
     hasUserActivity() {
+        this.requireFullUserTokenData("determining user activity");
         return this.tokens.some((token) =>
             token.cache.userAssetBalance > 0n ||
             token.cache.userShareBalance > 0n ||
@@ -352,21 +448,98 @@ export class Market {
         );
     }
 
+    private requireRefreshTokenRows<T extends { address: address }>(rows: T[], label: string): Map<string, T> {
+        if (rows.length !== this.tokens.length) {
+            throw new Error(
+                `Token row count mismatch for market ${this.address} during refresh: ` +
+                `expected=${this.tokens.length} ${label}=${rows.length}.`
+            );
+        }
+
+        const rowsByAddress = new Map(rows.map((row) => [row.address.toLowerCase(), row]));
+        for (const token of this.tokens) {
+            if (!rowsByAddress.has(token.address.toLowerCase())) {
+                throw new Error(`Missing ${label} token data for ${token.address} in market ${this.address} during refresh.`);
+            }
+        }
+
+        return rowsByAddress;
+    }
+
+    private requireRefreshMarketAddress(row: { address: address }, label: string) {
+        if (row.address.toLowerCase() !== this.address.toLowerCase()) {
+            throw new Error(
+                `Mismatched ${label} market data during refresh: expected=${this.address} received=${row.address}.`
+            );
+        }
+    }
+
+    private validateStateRows(dynamicData: DynamicMarketData, userData?: UserMarket) {
+        this.requireRefreshMarketAddress(dynamicData, "dynamic");
+        if (userData != undefined) {
+            this.requireRefreshMarketAddress(userData, "user");
+        }
+
+        this.requireRefreshTokenRows(dynamicData.tokens, "dynamic");
+        if (userData != undefined) {
+            this.requireRefreshTokenRows(userData.tokens, "user");
+        }
+    }
+
+    validateRefreshState(dynamicData: DynamicMarketData, userData?: UserMarket) {
+        this.validateStateRows(dynamicData, userData);
+    }
+
+    private static requireMarketRow<T extends { address: address }>(
+        rows: T[],
+        market: Market,
+        label: string,
+    ): T {
+        const row = new Map(rows.map((entry) => [entry.address.toLowerCase(), entry])).get(market.address.toLowerCase());
+        if (row == undefined) {
+            throw new Error(`Could not reload ${label} data for market ${market.address}.`);
+        }
+        return row;
+    }
+
     applyState(dynamicData: DynamicMarketData, userData?: UserMarket) {
+        this.validateStateRows(dynamicData, userData);
+        const dynamicRowsByAddress = this.requireRefreshTokenRows(dynamicData.tokens, "dynamic");
+        const userRowsByAddress = userData != undefined
+            ? this.requireRefreshTokenRows(userData.tokens, "user")
+            : undefined;
+
         this.cache.dynamic = dynamicData;
 
         if(userData != undefined) {
             this.cache.user = userData;
+            this._userDataScope = "full";
         }
 
         for(const token of this.tokens) {
-            const nextDynamic = dynamicData.tokens.find((t) => t.address == token.address);
-            const nextUser = userData?.tokens.find((t) => t.address == token.address);
+            const nextDynamic = dynamicRowsByAddress.get(token.address.toLowerCase());
+            const nextUser = userRowsByAddress?.get(token.address.toLowerCase());
             token.cache = {
                 ...token.cache,
-                ...(nextDynamic ?? {}),
+                ...nextDynamic,
                 ...(nextUser ?? {}),
             };
+
+            if (nextUser != undefined) {
+                (token as any).markUserCacheFresh?.();
+            }
+        }
+    }
+
+    applyUserSummary(userData: UserMarketSummary) {
+        this.cache.user = {
+            ...this.cache.user,
+            ...userData,
+        };
+        this._userDataScope = "summary";
+
+        for (const token of this.tokens) {
+            (token as any).invalidateUserCache?.();
         }
     }
 
@@ -379,20 +552,47 @@ export class Market {
         this.applyState(dynamic);
     }
 
-    async reloadUserData(account: address) {
+    async reloadUserData(account: address, options: { allowSignerMismatch?: boolean } = {}) {
+        const allowSignerMismatch = options.allowSignerMismatch ?? false;
+        this.assertRefreshAccountCompatible(account, allowSignerMismatch);
         const { dynamicMarkets, userMarkets } = await this.reader.getMarketStates([this.address], account);
-        const dynamic = dynamicMarkets[0];
-        const user = userMarkets[0];
-
-        if(dynamic == undefined || user == undefined) {
-            throw new Error(`Could not reload market state for ${this.address}.`);
-        }
+        const dynamic = Market.requireMarketRow(dynamicMarkets, this, "dynamic");
+        const user = Market.requireMarketRow(userMarkets, this, "user");
 
         this.applyState(dynamic, user);
+        this.bindRefreshedAccount(account, allowSignerMismatch);
+    }
+
+    async reloadUserSummary(account: address) {
+        this.assertRefreshAccountCompatible(account);
+        const userMarkets = await this.reader.getMarketSummaries([this.address], account);
+        const user = Market.requireMarketRow(userMarkets, this, "user summary");
+
+        this.applyUserSummary(user);
+        this.bindRefreshedAccount(account);
     }
 
     static getActiveUserMarkets(markets: Market[]): Market[] {
         return markets.filter((market) => market.hasUserActivity());
+    }
+
+    private static groupByReaderDeployment(markets: Market[]) {
+        const groups = new Map<string | ProtocolReader, { reader: ProtocolReader; markets: Market[] }>();
+
+        for (const market of markets) {
+            const groupKey = market.reader.batchKey ?? market.reader;
+            const existing = groups.get(groupKey);
+            if (existing) {
+                existing.markets.push(market);
+            } else {
+                groups.set(groupKey, {
+                    reader: market.reader,
+                    markets: [market],
+                });
+            }
+        }
+
+        return groups.values();
     }
 
     static async reloadUserMarkets(markets: Market[], account: address): Promise<Market[]> {
@@ -400,35 +600,149 @@ export class Market {
             return [];
         }
 
-        const groups = new Map<ProtocolReader, Market[]>();
-        for(const market of markets) {
-            const existing = groups.get(market.reader);
-            if(existing) {
-                existing.push(market);
-            } else {
-                groups.set(market.reader, [market]);
-            }
+        for (const market of markets) {
+            market.assertRefreshAccountCompatible(account);
         }
 
-        for(const [reader, groupedMarkets] of groups) {
+        const plans: Array<{ market: Market; dynamic: DynamicMarketData; user: UserMarket }> = [];
+
+        for(const { reader, markets: groupedMarkets } of this.groupByReaderDeployment(markets)) {
             const addresses = groupedMarkets.map((market) => market.address);
             const { dynamicMarkets, userMarkets } = await reader.getMarketStates(addresses, account);
-            const dynamicByAddress = new Map(dynamicMarkets.map((market) => [market.address, market]));
-            const userByAddress = new Map(userMarkets.map((market) => [market.address, market]));
+            const dynamicByAddress = new Map(dynamicMarkets.map((market) => [market.address.toLowerCase(), market]));
+            const userByAddress = new Map(userMarkets.map((market) => [market.address.toLowerCase(), market]));
 
             for(const market of groupedMarkets) {
-                const dynamic = dynamicByAddress.get(market.address);
-                const user = userByAddress.get(market.address);
+                const dynamic = dynamicByAddress.get(market.address.toLowerCase());
+                const user = userByAddress.get(market.address.toLowerCase());
 
                 if(dynamic == undefined || user == undefined) {
                     throw new Error(`Could not reload market state for ${market.address}.`);
                 }
 
-                market.applyState(dynamic, user);
+                market.validateStateRows(dynamic, user);
+                plans.push({ market, dynamic, user });
             }
         }
 
+        for (const { market, dynamic, user } of plans) {
+            market.applyState(dynamic, user);
+            market.bindRefreshedAccount(account);
+        }
+
         return markets;
+    }
+
+    static async reloadUserMarketSummaries(markets: Market[], account: address): Promise<Market[]> {
+        if(markets.length === 0) {
+            return [];
+        }
+
+        for (const market of markets) {
+            market.assertRefreshAccountCompatible(account);
+        }
+
+        const plans: Array<{ market: Market; user: UserMarketSummary }> = [];
+
+        for(const { reader, markets: groupedMarkets } of this.groupByReaderDeployment(markets)) {
+            const addresses = groupedMarkets.map((market) => market.address);
+            const userMarkets = await reader.getMarketSummaries(addresses, account);
+            const userByAddress = new Map(userMarkets.map((market) => [market.address.toLowerCase(), market]));
+
+            for(const market of groupedMarkets) {
+                const user = userByAddress.get(market.address.toLowerCase());
+
+                if(user == undefined) {
+                    throw new Error(`Could not reload market user summary for ${market.address}.`);
+                }
+
+                market.requireRefreshMarketAddress(user, "user summary");
+                plans.push({ market, user });
+            }
+        }
+
+        for (const { market, user } of plans) {
+            market.applyUserSummary(user);
+            market.bindRefreshedAccount(account);
+        }
+
+        return markets;
+    }
+
+    private static buildDeployDataIndex(setup: SetupConfigSnapshot): Map<string, DeployData> {
+        const index = new Map<string, DeployData>();
+        const deployments = setup.contracts.markets as Record<string, any>;
+
+        for (const [name, data] of Object.entries(deployments)) {
+            if (typeof data !== 'object' || data == null || typeof data.address !== 'string') {
+                continue;
+            }
+
+            const key = data.address.toLowerCase();
+            if (!index.has(key)) {
+                index.set(key, {
+                    name,
+                    plugins: 'plugins' in data ? data.plugins as { [key: string]: address } : {},
+                });
+            }
+        }
+
+        return index;
+    }
+
+    private static buildYieldIndex(yields: NativeYield[]): Map<string, NativeYield> {
+        const index = new Map<string, NativeYield>();
+
+        for (const yieldEntry of yields) {
+            const key = yieldEntry.symbol.toUpperCase();
+            if (!index.has(key)) {
+                index.set(key, yieldEntry);
+            }
+        }
+
+        return index;
+    }
+
+    private static buildMarketPayloadIndex<T extends { address: address }>(entries: T[]): Map<string, T> {
+        return new Map(entries.map((entry) => [entry.address.toLowerCase(), entry]));
+    }
+
+    private static requireTokenRow<T extends { address: address }>(
+        rowsByAddress: Map<string, T>,
+        tokenAddress: address,
+        marketAddress: address,
+        label: string,
+    ): T {
+        const row = rowsByAddress.get(tokenAddress.toLowerCase());
+        if (row == undefined) {
+            throw new Error(`Missing ${label} token data for ${tokenAddress} in market ${marketAddress} during Market boot.`);
+        }
+        return row;
+    }
+
+    private static mergeTokenPayloads(
+        staticData: StaticMarketData,
+        dynamicData: DynamicMarketData,
+        userData: UserMarket,
+    ): Array<StaticMarketToken & DynamicMarketToken & UserMarketToken> {
+        if (
+            staticData.tokens.length !== dynamicData.tokens.length ||
+            staticData.tokens.length !== userData.tokens.length
+        ) {
+            throw new Error(
+                `Token row count mismatch for market ${staticData.address} during Market boot: ` +
+                `static=${staticData.tokens.length} dynamic=${dynamicData.tokens.length} user=${userData.tokens.length}.`
+            );
+        }
+
+        const dynamicByAddress = this.buildMarketPayloadIndex(dynamicData.tokens);
+        const userByAddress = this.buildMarketPayloadIndex(userData.tokens);
+
+        return staticData.tokens.map((staticToken) => ({
+            ...staticToken,
+            ...this.requireTokenRow(dynamicByAddress, staticToken.address, staticData.address, "dynamic"),
+            ...this.requireTokenRow(userByAddress, staticToken.address, staticData.address, "user"),
+        }));
     }
 
     /**
@@ -444,7 +758,14 @@ export class Market {
         const amount_in = toBigInt(deposit_amount, collateral_ctoken.asset.decimals);
         const amount_out = toBigInt(borrow_amount, debt_ctoken.asset.decimals);
 
-        const { supply, borrow } = await this.reader.previewAssetImpact(user, collateral_ctoken.address, debt_ctoken.address, amount_in, amount_out);
+        let { supply, borrow } = await this.reader.previewAssetImpact(user, collateral_ctoken.address, debt_ctoken.address, amount_in, amount_out);
+        if (amount_out > 0n) {
+            const irm = await debt_ctoken.dynamicIRM();
+            const currentAssetsHeld = await debt_ctoken.contract.assetsHeld();
+            const currentDebt = await debt_ctoken.contract.marketOutstandingDebt();
+            const projectedAssetsHeld = currentAssetsHeld > amount_out ? currentAssetsHeld - amount_out : 0n;
+            borrow = await irm.borrowRate(projectedAssetsHeld, currentDebt + amount_out);
+        }
 
         const supply_apy = Decimal(supply * getRateSeconds('year')).div(WAD);
         const borrow_apy = Decimal(borrow * getRateSeconds('year')).div(WAD);
@@ -496,8 +817,13 @@ export class Market {
             return null;
         }
 
-        const { collateralAssetReduction } = deposit_ctoken.previewLeverageDown(newLeverage, currentLeverage);
-        const repayUsd = deposit_ctoken.convertTokensToUsd(collateralAssetReduction, true);
+        const preview = deposit_ctoken.previewLeverageDown(newLeverage, currentLeverage, borrow_ctoken);
+        const repayCollateralAssets = preview.collateralAssetReduction;
+        let { collateralAssetReduction } = preview;
+        if (preview.feeBps > 0n) {
+            collateralAssetReduction = collateralAssetReduction * 10000n / (10000n - preview.feeBps);
+        }
+        const repayUsd = deposit_ctoken.convertTokensToUsd(repayCollateralAssets, true);
         const repayTokens = borrow_ctoken.convertUsdToTokens(repayUsd, true);
 
         return this.previewPositionHealth(
@@ -514,31 +840,52 @@ export class Market {
         deposit_ctoken: CToken,
         borrow_ctoken: BorrowableCToken,
         newLeverage: Decimal,
-        depositAssets?: bigint
+        depositAssets?: bigint,
+        positionManagerType?: PositionManagerTypes,
     ) {
-        const { borrowAmount } = deposit_ctoken.previewLeverageUp(newLeverage, borrow_ctoken, depositAssets);
-        // borrowAmount is the reduced amount sent to the contract — this is both
-        // what enters the vault/swap (becomes collateral) and what the user owes (debt).
-        // Use price-based conversion for collateral increase — this matches how the
-        // on-chain health reader values positions (via oracle prices, not vault rates).
-        const borrowUsd = borrowAmount.mul(borrow_ctoken.getPrice(true));
-        const collateralFromBorrow = borrowUsd.div(deposit_ctoken.getPrice(true));
+        if ((depositAssets ?? 0n) > 0n) {
+            return this.previewPositionHealthDepositAndLeverage(
+                deposit_ctoken,
+                borrow_ctoken,
+                newLeverage,
+                depositAssets!,
+                positionManagerType,
+            );
+        }
 
-        // Total collateral increase = initial deposit + borrowed amount swapped to collateral.
-        // The on-chain reader starts from the user's current position, so the deposit
-        // must be included or the preview will undercount collateral (showing ~0% health).
-        const depositInTokens = depositAssets
-            ? FormatConverter.bigIntToDecimal(depositAssets, deposit_ctoken.asset.decimals)
-            : Decimal(0);
-        const collateralIncrease = collateralFromBorrow.add(depositInTokens);
+        const preview = deposit_ctoken.previewLeverageUp(newLeverage, borrow_ctoken, undefined, positionManagerType);
 
         return this.previewPositionHealth(
             deposit_ctoken,
             borrow_ctoken,
             true,
-            collateralIncrease,
+            preview.collateralIncreaseInAssets,
             false,
-            borrowAmount
+            preview.debtIncreaseInAssets
+        );
+    }
+
+    async previewPositionHealthDepositAndLeverage(
+        deposit_ctoken: CToken,
+        borrow_ctoken: BorrowableCToken,
+        newLeverage: Decimal,
+        depositAssets: bigint,
+        positionManagerType?: PositionManagerTypes,
+    ) {
+        const preview = deposit_ctoken.previewDepositAndLeverage(
+            newLeverage,
+            borrow_ctoken,
+            depositAssets,
+            positionManagerType,
+        );
+
+        return this.previewPositionHealth(
+            deposit_ctoken,
+            borrow_ctoken,
+            true,
+            preview.collateralIncreaseInAssets,
+            false,
+            preview.debtIncreaseInAssets
         );
     }
 
@@ -608,11 +955,12 @@ export class Market {
      */
     async previewPositionHealthRedeem(ctoken: CToken, amount: TokenInput) {
         const user = this.getAccountOrThrow();
-        const redeem_amount = ctoken.convertTokenInputToShares(amount);
-        const existing_collateral = ctoken.cache.userCollateral;
+        const redeemShares = ctoken.convertTokenInputToShares(amount);
+        const redeemAssets = FormatConverter.decimalToBigInt(amount, ctoken.asset.decimals);
+        const existing_collateral = ctoken.getUserCollateralShares();
 
-        if(redeem_amount > existing_collateral) {
-            throw new Error(`Insufficient collateral: Existing (${existing_collateral}) < Redeem amount (${redeem_amount})`);
+        if(redeemShares > existing_collateral) {
+            throw new Error(`Insufficient collateral: Existing (${existing_collateral}) < Redeem amount (${redeemShares})`);
         }
 
         const data = await this.reader.getPositionHealth(
@@ -621,7 +969,7 @@ export class Market {
             ctoken.address,
             EMPTY_ADDRESS,
             false,
-            redeem_amount,
+            redeemAssets,
             false,
             0n,
             0n
@@ -679,6 +1027,9 @@ export class Market {
      */
     async previewPositionHealthRepay(token: BorrowableCToken, amount: TokenInput) {
         const user = this.getAccountOrThrow();
+        const repayAssets = amount.eq(0)
+            ? UINT256_MAX
+            : FormatConverter.decimalToBigInt(amount, token.decimals);
         const data = await this.reader.getPositionHealth(
             this.address,
             user,
@@ -687,7 +1038,7 @@ export class Market {
             false,
             0n,
             true,
-            FormatConverter.decimalToBigInt(amount, token.decimals),
+            repayAssets,
             0n
         );
 
@@ -706,8 +1057,21 @@ export class Market {
      * @param borrowAssets - Amount of assets being borrowed
      * @returns An object containing the hypothetical liquidity values
      */
-    async hypotheticalLiquidityOf(account: address, cTokenModified: address = EMPTY_ADDRESS, redemptionShares: bigint = 0n, borrowAssets: bigint = 0n) {
-        return this.contract.hypotheticalLiquidityOf(account, cTokenModified, redemptionShares, borrowAssets);
+    async hypotheticalLiquidityOf(
+        account: address,
+        cTokenModified: address = EMPTY_ADDRESS,
+        redemptionShares: bigint = 0n,
+        borrowAssets: bigint = 0n,
+        bufferTime: bigint = 0n,
+    ) {
+        return this.reader.hypotheticalLiquidityOf(
+            this.address,
+            account,
+            cTokenModified,
+            redemptionShares,
+            borrowAssets,
+            bufferTime,
+        );
     }
 
     /**
@@ -720,7 +1084,7 @@ export class Market {
         const cooldownTimestamp = await this.contract.accountAssets(account);
         const cooldownLength = fetch || this.cooldownLength == 0n ? await this.contract.MIN_HOLD_PERIOD() : this.cooldownLength;
         const unlockTime = cooldownTimestamp + cooldownLength;
-        return unlockTime == cooldownLength ? null : new Date(Number(unlockTime * 1000n));
+        return this.cooldownDateFromUnlockTime(unlockTime, cooldownLength);
     }
 
     /**
@@ -743,7 +1107,7 @@ export class Market {
             const cooldownTimestamp = cooldownTimestamps[i]!;
             const cooldownLength = market.cooldownLength;
 
-            cooldowns[market.address] = cooldownTimestamp == cooldownLength ? null : new Date(Number(cooldownTimestamp * 1000n));
+            cooldowns[market.address] = market.cooldownDateFromUnlockTime(cooldownTimestamp, cooldownLength);
         }
 
         return cooldowns;
@@ -759,88 +1123,94 @@ export class Market {
     static async getAll(
         reader: ProtocolReader,
         oracle_manager: OracleManager,
-        provider: curvance_read_provider = setup_config.readProvider,
-        signer: curvance_signer | null = setup_config.signer,
-        account: address | null = setup_config.account,
+        provider?: curvance_read_provider,
+        signer?: curvance_signer | null,
+        account?: address | null,
         milestones: Milestones = {},
         incentives: Incentives = {},
-        setup: SetupConfigSnapshot = setup_config,
+        setup?: SetupConfigSnapshot,
     ) {
-        const all_data = await reader.getAllMarketData(account);
-        const deploy_keys: string[] = Object.keys(setup.contracts.markets) as (keyof typeof setup.contracts.markets)[];
+        const resolvedSetup = setup ?? resolveDefaultSetupConfig("Market.getAll");
+        const resolvedProvider = provider ?? resolvedSetup.readProvider;
+        const resolvedSigner = signer === undefined ? resolvedSetup.signer : signer;
+        const resolvedAccount = account === undefined ? resolvedSetup.account : account;
+        const chainId = chain_config[resolvedSetup.chain]?.chainId;
+
+        const all_data = await reader.getAllMarketData(resolvedAccount);
         // Filter out USDC — DeFiLlama incorrectly returns YZM vault yield labeled as USDC
         const [yields, merklLendOpps, merklBorrowOpps] = await Promise.all([
-            Api.fetchNativeYields(setup).then(y => y.filter(y => y.symbol.toUpperCase() !== 'USDC')),
-            fetchMerklOpportunities({ action: 'LEND' }).catch(() => [] as MerklOpportunity[]),
-            fetchMerklOpportunities({ action: 'BORROW' }).catch(() => [] as MerklOpportunity[]),
+            Api.fetchNativeYields(resolvedSetup).then(y => y.filter(y => y.symbol.toUpperCase() !== 'USDC')),
+            fetchMerklOpportunities({ action: 'LEND', chainId }).catch(() => [] as MerklOpportunity[]),
+            fetchMerklOpportunities({ action: 'BORROW', chainId }).catch(() => [] as MerklOpportunity[]),
         ]);
+        const deployIndex = this.buildDeployDataIndex(resolvedSetup);
+        const milestonesByAddress = new Map(
+            Object.entries(milestones).map(([market, milestone]) => [market.toLowerCase(), milestone]),
+        );
+        const incentivesByAddress = new Map(
+            Object.entries(incentives).map(([market, marketIncentives]) => [market.toLowerCase(), marketIncentives]),
+        );
+        const lendOppApyByToken = aggregateMerklAprByToken(merklLendOpps, "deposit");
+        const borrowOppApyByToken = aggregateMerklAprByToken(merklBorrowOpps, "borrow");
+        const yieldIndex = this.buildYieldIndex(yields);
+        const dynamicByAddress = this.buildMarketPayloadIndex(all_data.dynamicMarket);
+        const userByAddress = this.buildMarketPayloadIndex(all_data.userData.markets);
 
         let markets: Market[] = [];
-        for(let i = 0; i < all_data.staticMarket.length; i++) {
-            const staticData  = all_data.staticMarket[i]!;
-            const dynamicData = all_data.dynamicMarket[i]!;
-            const userData    = all_data.userData.markets[i]!;
-
+        for(const staticData of all_data.staticMarket) {
             const market_address = staticData.address;
-
-            let deploy_data: DeployData | undefined;
-
-            for(const obj_key of deploy_keys) {
-                const data = (setup.contracts.markets as any)[obj_key];
-
-                if(typeof data != 'object') {
-                    continue;
-                }
-
-                if(market_address == data.address) {
-                    deploy_data = {
-                        name: obj_key,
-                        plugins: 'plugins' in data ? data.plugins as { [key: string]: address } : {}
-                    };
-                    break;
-                }
-            }
+            const deploy_data = deployIndex.get(market_address.toLowerCase());
+            const dynamicData = dynamicByAddress.get(market_address.toLowerCase());
+            const userData = userByAddress.get(market_address.toLowerCase());
 
             if(deploy_data == undefined) {
                 console.warn(`Could not find deploy data for market: ${market_address}, skipping...`);
                 continue;
             }
 
-            if(staticData == undefined) {
-                console.warn(`Could not find static market data for index: ${i}`);
-                continue;
-            }
-
             if(dynamicData == undefined) {
-                console.warn(`Could not find dynamic market data for index: ${i}`);
-                continue;
+                throw new Error(`Missing dynamic market data for ${market_address} during Market.getAll boot.`);
             }
 
             if(userData == undefined) {
-                console.warn(`Could not find user market data for index: ${i}`);
-                continue;
+                throw new Error(`Missing user market data for ${market_address} during Market.getAll boot.`);
             }
 
-            const market = new Market(provider, signer, account, staticData, dynamicData, userData, deploy_data, oracle_manager, reader, setup);
-            if(milestones[market.address] != undefined) {
-                market.milestone = milestones[market.address]!;
+            const market = new Market(
+                resolvedProvider,
+                resolvedSigner,
+                resolvedAccount,
+                staticData,
+                dynamicData,
+                userData,
+                deploy_data,
+                oracle_manager,
+                reader,
+                resolvedSetup,
+            );
+            const rewardKey = market.address.toLowerCase();
+            const milestone = milestonesByAddress.get(rewardKey);
+            if(milestone != undefined) {
+                market.milestone = milestone;
             }
-            if(incentives[market.address] != undefined) {
-                market.incentives = incentives[market.address]!;
+            const marketIncentives = incentivesByAddress.get(rewardKey);
+            if(marketIncentives != undefined) {
+                market.incentives = marketIncentives;
             }
 
             for(const token of market.tokens) {
-                const lendOpp = merklLendOpps.find(o => o.identifier.toLowerCase() === token.address.toLowerCase());
-                if(lendOpp != undefined) {
-                    token.incentiveSupplyApy = new Decimal(lendOpp.apr / 100);
+                const tokenKey = token.address.toLowerCase();
+                const lendApy = lendOppApyByToken.get(tokenKey);
+                if(lendApy != undefined) {
+                    token.incentiveSupplyApy = lendApy;
                 }
 
-                const borrowOpp = merklBorrowOpps.find(o => o.identifier.toLowerCase() === token.address.toLowerCase());
-                if(borrowOpp != undefined) {
-                    token.incentiveBorrowApy = new Decimal(borrowOpp.apr / 100);
+                const borrowApy = borrowOppApyByToken.get(tokenKey);
+                if(borrowApy != undefined) {
+                    token.incentiveBorrowApy = borrowApy;
                 }
 
-                const api_yield = yields.find(y => y.symbol.toUpperCase() == token.asset.symbol.toUpperCase());
+                const api_yield = yieldIndex.get(token.asset.symbol.toUpperCase());
                 if(api_yield != undefined) {
                     token.nativeApy = new Decimal(api_yield.apy / 100);
                 }

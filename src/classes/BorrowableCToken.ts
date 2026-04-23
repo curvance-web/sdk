@@ -9,11 +9,14 @@ import irm_abi from '../abis/IDynamicIRM.json';
 import Decimal from "decimal.js";
 import FormatConverter from "./FormatConverter";
 
+const REPAY_DEBT_BUFFER_TIME = 100n;
+
 export interface IBorrowableCToken extends ICToken {
     borrow(amount: bigint, receiver: address): Promise<TransactionResponse>;
     repay(amount: bigint): Promise<TransactionResponse>;
     interestFee(): Promise<bigint>;
     marketOutstandingDebt(): Promise<bigint>;
+    assetsHeld(): Promise<bigint>;
     debtBalance(account: address): Promise<bigint>;
     IRM(): Promise<address>;
     // More functions available
@@ -25,7 +28,10 @@ export interface IDynamicIRM {
     borrowRate(assetsHeld: bigint, debt: bigint): Promise<bigint>;
     predictedBorrowRate(assetsHeld: bigint, debt: bigint): Promise<bigint>;
     supplyRate(assetsHeld: bigint, debt: bigint, interestFee: bigint): Promise<bigint>;
-    adjustedBorrowRate(assetsHeld: bigint, debt: bigint): Promise<bigint>;
+    adjustedBorrowRate(assetsHeld: bigint, debt: bigint): Promise<[
+        ratePerSecond: bigint,
+        adjustmentRate: bigint,
+    ]>;
     utilizationRate(assetsHeld: bigint, debt: bigint): Promise<bigint>;
 }
 
@@ -39,7 +45,7 @@ export class BorrowableCToken extends CToken {
         market: Market
     ) {
         super(provider, address, cache, market);
-        this.contract = contractSetup<IBorrowableCToken>(provider, address, borrowable_ctoken_abi);
+        this.contract = contractSetup<IBorrowableCToken>(this.provider, address, borrowable_ctoken_abi);
     }
 
     protected override getWriteContract() {
@@ -78,18 +84,50 @@ export class BorrowableCToken extends CToken {
     async getMaxBorrowable(inUSD: true): Promise<USD>;
     async getMaxBorrowable(inUSD: boolean = false): Promise<USD | TokenInput> {
         const credit_usd = this.market.userRemainingCredit;
-        return inUSD ? credit_usd : this.convertUsdToTokens(credit_usd, true);
+        const safeCreditUsd =
+            credit_usd.isFinite() && credit_usd.greaterThan(0)
+                ? credit_usd
+                : new Decimal(0);
+        const remainingDebtCap = this.cache.debtCap > this.cache.debt
+            ? this.cache.debtCap - this.cache.debt
+            : 0n;
+        const availableLiquidity = this.cache.liquidity > 0n ? this.cache.liquidity : 0n;
+        const tokenCapacity = remainingDebtCap < availableLiquidity
+            ? remainingDebtCap
+            : availableLiquidity;
+        const tokenCapacityUsd = this.convertTokensToUsd(tokenCapacity);
+        const cappedCreditUsd = Decimal.min(safeCreditUsd, tokenCapacityUsd);
+
+        if (inUSD) {
+            return cappedCreditUsd.isFinite() && cappedCreditUsd.greaterThan(0)
+                ? cappedCreditUsd
+                : new Decimal(0);
+        }
+
+        if (cappedCreditUsd.eq(0)) {
+            return new Decimal(0);
+        }
+
+        const maxBorrowable = this.convertUsdToTokens(cappedCreditUsd, true);
+        return maxBorrowable.isFinite() && maxBorrowable.greaterThan(0)
+            ? maxBorrowable
+            : new Decimal(0);
     };
 
     override async depositAsCollateral(amount: TokenInput, zap: ZapperInstructions = 'none',  receiver: address | null = null) {
-        if(this.cache.userDebt > 0) {
+        const signer = this.requireSigner();
+        const collateralReceiver = receiver ?? signer.address as address;
+        if(
+            collateralReceiver.toLowerCase() === (signer.address as string).toLowerCase() &&
+            this.readFreshUserCache("userDebt", "depositing as collateral") > 0n
+        ) {
             throw new Error("Cannot deposit as collateral when there is outstanding debt");
         }
         return super.depositAsCollateral(amount, zap, receiver);
     }
 
     override async postCollateral(amount: TokenInput) {
-        if(this.cache.userDebt > 0) {
+        if(this.readFreshUserCache("userDebt", "posting collateral") > 0n) {
             throw new Error("Cannot post collateral when there is outstanding debt");
         }
         return super.postCollateral(amount);
@@ -114,6 +152,10 @@ export class BorrowableCToken extends CToken {
     async borrow(amount: TokenInput, receiver: address | null = null) {
         const signer = this.requireSigner();
         receiver ??= signer.address as address;
+        if (this.readFreshUserCache("userCollateral", "borrowing") > 0n) {
+            throw new Error("Cannot borrow from a token that is currently posted as collateral.");
+        }
+
         const assets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
 
         const calldata = this.getCallData("borrow", [ assets, receiver ]);
@@ -131,7 +173,9 @@ export class BorrowableCToken extends CToken {
     async fetchUtilizationRateChange(assets: TokenInput, direction: 'add' | 'remove', inPercentage = true ): Promise<Percentage | bigint> {
         const assets_as_bn = FormatConverter.decimalToBigInt(assets, this.asset.decimals);
         const irm = await this.dynamicIRM();
-        const assets_held = direction == 'add' ? this.cache.liquidity + assets_as_bn : this.cache.liquidity - assets_as_bn;
+        const assets_held = direction == 'add'
+            ? this.cache.liquidity + assets_as_bn
+            : assets_as_bn >= this.cache.liquidity ? 0n : this.cache.liquidity - assets_as_bn;
         const newRate = await irm.utilizationRate(assets_held, this.cache.debt);
 
         return inPercentage ? Decimal(newRate).div(WAD) : newRate;
@@ -148,7 +192,7 @@ export class BorrowableCToken extends CToken {
 
     async fetchBorrowRate() {
         const irm = await this.dynamicIRM();
-        const assetsHeld = this.totalAssets
+        const assetsHeld = await this.contract.assetsHeld();
         const debt = await this.contract.marketOutstandingDebt();
         const borrowRate = (await irm.borrowRate(assetsHeld, debt));
         this.cache.borrowRate = borrowRate;
@@ -157,7 +201,7 @@ export class BorrowableCToken extends CToken {
 
     async fetchPredictedBorrowRate() {
         const irm = await this.dynamicIRM();
-        const assetsHeld = this.totalAssets
+        const assetsHeld = await this.contract.assetsHeld();
         const debt = await this.contract.marketOutstandingDebt();
         const predictedBorrowRate = (await irm.predictedBorrowRate(assetsHeld, debt));
         this.cache.predictedBorrowRate = predictedBorrowRate;
@@ -166,7 +210,7 @@ export class BorrowableCToken extends CToken {
 
     async fetchUtilizationRate() {
         const irm = await this.dynamicIRM();
-        const assetsHeld = this.totalAssets
+        const assetsHeld = await this.contract.assetsHeld();
         const debt = await this.contract.marketOutstandingDebt();
         const utilizationRate = (await irm.utilizationRate(assetsHeld, debt));
         this.cache.utilizationRate = utilizationRate;
@@ -175,7 +219,7 @@ export class BorrowableCToken extends CToken {
 
     async fetchSupplyRate() {
         const irm = await this.dynamicIRM();
-        const assetsHeld = this.totalAssets
+        const assetsHeld = await this.contract.assetsHeld();
         const debt = await this.contract.marketOutstandingDebt();
         const fee = await this.fetchInterestFee();
         const supplyRate = (await irm.supplyRate(assetsHeld, debt, fee));
@@ -184,17 +228,43 @@ export class BorrowableCToken extends CToken {
     }
 
     async fetchLiquidity() {
-        const assetsHeld = this.totalAssets;
-        const debt = await this.contract.marketOutstandingDebt();
-        const liquidity = assetsHeld - debt;
+        const liquidity = await this.contract.assetsHeld();
         this.cache.liquidity = liquidity;
         return liquidity;
     }
 
+    private async checkRepayApproval(assets: bigint) {
+        const asset = this.getAsset(true);
+        const owner = this.getAccountOrThrow();
+        const allowance = await asset.allowance(owner, this.address);
+        if (allowance >= assets) {
+            return;
+        }
+
+        let tokenLabel = asset.symbol ?? asset.address;
+        if(asset.symbol == undefined) {
+            try {
+                tokenLabel = await asset.fetchSymbol();
+            } catch {
+                tokenLabel = asset.address;
+            }
+        }
+
+        throw new Error(`Please approve the ${tokenLabel} token for ${this.symbol} repay`);
+    }
+
     async repay(amount: TokenInput) {
         const assets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
+        const repayAssets = assets === 0n
+            ? await this.fetchDebtBalanceAtTimestamp(this.getBufferedRepayTimestamp(), false)
+            : assets;
+        await this.checkRepayApproval(repayAssets);
         const calldata = this.getCallData("repay", [ assets ]);
         return this.oracleRoute(calldata);
+    }
+
+    private getBufferedRepayTimestamp(): bigint {
+        return BigInt(Math.floor(Date.now() / 1000)) + REPAY_DEBT_BUFFER_TIME;
     }
 
     async fetchInterestFee() {

@@ -1,8 +1,24 @@
 import { Contract } from "ethers";
-import { contractSetup } from "../helpers";
 import abi from '../abis/OptimizerReader.json'
 import { address, curvance_read_provider } from "../types";
-import { setup_config } from "../setup";
+
+const OPTIMIZER_VIEW_ABI = [
+    "function asset() view returns (address)",
+    "function totalAssets() view returns (uint256)",
+    "function exchangeRate() view returns (uint256)",
+    "function fee() view returns (uint256)",
+    "function getApprovedMarkets() view returns (address[])",
+] as const;
+
+const BORROWABLE_CTOKEN_VIEW_ABI = [
+    "function balanceOf(address owner) view returns (uint256)",
+    "function convertToAssets(uint256 shares) view returns (uint256)",
+    "function assetsHeld() view returns (uint256)",
+] as const;
+
+function resolveDefaultReadProvider(): curvance_read_provider | undefined {
+    return (require("../setup") as typeof import("../setup")).setup_config?.readProvider;
+}
 
 export interface OptimizerCTokenData {
     address: address;
@@ -28,15 +44,51 @@ export interface OptimizerUserData {
 
 export interface ReallocationAction {
     cToken: address;
-    assets: bigint;
+    assetsOrBps: bigint;
+}
+
+export interface AllocationBound {
+    cToken: address;
+    minBps: bigint;
+    maxBps: bigint;
 }
 
 export interface IOptimizerReader {
+    getOptimizerAPY(optimizer: address): Promise<bigint>;
     getOptimizerMarketData(optimizers: address[]): Promise<any[]>;
     getOptimizerUserData(optimizers: address[], account: address): Promise<any[]>;
-    optimalDeposit(optimizer: address, assets: bigint): Promise<address>;
-    optimalWithdrawal(optimizer: address, assets: bigint): Promise<address>;
-    optimalRebalance(optimizer: address): Promise<any[]>;
+    optimalRebalance(optimizer: address, slippageBps: bigint): Promise<any>;
+}
+
+function normalizeReallocationAction(action: any): ReallocationAction {
+    return {
+        cToken: action.cToken,
+        assetsOrBps: BigInt(action.assetsOrBps ?? action.assets),
+    };
+}
+
+function normalizeAllocationBound(bound: any): AllocationBound {
+    return {
+        cToken: bound.cToken,
+        minBps: BigInt(bound.minBps),
+        maxBps: BigInt(bound.maxBps),
+    };
+}
+
+function normalizeOptimizerMarketData(opt: any): OptimizerMarketData {
+    return {
+        address: opt._address,
+        asset: opt.asset,
+        totalAssets: BigInt(opt.totalAssets),
+        markets: opt.markets.map((m: any) => ({
+            address: m._address,
+            allocatedAssets: BigInt(m.allocatedAssets),
+            liquidity: BigInt(m.liquidity)
+        })),
+        totalLiquidity: BigInt(opt.totalLiquidity),
+        sharePrice: BigInt(opt.sharePrice),
+        performanceFee: BigInt(opt.performanceFee)
+    };
 }
 
 export class OptimizerReader {
@@ -44,27 +96,76 @@ export class OptimizerReader {
     address: address;
     contract: Contract & IOptimizerReader;
 
-    constructor(address: address, provider: curvance_read_provider = setup_config.readProvider) {
-        this.provider = provider;
+    constructor(address: address, provider?: curvance_read_provider) {
+        const resolvedProvider = provider ?? resolveDefaultReadProvider();
+        if (resolvedProvider == undefined) {
+            throw new Error(
+                `Read provider is not configured for OptimizerReader ${address}. ` +
+                `Pass a provider explicitly or initialize setupChain() first.`
+            );
+        }
+
+        this.provider = resolvedProvider;
         this.address = address;
-        this.contract = contractSetup<IOptimizerReader>(provider, address, abi);
+        this.contract = new Contract(address, abi, resolvedProvider) as Contract & IOptimizerReader;
+    }
+
+    async getOptimizerAPY(optimizer: address): Promise<bigint> {
+        return BigInt(await this.contract.getOptimizerAPY(optimizer));
     }
 
     async getOptimizerMarketData(optimizers: address[]): Promise<OptimizerMarketData[]> {
-        const data = await this.contract.getOptimizerMarketData(optimizers);
-        return data.map((opt: any) => ({
-            address: opt._address,
-            asset: opt.asset,
-            totalAssets: BigInt(opt.totalAssets),
-            markets: opt.markets.map((m: any) => ({
-                address: m._address,
-                allocatedAssets: BigInt(m.allocatedAssets),
-                liquidity: BigInt(m.liquidity)
-            })),
-            totalLiquidity: BigInt(opt.totalLiquidity),
-            sharePrice: BigInt(opt.sharePrice),
-            performanceFee: BigInt(opt.performanceFee)
+        try {
+            const data = await (this.contract as any).getOptimizerMarketData.staticCall(optimizers);
+            return data.map(normalizeOptimizerMarketData);
+        } catch (error: any) {
+            if (!this.shouldFallbackToViewOnlyOptimizerReads(error)) {
+                throw error;
+            }
+
+            return Promise.all(optimizers.map((optimizer) => this.getOptimizerMarketDataViewOnly(optimizer)));
+        }
+    }
+
+    private shouldFallbackToViewOnlyOptimizerReads(error: any): boolean {
+        const message = String(error?.shortMessage ?? error?.reason ?? error?.message ?? error);
+        return /static|state|write|non-view|call exception|execution reverted/i.test(message);
+    }
+
+    private async getOptimizerMarketDataViewOnly(optimizer: address): Promise<OptimizerMarketData> {
+        const opt = new Contract(optimizer, OPTIMIZER_VIEW_ABI, this.provider) as any;
+        const [asset, totalAssets, sharePrice, performanceFee, markets] = await Promise.all([
+            opt.asset(),
+            opt.totalAssets(),
+            opt.exchangeRate(),
+            opt.fee(),
+            opt.getApprovedMarkets(),
+        ]);
+
+        const marketRows = await Promise.all((markets as address[]).map(async (market) => {
+            const cToken = new Contract(market, BORROWABLE_CTOKEN_VIEW_ABI, this.provider) as any;
+            const shareBalance = await cToken.balanceOf(optimizer);
+            const [allocatedAssets, liquidity] = await Promise.all([
+                cToken.convertToAssets(shareBalance),
+                cToken.assetsHeld(),
+            ]);
+
+            return {
+                address: market,
+                allocatedAssets: BigInt(allocatedAssets),
+                liquidity: BigInt(liquidity),
+            };
         }));
+
+        return {
+            address: optimizer,
+            asset: asset as address,
+            totalAssets: BigInt(totalAssets),
+            markets: marketRows,
+            totalLiquidity: marketRows.reduce((sum, market) => sum + market.liquidity, 0n),
+            sharePrice: BigInt(sharePrice),
+            performanceFee: BigInt(performanceFee),
+        };
     }
 
     async getOptimizerUserData(optimizers: address[], account: address): Promise<OptimizerUserData[]> {
@@ -76,19 +177,17 @@ export class OptimizerReader {
         }));
     }
 
-    async optimalDeposit(optimizer: address, assets: bigint): Promise<address> {
-        return await this.contract.optimalDeposit(optimizer, assets);
-    }
+    async optimalRebalance(
+        optimizer: address,
+        slippageBps: bigint = 0n,
+    ): Promise<{ actions: ReallocationAction[]; bounds: AllocationBound[] }> {
+        const data = await this.contract.optimalRebalance(optimizer, slippageBps);
+        const actions = data.actions ?? data[0] ?? [];
+        const bounds = data.bounds ?? data[1] ?? [];
 
-    async optimalWithdrawal(optimizer: address, assets: bigint): Promise<address> {
-        return await this.contract.optimalWithdrawal(optimizer, assets);
-    }
-
-    async optimalRebalance(optimizer: address): Promise<ReallocationAction[]> {
-        const data = await this.contract.optimalRebalance(optimizer);
-        return data.map((action: any) => ({
-            cToken: action.cToken,
-            assets: BigInt(action.assets)
-        }));
+        return {
+            actions: actions.map((action: any) => normalizeReallocationAction(action)),
+            bounds: bounds.map((bound: any) => normalizeAllocationBound(bound)),
+        };
     }
 }

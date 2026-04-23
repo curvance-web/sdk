@@ -3,16 +3,21 @@ import assert from 'node:assert';
 import {
     flatFeePolicy,
     NO_FEE_POLICY,
+    CURVANCE_FEE_BPS,
     CURVANCE_DAO_FEE_RECEIVER,
+    defaultFeePolicyForChain,
+    getMonadMainnetFeePolicy,
     type FeePolicyContext,
     type TokenClass,
 } from '../src/feePolicy';
+import { chain_config } from '../src/chains';
 import { address } from '../src/types';
 import Decimal from 'decimal.js';
 
 // Monad mainnet addresses for tests — these are what `chain_config['monad-mainnet'].wrapped_native`
 // resolves to. Tests use real addresses to exercise the actual chain config lookup.
 const WMON: address = '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A';
+const ARB_WRAPPED_NATIVE: address = '0x980B62Da83eFf3D4576C647993b0c1D7faf17c73';
 const NATIVE: address = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 const USDC: address = '0x754704Bc059F8C67012fEd69BC8A327a5aafb603';
 const AUSD: address = '0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a';
@@ -39,6 +44,21 @@ describe('FeePolicy', () => {
 
         test('feeReceiver is the Curvance DAO address', () => {
             assert.strictEqual(NO_FEE_POLICY.feeReceiver, CURVANCE_DAO_FEE_RECEIVER);
+        });
+    });
+
+    describe('defaultFeePolicyForChain', () => {
+        test('defaults monad-mainnet to the live Curvance swap fee policy', () => {
+            const policy = defaultFeePolicyForChain('monad-mainnet');
+            assert.strictEqual(policy, getMonadMainnetFeePolicy());
+            assert.strictEqual(policy.getFeeBps(baseCtx()), CURVANCE_FEE_BPS);
+            assert.strictEqual(policy.feeReceiver, CURVANCE_DAO_FEE_RECEIVER);
+        });
+
+        test('keeps non-Monad chains on the no-fee default', () => {
+            const policy = defaultFeePolicyForChain('arb-sepolia');
+            assert.strictEqual(policy, NO_FEE_POLICY);
+            assert.strictEqual(policy.getFeeBps(baseCtx()), 0n);
         });
     });
 
@@ -182,6 +202,22 @@ describe('FeePolicy', () => {
             assert.strictEqual(
                 policy.getFeeBps(baseCtx({ inputToken: WMON, outputToken: USDC })),
                 4n,
+            );
+        });
+
+        test('arb-sepolia wrapped native stays aligned with the deployed zapper address', () => {
+            assert.strictEqual(chain_config['arb-sepolia'].wrapped_native, ARB_WRAPPED_NATIVE);
+        });
+
+        test('exempts native → wrapped native on arb-sepolia using chain config', () => {
+            const arbPolicy = flatFeePolicy({
+                bps: 4n,
+                feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+                chain: 'arb-sepolia',
+            });
+            assert.strictEqual(
+                arbPolicy.getFeeBps(baseCtx({ inputToken: NATIVE, outputToken: ARB_WRAPPED_NATIVE })),
+                0n,
             );
         });
     });

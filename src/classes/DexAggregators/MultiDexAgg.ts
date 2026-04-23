@@ -21,6 +21,8 @@ interface QuoteActionResult {
     quote: Quote;
 }
 
+type QuoteValueSelector = (quote: Quote) => bigint;
+
 /**
  * Multi-aggregator wrapper that implements IDexAgg.
  *
@@ -107,13 +109,22 @@ export class MultiDexAgg implements IDexAgg {
     /**
      * Returns the minimum output from the best quote.
      */
-    async quoteMin(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address): Promise<BigInt> {
+    async quoteMin(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address): Promise<bigint> {
         if (this.aggregators.length === 1) {
             return this.primary.quoteMin(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         }
 
-        const best = await this._bestQuote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
-        return best.quote.out;
+        const best = await this._bestQuoteByValue(
+            wallet,
+            tokenIn,
+            tokenOut,
+            amount,
+            slippage,
+            (quote) => quote.min_out,
+            feeBps,
+            feeReceiver,
+        );
+        return best.quote.min_out;
     }
 
     /**
@@ -124,7 +135,16 @@ export class MultiDexAgg implements IDexAgg {
             return this.primary.quote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         }
 
-        const best = await this._bestQuote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
+        const best = await this._bestQuoteByValue(
+            wallet,
+            tokenIn,
+            tokenOut,
+            amount,
+            slippage,
+            (quote) => quote.out,
+            feeBps,
+            feeReceiver,
+        );
         return best.quote;
     }
 
@@ -132,8 +152,15 @@ export class MultiDexAgg implements IDexAgg {
     // Internal: fan-out for quote()
     // -----------------------------------------------------------------------
 
-    private async _bestQuote(
-        wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address
+    private async _bestQuoteByValue(
+        wallet: string,
+        tokenIn: string,
+        tokenOut: string,
+        amount: bigint,
+        slippage: bigint,
+        selectValue: QuoteValueSelector,
+        feeBps?: bigint,
+        feeReceiver?: address,
     ): Promise<QuoteResult> {
         const results = await Promise.allSettled(
             this.aggregators.map(agg =>
@@ -148,7 +175,7 @@ export class MultiDexAgg implements IDexAgg {
             )
         );
 
-        return this._pickBest(results, tokenIn, tokenOut, amount);
+        return this._pickBest(results, tokenIn, tokenOut, amount, selectValue);
     }
 
     // -----------------------------------------------------------------------
@@ -171,7 +198,7 @@ export class MultiDexAgg implements IDexAgg {
             )
         );
 
-        return this._pickBest(results, tokenIn, tokenOut, amount);
+        return this._pickBest(results, tokenIn, tokenOut, amount, (quote) => quote.min_out);
     }
 
     // -----------------------------------------------------------------------
@@ -182,20 +209,31 @@ export class MultiDexAgg implements IDexAgg {
      * Wraps a promise with a timeout.
      */
     private _withTimeout<T>(promise: Promise<T>, agg: IDexAgg): Promise<T> {
-        const timeout = new Promise<never>((_, reject) =>
-            setTimeout(
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(
                 () => reject(new Error(`${agg.constructor.name} timed out after ${this.config.quoteTimeoutMs}ms`)),
                 this.config.quoteTimeoutMs
-            )
-        );
-        return Promise.race([promise, timeout]);
+            );
+        });
+        return Promise.race([promise, timeout]).finally(() => {
+            if (timeoutId != undefined) {
+                clearTimeout(timeoutId);
+            }
+        });
     }
 
     /**
      * Validates a quote response has the required fields.
      */
     private _validateQuote(quote: Quote, agg: IDexAgg): void {
-        if (!quote?.out || !quote?.calldata || !quote?.to) {
+        if (
+            quote == null ||
+            quote.out == undefined ||
+            quote.min_out == undefined ||
+            quote.calldata == undefined ||
+            quote.to == undefined
+        ) {
             throw new Error(`${agg.constructor.name} returned incomplete quote`);
         }
     }
@@ -207,7 +245,8 @@ export class MultiDexAgg implements IDexAgg {
         results: PromiseSettledResult<T>[],
         tokenIn: string,
         tokenOut: string,
-        amount: bigint
+        amount: bigint,
+        selectValue: QuoteValueSelector,
     ): T {
         const quotes: T[] = [];
         const errors: string[] = [];
@@ -234,15 +273,15 @@ export class MultiDexAgg implements IDexAgg {
 
         // Filter outliers if enough data points
         const validQuotes = quotes.length >= 3
-            ? this._filterOutliers(quotes)
+            ? this._filterOutliers(quotes, selectValue)
             : quotes;
 
         const candidates = validQuotes.length > 0 ? validQuotes : quotes;
 
-        // Return highest output
+        // Return highest selected value.
         let best = candidates[0]!;
         for (const candidate of candidates) {
-            if (candidate.quote.out > best.quote.out) {
+            if (selectValue(candidate.quote) > selectValue(best.quote)) {
                 best = candidate;
             }
         }
@@ -253,8 +292,11 @@ export class MultiDexAgg implements IDexAgg {
     /**
      * Filters quotes whose output deviates more than the threshold from the median.
      */
-    private _filterOutliers<T extends { quote: Quote }>(quotes: T[]): T[] {
-        const outputs = quotes.map(q => q.quote.out).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    private _filterOutliers<T extends { quote: Quote }>(
+        quotes: T[],
+        selectValue: QuoteValueSelector,
+    ): T[] {
+        const outputs = quotes.map((quote) => selectValue(quote.quote)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
         const median = outputs[Math.floor(outputs.length / 2)]!;
 
         if (median === 0n) return quotes;
@@ -262,9 +304,10 @@ export class MultiDexAgg implements IDexAgg {
         const threshold = BigInt(this.config.outlierThresholdPercent);
 
         return quotes.filter(q => {
-            const diff = q.quote.out > median
-                ? q.quote.out - median
-                : median - q.quote.out;
+            const value = selectValue(q.quote);
+            const diff = value > median
+                ? value - median
+                : median - value;
             return (diff * 100n / median) <= threshold;
         });
     }

@@ -13,7 +13,7 @@ import { TestFramework } from "./utils/TestFramework";
 
 const TEST_CHAIN = (process.env.TEST_CHAIN ?? "monad-mainnet") as ChainRpcPrefix;
 const TEST_API_URL = process.env.TEST_API_URL ?? "https://api.curvance.com";
-const PREFERRED_MARKET = "earnAUSD | AUSD";
+const PREFERRED_MARKET = "WMON | USDC";
 const DEPOSIT_AMOUNT = Decimal(250);
 const HAS_FORK_ENV = Boolean(process.env.TEST_RPC);
 const describeFork = HAS_FORK_ENV ? describe : describe.skip;
@@ -36,6 +36,18 @@ function findToken(market: Market, tokenAddress: address) {
     const token = market.tokens.find((candidate) => candidate.address === tokenAddress);
     assert.ok(token, `Expected token ${tokenAddress} in market ${market.address}`);
     return token;
+}
+
+async function settleWrite(
+    market: { reloadUserData: (account: address) => Promise<unknown> },
+    account: address,
+    txLike: unknown,
+) {
+    if (txLike && typeof (txLike as { wait?: () => Promise<unknown> }).wait === "function") {
+        await (txLike as { wait: () => Promise<unknown> }).wait();
+    }
+
+    await market.reloadUserData(account);
 }
 
 async function resolveDepositTarget(framework: TestFramework) {
@@ -96,7 +108,7 @@ describeFork("Fork integration", () => {
 
     test("public account-only setup rehydrates signer-created state on the fork", async () => {
         const { market: signerMarket, token: signerToken, depositAmount } = await resolveDepositTarget(framework);
-        const publicBefore = await setupChain(TEST_CHAIN, null, true, TEST_API_URL, {
+        const publicBefore = await setupChain(TEST_CHAIN, null, TEST_API_URL, {
             account: framework.account,
             readProvider: framework.provider,
         });
@@ -107,13 +119,12 @@ describeFork("Fork integration", () => {
         assert.equal(beforeMarket.cache.user.collateral, 0n);
 
         await signerToken.approveUnderlying();
-        await signerToken.depositAsCollateral(depositAmount);
-        await signerMarket.reloadUserData(framework.account);
+        await settleWrite(signerMarket, framework.account, await signerToken.depositAsCollateral(depositAmount));
 
         const signerAssetBalance = signerToken.cache.userAssetBalance;
         assert.ok(signerAssetBalance > 0n, "Expected signer-side cache to reflect the new deposit");
 
-        const publicAfter = await setupChain(TEST_CHAIN, null, true, TEST_API_URL, {
+        const publicAfter = await setupChain(TEST_CHAIN, null, TEST_API_URL, {
             account: framework.account,
             readProvider: framework.provider,
         });
@@ -132,8 +143,7 @@ describeFork("Fork integration", () => {
         const { market, token, depositAmount } = await resolveDepositTarget(framework);
 
         await token.approveUnderlying();
-        await token.depositAsCollateral(depositAmount);
-        await market.reloadUserData(framework.account);
+        await settleWrite(market, framework.account, await token.depositAsCollateral(depositAmount));
 
         const { dynamicMarkets, userMarkets } = await framework.curvance.reader.getMarketStates([market.address], framework.account);
 
@@ -159,8 +169,7 @@ describeFork("Fork integration", () => {
         const { market: targetMarket, token: targetToken, depositAmount } = await resolveDepositTarget(framework);
 
         await targetToken.approveUnderlying();
-        await targetToken.depositAsCollateral(depositAmount);
-        await targetMarket.reloadUserData(framework.account);
+        await settleWrite(targetMarket, framework.account, await targetToken.depositAsCollateral(depositAmount));
 
         const refreshed = await refreshActiveUserMarkets(framework.account, framework.curvance.markets);
 

@@ -18,6 +18,7 @@ import FormatConverter from "./FormatConverter";
 const EXCLUDED_ZAP_SYMBOLS = new Set([
     'eBTC', 'earnAUSD', 'vUSD', 'syzUSD', 'ezETH', 'YZM', 'wsrUSD', 'sAUSD',
 ]);
+const EXECUTION_DEBT_BUFFER_TIME = 100n;
 
 /**
  * Leverage operation buffers — centralized for tuning.
@@ -113,7 +114,7 @@ export const LEVERAGE = {
      *  for that amplification (see leverageDown). Bump when aggregator fees
      *  are enabled to keep dust prevention reliable. */
     DELEVERAGE_OVERHEAD_BPS: 20n,
-    /** BPS buffer on virtualConvertToShares for leverage + collateral cap.
+    /** BPS buffer on expected-share calculations for zap/leverage paths.
      *  Covers exchange rate drift from interest accrual since cache load. */
     SHARES_BUFFER_BPS: 2n,
     /** Per-leverage-unit BPS buffer for `checkSlippage` on vault + native-vault
@@ -136,6 +137,7 @@ export const LEVERAGE = {
 
 export interface AccountSnapshot {
     asset: address;
+    underlying: address;
     decimals: bigint;
     isCollateral: boolean;
     collateralPosted: bigint;
@@ -146,6 +148,41 @@ export interface MulticallAction {
     target: address;
     isPriceUpdate: boolean;
     data: bytes;
+}
+
+type LeverageUpPreviewOperation = 'leverage-up' | 'deposit-and-leverage';
+
+export interface LeverageUpPreview {
+    currentLeverage: Decimal;
+    effectiveCurrentLeverage: Decimal;
+    targetLeverage: Decimal;
+    borrowAmount: Decimal;
+    borrowAssets: bigint;
+    debtIncrease: Decimal;
+    debtIncreaseInAssets: Decimal;
+    newDebt: Decimal;
+    newDebtInAssets: Decimal;
+    collateralIncrease: Decimal;
+    collateralIncreaseInAssets: Decimal;
+    newCollateral: Decimal;
+    newCollateralInAssets: Decimal;
+    feeBps: bigint;
+    feeAssets: Decimal;
+    feeUsd: Decimal;
+}
+
+interface ResolveLeverageUpPreviewParams {
+    operation: LeverageUpPreviewOperation;
+    targetLeverage: Decimal;
+    borrow: BorrowableCToken;
+    depositAssets?: bigint;
+    positionManagerType?: PositionManagerTypes | undefined;
+}
+
+interface TokenApprovalTarget {
+    token: ERC20;
+    spender: address;
+    spenderLabel: string;
 }
 
 export interface ZapToken {
@@ -185,6 +222,7 @@ export interface ICToken {
     marketCollateralPosted(): Promise<bigint>;
     collateralPosted(account: address): Promise<bigint>;
     redeemCollateral(shares: bigint, receiver: address, owner: address): Promise<TransactionResponse>;
+    redeemCollateralFor(shares: bigint, receiver: address, owner: address): Promise<TransactionResponse>;
     postCollateral(shares: bigint): Promise<TransactionResponse>;
     removeCollateral(shares: bigint): Promise<TransactionResponse>;
     symbol(): Promise<string>;
@@ -196,6 +234,36 @@ export interface ICToken {
     isDelegate(user: address, delegate: address): Promise<boolean>;
     setDelegateApproval(delegate: address, approved: boolean): Promise<TransactionResponse>;
     // More functions available
+}
+
+type UserCacheField =
+    | "userAssetBalance"
+    | "userShareBalance"
+    | "userUnderlyingBalance"
+    | "userCollateral"
+    | "userDebt"
+    | "liquidationPrice";
+
+type UserCacheFreshness = Record<UserCacheField, boolean>;
+
+const USER_CACHE_FIELDS: UserCacheField[] = [
+    "userAssetBalance",
+    "userShareBalance",
+    "userUnderlyingBalance",
+    "userCollateral",
+    "userDebt",
+    "liquidationPrice",
+];
+
+function createUserCacheFreshness(value: boolean): UserCacheFreshness {
+    return {
+        userAssetBalance: value,
+        userShareBalance: value,
+        userUnderlyingBalance: value,
+        userCollateral: value,
+        userDebt: value,
+        liquidationPrice: value,
+    };
 }
 
 export class CToken extends Calldata<ICToken> {
@@ -213,6 +281,7 @@ export class CToken extends Calldata<ICToken> {
     nativeApy = Decimal(0);
     incentiveSupplyApy = Decimal(0);
     incentiveBorrowApy = Decimal(0);
+    private userCacheFreshness?: UserCacheFreshness;
     get signer(): curvance_signer | null { return this.market.signer; }
     protected get account(): address | null { return this.market.account; }
 
@@ -225,7 +294,7 @@ export class CToken extends Calldata<ICToken> {
         super();
         this.provider = provider;
         this.address = address;
-        this.contract = contractSetup<ICToken>(provider, address, base_ctoken_abi);
+        this.contract = contractSetup<ICToken>(this.provider, address, base_ctoken_abi);
         this.cache = cache;
         this.market = market;
 
@@ -250,6 +319,39 @@ export class CToken extends Calldata<ICToken> {
         this.zapTypes.push('simple');
     }
 
+    private getUserCacheFreshness(): UserCacheFreshness {
+        if (this.userCacheFreshness == undefined) {
+            this.userCacheFreshness = createUserCacheFreshness(true);
+        }
+
+        return this.userCacheFreshness;
+    }
+
+    markUserCacheFresh(fields: UserCacheField[] = USER_CACHE_FIELDS) {
+        const freshness = this.getUserCacheFreshness();
+        for (const field of fields) {
+            freshness[field] = true;
+        }
+    }
+
+    invalidateUserCache(fields: UserCacheField[] = USER_CACHE_FIELDS) {
+        const freshness = this.getUserCacheFreshness();
+        for (const field of fields) {
+            freshness[field] = false;
+        }
+    }
+
+    protected readFreshUserCache(field: UserCacheField, accessLabel: string): bigint {
+        if (!this.getUserCacheFreshness()[field]) {
+            throw new Error(
+                `Token-level user data is stale for ${this.address} after a summary-only refresh on market ${this.market.address}. ` +
+                `Call market.reloadUserData(account) or Market.reloadUserMarkets(...) before ${accessLabel}.`
+            );
+        }
+
+        return this.cache[field] as bigint;
+    }
+
     private get setup() { return this.market.setup; }
     private get currentChain() { return this.setup.chain; }
     private get currentChainConfig() { return getChainConfig(this.currentChain); }
@@ -259,6 +361,64 @@ export class CToken extends Calldata<ICToken> {
     }
     protected getWriteContract() {
         return contractSetup<ICToken>(this.requireSigner(), this.address, base_ctoken_abi);
+    }
+
+    private getZapType(zap: ZapperInstructions): ZapperTypes {
+        return typeof zap === "object" ? zap.type : zap;
+    }
+
+    private isZapInstruction(zap: ZapperInstructions): boolean {
+        return this.getZapType(zap) !== "none";
+    }
+
+    private async getZapInputDecimals(zap: ZapperInstructions): Promise<bigint> {
+        const zapType = this.getZapType(zap);
+
+        switch (zapType) {
+            case "none":
+                return this.asset.decimals;
+            case "native-vault":
+            case "native-simple":
+                return 18n;
+            case "vault": {
+                const vaultAsset = await this.getVaultAsset(true);
+                return vaultAsset.decimals ?? await vaultAsset.contract.decimals();
+            }
+            case "simple":
+                if (typeof zap !== "object") {
+                    return this.asset.decimals;
+                }
+
+                if (zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
+                    return 18n;
+                }
+
+                const inputErc20 = new ERC20(this.provider, zap.inputToken, undefined, undefined, this.signer);
+                return inputErc20.decimals ?? await inputErc20.contract.decimals();
+        }
+    }
+
+    private async getZapAssetAmount(amount: TokenInput, zap: ZapperInstructions): Promise<bigint> {
+        return FormatConverter.decimalToBigInt(amount, await this.getZapInputDecimals(zap));
+    }
+
+    private async assertVaultLeverageBorrowAssetSupported(
+        borrow: BorrowableCToken,
+        type: "vault" | "native-vault",
+    ) {
+        const expectedAsset = type === "native-vault"
+            ? this.currentChainConfig.wrapped_native
+            : await this.getVaultAsset(false);
+        const actualAsset = borrow.asset.address;
+
+        if (actualAsset.toLowerCase() === expectedAsset.toLowerCase()) {
+            return;
+        }
+
+        throw new Error(
+            `${type} leverage requires borrow asset ${expectedAsset}, received ${actualAsset}. ` +
+            `Use simple leverage for cross-asset borrow routes.`,
+        );
     }
 
     get adapters() { return this.cache.adapters; }
@@ -285,8 +445,9 @@ export class CToken extends Calldata<ICToken> {
     get totalAssets() { return this.cache.totalAssets; }
     get totalSupply() { return this.cache.totalSupply; }
     get liquidationPrice(): USD | null {
-        if (this.cache.liquidationPrice == UINT256_MAX) return null;
-        return toDecimal(this.cache.liquidationPrice, 18n);
+        const liquidationPrice = this.readFreshUserCache("liquidationPrice", "reading token liquidationPrice");
+        if (liquidationPrice == UINT256_MAX) return null;
+        return toDecimal(liquidationPrice, 18n);
     }
     get irmTargetRate() { return Decimal(this.cache.irmTargetRate).div(WAD); }
     get irmMaxRate() { return Decimal(this.cache.irmMaxRate).div(WAD); }
@@ -294,7 +455,23 @@ export class CToken extends Calldata<ICToken> {
     get interestFee() { return Decimal(this.cache.interestFee).div(BPS); }
 
     virtualConvertToAssets(shares: bigint): bigint {
+        if (this.totalSupply === 0n || this.totalAssets === 0n) {
+            return shares;
+        }
+
         return (shares * this.totalAssets) / this.totalSupply;
+    }
+
+    formatAssets(assets: bigint): TokenInput {
+        return FormatConverter.bigIntToDecimal(assets, this.asset.decimals);
+    }
+
+    formatShares(shares: bigint): TokenInput {
+        return FormatConverter.bigIntToDecimal(shares, this.decimals);
+    }
+
+    formatSharesAsAssets(shares: bigint): TokenInput {
+        return this.formatAssets(this.virtualConvertToAssets(shares));
     }
 
     /**
@@ -304,17 +481,35 @@ export class CToken extends Calldata<ICToken> {
      *                  Matches the buffer pattern in async convertToShares().
      */
     virtualConvertToShares(assets: bigint, bufferBps: bigint = 0n): bigint {
-        const shares = (assets * this.totalSupply) / this.totalAssets;
+        const shares = this.totalSupply === 0n || this.totalAssets === 0n
+            ? assets
+            : (assets * this.totalSupply) / this.totalAssets;
         return bufferBps > 0n ? shares * (10000n - bufferBps) / 10000n : shares;
     }
 
-    getLeverage() {
-        if(this.getUserCollateral(true).equals(0)) {
-            return null;
+    private getMarketLeverageState() {
+        const currentCollateralInUsd = this.market.userCollateral;
+        const currentDebt = this.market.userDebt;
+        const equity = currentCollateralInUsd.sub(currentDebt);
+
+        if (currentCollateralInUsd.lte(0) || equity.lte(0)) {
+            return {
+                currentCollateralInUsd,
+                currentDebt,
+                currentLeverage: null as Decimal | null,
+            };
         }
 
-        const leverage = this.getUserCollateral(true).div(this.getUserCollateral(true).sub(this.market.userDebt));
-        return leverage.eq(1) ? null : leverage;
+        const currentLeverage = currentCollateralInUsd.div(equity);
+        return {
+            currentCollateralInUsd,
+            currentDebt,
+            currentLeverage: currentLeverage.eq(1) ? null : currentLeverage,
+        };
+    }
+
+    getLeverage() {
+        return this.getMarketLeverageState().currentLeverage;
     }
 
     /** @returns Remaining Collateral cap */
@@ -322,7 +517,7 @@ export class CToken extends Calldata<ICToken> {
     getRemainingCollateral(formatted: false): bigint;
     getRemainingCollateral(formatted: boolean = true): USD | bigint {
         const diff = this.cache.collateralCap - this.cache.collateral;
-        return formatted ? this.convertTokensToUsd(diff) : diff;
+        return formatted ? this.convertSharesToUsdSync(diff) : diff;
     }
 
     /** @returns Remaining Debt cap */
@@ -414,28 +609,36 @@ export class CToken extends Calldata<ICToken> {
     getUserShareBalance(inUSD: true): USD;
     getUserShareBalance(inUSD: false): TokenInput;
     getUserShareBalance(inUSD: boolean): USD | TokenInput {
-        return inUSD ? this.convertTokensToUsd(this.cache.userShareBalance, false) : FormatConverter.bigIntToDecimal(this.cache.userShareBalance, this.decimals);
+        const userShareBalance = this.readFreshUserCache("userShareBalance", "reading token user share balance");
+        return inUSD ? this.convertTokensToUsd(userShareBalance, false) : this.formatShares(userShareBalance);
+    }
+
+    getUserShareBalanceAssets(): TokenInput {
+        const userShareBalance = this.readFreshUserCache("userShareBalance", "reading token user share balance as assets");
+        return this.formatSharesAsAssets(userShareBalance);
     }
 
     /** @returns User assets in USD (this is the raw balance that the token exchanges too) or token */
     getUserAssetBalance(inUSD: true): USD;
     getUserAssetBalance(inUSD: false): TokenInput;
     getUserAssetBalance(inUSD: boolean): USD | TokenInput {
-        return inUSD ? this.convertTokensToUsd(this.cache.userAssetBalance) : FormatConverter.bigIntToDecimal(this.cache.userAssetBalance, this.asset.decimals);
+        const userAssetBalance = this.readFreshUserCache("userAssetBalance", "reading token user asset balance");
+        return inUSD ? this.convertTokensToUsd(userAssetBalance) : this.formatAssets(userAssetBalance);
     }
 
     /** @returns User underlying assets in USD or token */
     getUserUnderlyingBalance(inUSD: true): USD;
     getUserUnderlyingBalance(inUSD: false): TokenInput;
     getUserUnderlyingBalance(inUSD: boolean): USD | TokenInput {
-        return inUSD ? this.convertTokensToUsd(this.cache.userUnderlyingBalance) : FormatConverter.bigIntToDecimal(this.cache.userUnderlyingBalance, this.decimals);
+        const userUnderlyingBalance = this.readFreshUserCache("userUnderlyingBalance", "reading token user underlying balance");
+        return inUSD ? this.convertTokensToUsd(userUnderlyingBalance) : this.formatAssets(userUnderlyingBalance);
     }
 
     /** @returns Token Collateral Cap in USD or USD WAD */
     getCollateralCap(inUSD: true): USD;
     getCollateralCap(inUSD: false): USD_WAD;
     getCollateralCap(inUSD: boolean): USD | USD_WAD {
-        return inUSD ? this.convertTokensToUsd(this.cache.collateralCap) : this.cache.collateralCap;
+        return inUSD ? this.convertSharesToUsdSync(this.cache.collateralCap) : this.cache.collateralCap;
     }
 
     /** @returns Token Debt Cap in USD or USD WAD */
@@ -449,7 +652,7 @@ export class CToken extends Calldata<ICToken> {
     getCollateral(inUSD: true): USD;
     getCollateral(inUSD: false): USD_WAD;
     getCollateral(inUSD: boolean): USD | USD_WAD {
-        return inUSD ? this.convertTokensToUsd(this.cache.collateral) : this.cache.collateral;
+        return inUSD ? this.convertSharesToUsdSync(this.cache.collateral) : this.cache.collateral;
     }
 
     /** @returns Token Debt in USD or USD WAD */
@@ -463,7 +666,16 @@ export class CToken extends Calldata<ICToken> {
     getUserCollateral(inUSD: true): USD;
     getUserCollateral(inUSD: false): TokenInput;
     getUserCollateral(inUSD: boolean): USD | TokenInput {
-        return inUSD ? this.convertTokensToUsd(this.cache.userCollateral, false) : FormatConverter.bigIntToDecimal(this.cache.userCollateral, this.decimals);
+        const userCollateral = this.getUserCollateralShares();
+        return inUSD ? this.convertTokensToUsd(userCollateral, false) : this.formatShares(userCollateral);
+    }
+
+    getUserCollateralShares(): bigint {
+        return this.readFreshUserCache("userCollateral", "reading token user collateral shares");
+    }
+
+    getUserCollateralAssets(): TokenInput {
+        return this.formatSharesAsAssets(this.getUserCollateralShares());
     }
 
     fetchUserCollateral(): Promise<bigint>;
@@ -472,6 +684,7 @@ export class CToken extends Calldata<ICToken> {
     async fetchUserCollateral(formatted: boolean = false): Promise<bigint | TokenInput> {
         const collateral = await this.contract.collateralPosted(this.getAccountOrThrow());
         this.cache.userCollateral = collateral;
+        this.markUserCacheFresh(["userCollateral"]);
 
         return formatted ? toDecimal(collateral, this.decimals) : collateral;
     }
@@ -480,7 +693,8 @@ export class CToken extends Calldata<ICToken> {
     getUserDebt(inUSD: true): USD;
     getUserDebt(inUSD: false): TokenInput;
     getUserDebt(inUSD: boolean): USD | TokenInput {
-        return inUSD ? this.convertTokensToUsd(this.cache.userDebt) : FormatConverter.bigIntToDecimal(this.cache.userDebt, this.asset.decimals);
+        const userDebt = this.readFreshUserCache("userDebt", "reading token user debt");
+        return inUSD ? this.convertTokensToUsd(userDebt) : FormatConverter.bigIntToDecimal(userDebt, this.asset.decimals);
     }
 
     earnChange(amount: USD, rateType: ChangeRate) {
@@ -516,6 +730,18 @@ export class CToken extends Calldata<ICToken> {
     async getVaultAsset(asErc20: false): Promise<address>;
     async getVaultAsset(asErc20: boolean) {
         return asErc20 ? await this.getUnderlyingVault().fetchAsset(true) : await this.getUnderlyingVault().fetchAsset(false);
+    }
+
+    async getExpectedVaultShares(assets: bigint) {
+        const vault = this.getUnderlyingVault();
+        const vaultSharesRaw = await vault.previewDeposit(assets);
+
+        // Vault/native-vault flows mint vault shares first, then convert those
+        // into Curvance shares. Buffer the inner preview so exchange-rate drift
+        // between quote time and inclusion cannot trip the outer expectedShares
+        // check on otherwise-valid deposits/leverage/zaps.
+        const vaultShares = vaultSharesRaw * (10000n - LEVERAGE.SHARES_BUFFER_BPS) / 10000n;
+        return this.convertToShares(vaultShares);
     }
 
     getAsset(asErc20: true): ERC20;
@@ -603,14 +829,14 @@ export class CToken extends Calldata<ICToken> {
     getTotalCollateral(inUSD: false): bigint;
     getTotalCollateral(inUSD = true): USD | bigint {
         const totalCollateral = this.cache.collateral;
-        return inUSD ? this.convertTokensToUsd(totalCollateral) : totalCollateral;
+        return inUSD ? this.convertSharesToUsdSync(totalCollateral) : totalCollateral;
     }
 
     async fetchTotalCollateral(inUSD: true): Promise<USD>;
     async fetchTotalCollateral(inUSD: false): Promise<bigint>;
     async fetchTotalCollateral(inUSD = true): Promise<USD | bigint> {
         const totalCollateral = await this.contract.marketCollateralPosted();
-        return inUSD ? this.fetchConvertTokensToUsd(totalCollateral) : totalCollateral;
+        return inUSD ? this.fetchConvertSharesToUsd(totalCollateral) : totalCollateral;
     }
 
     getPositionManager(type: PositionManagerTypes) {
@@ -637,36 +863,29 @@ export class CToken extends Calldata<ICToken> {
     }
 
     async isZapAssetApproved(instructions: ZapperInstructions, amount: bigint) {
-        if(instructions == 'none' || typeof instructions != 'object') {
+        if(instructions == 'none') {
             return true;
         }
 
-        if(instructions.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
+        const approvalTarget = await this.resolveZapApprovalTarget(instructions);
+        if(approvalTarget == null) {
             return true;
         }
 
-        const signer = this.requireSigner();
-        const asset =  new ERC20(this.provider, instructions.inputToken, undefined, undefined, signer);
-        const plugin = this.getPluginAddress(instructions.type, 'zapper');
-
-        const allowance = await asset.allowance(signer.address as address, plugin!);
-        return allowance >= amount;
+        return this.hasTokenApproval(approvalTarget, amount);
     }
 
     async approveZapAsset(instructions: ZapperInstructions, amount: TokenInput | null) {
-        if(instructions == 'none' || typeof instructions != 'object') {
+        if(instructions == 'none') {
             throw new Error("Plugin does not have an associated contract");
         }
 
-        if(instructions.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
+        const approvalTarget = await this.resolveZapApprovalTarget(instructions);
+        if(approvalTarget == null) {
             return;
         }
 
-        const signer = this.requireSigner();
-        const asset =  new ERC20(this.provider, instructions.inputToken, undefined, undefined, signer);
-        const plugin = this.getPluginAddress(instructions.type, 'zapper');
-
-        return asset.approve(plugin!, amount);
+        return approvalTarget.token.approve(approvalTarget.spender, amount);
     }
 
     async isPluginApproved(plugin: ZapperTypes | PositionManagerTypes, type: PluginTypes) {
@@ -832,8 +1051,25 @@ export class CToken extends Calldata<ICToken> {
         owner ??= signer.address as address;
 
         const shares = this.convertTokenInputToShares(amount);
-        const calldata = this.getCallData("redeemCollateral", [shares, receiver, owner]);
-        return this.oracleRoute(calldata);
+        const signerAddress = signer.address as address;
+        let method = "redeemCollateral";
+
+        if (owner.toLowerCase() !== signerAddress.toLowerCase()) {
+            const isDelegated = await this.contract.isDelegate(owner, signerAddress);
+            if (isDelegated) {
+                method = "redeemCollateralFor";
+            } else {
+                const allowance = await this.contract.allowance(owner, signerAddress);
+                if (allowance < shares) {
+                    throw new Error(
+                        `Please approve ${this.symbol} shares for ${signerAddress} or delegate ${signerAddress} before redeeming collateral for ${owner}.`
+                    );
+                }
+            }
+        }
+
+        const calldata = this.getCallData(method, [shares, receiver, owner]);
+        return this.oracleRoute(calldata, {}, owner);
     }
 
     async postCollateral(amount: TokenInput) {
@@ -843,6 +1079,9 @@ export class CToken extends Calldata<ICToken> {
         const collateral = await this.fetchUserCollateral();
         const available_shares = balance - collateral;
         const max_shares = available_shares < shares ? available_shares : shares;
+        if(max_shares <= 0n) {
+            throw new Error("No cToken shares available to post as collateral.");
+        }
 
         const calldata = this.getCallData("postCollateral", [max_shares]);
         const tx = await this.oracleRoute(calldata);
@@ -898,63 +1137,77 @@ export class CToken extends Calldata<ICToken> {
         return asset.balanceOf(signer.address as address, false);
     }
 
-    // TODO: Hack to remove
     async ensureUnderlyingAmount(amount: TokenInput, zap: ZapperInstructions) : Promise<TokenInput> {
         const balance = await this.getZapBalance(zap);
-        const isZapping = typeof zap === 'object' && zap.type !== 'none';
-
-        // Use the zap input token's decimals when zapping, otherwise the deposit token's decimals
-        let decimals = this.asset.decimals;
-        if (isZapping && zap.inputToken) {
-            if (zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
-                decimals = 18n;
-            } else {
-                const inputErc20 = new ERC20(this.provider, zap.inputToken as address, undefined, undefined, this.signer);
-                decimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
-            }
-        }
-
+        const decimals = await this.getZapInputDecimals(zap);
         const assets = FormatConverter.decimalToBigInt(amount, decimals);
 
         if(assets > balance) {
-            console.warn('[WARNING] Detected higher deposit amount then underlying balance, changing to the underlying balance. Diff: ', {
-                balance: balance,
-                formatted: FormatConverter.bigIntToDecimal(balance, decimals),
-                attempt: {
-                    raw: assets,
-                    formatted: amount
-                },
-            });
-
-            return FormatConverter.bigIntToDecimal(balance, decimals);
+            const formattedBalance = FormatConverter.bigIntToDecimal(balance, decimals);
+            throw new Error(
+                `Insufficient balance: requested ${amount.toString()}, available ${formattedBalance.toString()}.`,
+            );
         }
 
         return amount;
     }
 
-    async removeCollateral(amount: TokenInput, removeAll: boolean = false) {
-        const current_shares = await this.fetchUserCollateral();
-        let max_shares: bigint;
+    private getExecutionDebtBufferTime(): bigint {
+        return this.market.userDebt.greaterThan(0) ? EXECUTION_DEBT_BUFFER_TIME : 0n;
+    }
 
-        if (removeAll) {
-            max_shares = current_shares;
-        } else {
-            const shares = this.convertTokenInputToShares(amount);
-            max_shares = current_shares < shares ? current_shares : shares;
-            // If within 0.1% of full collateral, remove everything to avoid dust
-            const threshold = current_shares / 1000n || 10n;
-            if (current_shares - max_shares <= threshold) {
-                max_shares = current_shares;
-            }
+    private async resolveCollateralRemovalShares(amount: TokenInput): Promise<bigint> {
+        const max_removable_shares = await this.maxRemovableCollateral(true, this.getExecutionDebtBufferTime());
+        const requested_shares = this.convertTokenInputToShares(amount);
+        let shares =
+            max_removable_shares < requested_shares ? max_removable_shares : requested_shares;
+
+        // If within 0.1% of the safe removable collateral, remove it all to avoid dust.
+        const threshold = max_removable_shares / 1000n || 10n;
+        if (max_removable_shares - shares <= threshold) {
+            shares = max_removable_shares;
         }
 
-        const calldata = this.getCallData("removeCollateral", [max_shares]);
+        return shares;
+    }
+
+    private async executeCollateralRemoval(shares: bigint) {
+        if (shares === 0n) {
+            throw new Error("No removable collateral available.");
+        }
+
+        const calldata = this.getCallData("removeCollateral", [shares]);
         const tx = await this.oracleRoute(calldata);
 
         // Reload collateral state after execution
         await this.fetchUserCollateral();
 
         return tx;
+    }
+
+    async maxRemovableCollateral(): Promise<TokenInput>;
+    async maxRemovableCollateral(in_shares: true): Promise<bigint>;
+    async maxRemovableCollateral(in_shares: false): Promise<TokenInput>;
+    async maxRemovableCollateral(in_shares: true, bufferTime: bigint): Promise<bigint>;
+    async maxRemovableCollateral(in_shares: false, bufferTime: bigint): Promise<TokenInput>;
+    async maxRemovableCollateral(in_shares: boolean = false, bufferTime: bigint = 0n): Promise<TokenInput | bigint> {
+        if (in_shares) {
+            const breakdown = await this.maxRedemption(true, bufferTime, true);
+            return breakdown.max_collateral;
+        }
+
+        const breakdown = await this.maxRedemption(false, bufferTime, true);
+        return breakdown.max_collateral;
+    }
+
+    async removeCollateralExact(amount: TokenInput) {
+        const shares = await this.resolveCollateralRemovalShares(amount);
+        return this.executeCollateralRemoval(shares);
+    }
+
+    async removeMaxCollateral() {
+        const shares = await this.maxRemovableCollateral(true, this.getExecutionDebtBufferTime());
+        return this.executeCollateralRemoval(shares);
     }
 
     convertTokenInputToShares(amount: TokenInput) {
@@ -988,7 +1241,7 @@ export class CToken extends Calldata<ICToken> {
         return this.contract.convertToAssets(shares);
     }
 
-    async convertToShares(assets: bigint, bufferBps: bigint = 2n) {
+    async convertToShares(assets: bigint, bufferBps: bigint = LEVERAGE.SHARES_BUFFER_BPS) {
         const shares = await this.contract.convertToShares(assets);
         return bufferBps > 0n ? shares * (10000n - bufferBps) / 10000n : shares;
     }
@@ -1048,7 +1301,7 @@ export class CToken extends Calldata<ICToken> {
                 ),
                 type: 'native-vault'
             });
-            tokens_exclude.push(EMPTY_ADDRESS, NATIVE_ADDRESS);
+            tokens_exclude.push(EMPTY_ADDRESS.toLowerCase(), NATIVE_ADDRESS.toLowerCase());
         }
 
         if(this.zapTypes.includes('native-simple')) {
@@ -1064,7 +1317,7 @@ export class CToken extends Calldata<ICToken> {
             });
 
             if(!this.zapTypes.includes('native-vault')) {
-                tokens_exclude.push(EMPTY_ADDRESS, NATIVE_ADDRESS);
+                tokens_exclude.push(EMPTY_ADDRESS.toLowerCase(), NATIVE_ADDRESS.toLowerCase());
             }
         }
 
@@ -1077,7 +1330,7 @@ export class CToken extends Calldata<ICToken> {
             tokens_exclude.push(vault_asset.address.toLocaleLowerCase());
         }
 
-        if(this.zapTypes.includes('simple')) {
+        if(this.zapTypes.includes('simple') && this.currentChainConfig.dexAgg.router !== EMPTY_ADDRESS) {
             let dexAggSearch = await this.currentChainConfig.dexAgg.getAvailableTokens(this.provider, search, this.account);
             tokens = tokens.concat(dexAggSearch.filter(token => !tokens_exclude.includes(token.interface.address.toLocaleLowerCase())));
 
@@ -1143,6 +1396,7 @@ export class CToken extends Calldata<ICToken> {
         this.cache.assetPrice = snapshot.collateralAssetPrice;
         this.cache.sharePrice = snapshot.sharePrice;
         borrow.cache.assetPrice = snapshot.debtAssetPrice;
+        this.market.cache.user.collateral = snapshot.collateralUsd;
         this.market.cache.user.debt = snapshot.debtUsd;
 
         return snapshot;
@@ -1175,53 +1429,185 @@ export class CToken extends Calldata<ICToken> {
         return slippage + LEVERAGE.LEVERAGE_UP_BUFFER_BPS;
     }
 
-    previewLeverageUp(newLeverage: Decimal, borrow: BorrowableCToken, depositAmount?: bigint) {
-        const currentLeverage = this.getLeverage() ?? Decimal(0);
-        if(newLeverage.lte(currentLeverage)) {
+    private assertSimpleLeverageSwapAssetsDiffer(borrow: BorrowableCToken) {
+        if (borrow.asset.address.toLowerCase() === this.asset.address.toLowerCase()) {
+            throw new Error("Simple leverage requires distinct collateral and borrow assets.");
+        }
+    }
+
+    private async assertLeverageBorrowCapacity(borrow: BorrowableCToken, borrowAssets: bigint) {
+        if (borrowAssets === 0n) {
+            return;
+        }
+
+        const [assetsHeld, outstandingDebt] = await Promise.all([
+            borrow.fetchLiquidity(),
+            borrow.marketOutstandingDebt(),
+        ]);
+        const remainingDebtCap = borrow.cache.debtCap > outstandingDebt
+            ? borrow.cache.debtCap - outstandingDebt
+            : 0n;
+        const capacity = assetsHeld < remainingDebtCap ? assetsHeld : remainingDebtCap;
+        if (borrowAssets > capacity) {
+            throw new Error("Selected borrow token does not have enough remaining debt capacity or liquidity for this leverage operation.");
+        }
+    }
+
+    private assertSelectedBorrowDebtCanDeleverage(
+        borrow: BorrowableCToken,
+        selectedDebtAssets: bigint,
+        requiredDebtReductionUsd: USD,
+    ) {
+        if (requiredDebtReductionUsd.lte(0)) {
+            return;
+        }
+
+        const price = borrow.getPrice(true);
+        if (!price.isFinite() || price.lte(0)) {
+            throw new Error("Selected borrow token has an invalid price for deleverage sizing.");
+        }
+
+        const requiredDebtAssets = FormatConverter.decimalToBigInt(
+            requiredDebtReductionUsd.div(price),
+            borrow.asset.decimals,
+        );
+        if (requiredDebtAssets > selectedDebtAssets) {
+            throw new Error("Selected borrow token debt is too small for the requested deleverage target.");
+        }
+    }
+
+    private computePostDepositNaturalLeverage(
+        currentCollateralInUsd: Decimal,
+        currentDebtInUsd: Decimal,
+        depositInUsd: Decimal,
+    ): Decimal {
+        if (currentDebtInUsd.lte(0)) return Decimal(1);
+
+        const collateralAfterDeposit = currentCollateralInUsd.add(depositInUsd);
+        const equityAfterDeposit = collateralAfterDeposit.sub(currentDebtInUsd);
+        if (equityAfterDeposit.lte(0)) return Decimal(1);
+
+        return collateralAfterDeposit.div(equityAfterDeposit);
+    }
+
+    private resolveLeverageUpPreview({
+        operation,
+        targetLeverage,
+        borrow,
+        depositAssets = 0n,
+        positionManagerType,
+    }: ResolveLeverageUpPreviewParams): LeverageUpPreview {
+        const leverageState = this.getMarketLeverageState();
+        const currentLeverage = leverageState.currentLeverage ?? Decimal(1);
+        const currentCollateralInUsd = leverageState.currentCollateralInUsd;
+        const depositInAssets = FormatConverter.bigIntToDecimal(depositAssets, this.asset.decimals);
+        const depositInUsd = depositAssets > 0n
+            ? this.convertTokensToUsd(depositAssets, true)
+            : Decimal(0);
+        const currentDebt = leverageState.currentDebt;
+        const effectiveCurrentLeverage = depositAssets > 0n
+            ? this.computePostDepositNaturalLeverage(currentCollateralInUsd, currentDebt, depositInUsd)
+            : currentLeverage;
+        const cappedTargetLeverage = targetLeverage.gt(this.maxLeverage)
+            ? this.maxLeverage
+            : targetLeverage;
+        const resolvedTargetLeverage = operation === 'deposit-and-leverage'
+            ? Decimal.max(cappedTargetLeverage, effectiveCurrentLeverage)
+            : cappedTargetLeverage;
+
+        if (operation === 'leverage-up' && resolvedTargetLeverage.lte(effectiveCurrentLeverage)) {
             throw new Error("New leverage must be more than current leverage");
         }
 
-        if(newLeverage.gt(this.maxLeverage)) {
-            newLeverage = this.maxLeverage;
+        const collateralAfterDepositInUsd = currentCollateralInUsd.add(depositInUsd);
+        const notional = collateralAfterDepositInUsd.sub(currentDebt);
+        if (notional.lte(0)) {
+            throw new Error("Position has no positive equity to leverage.");
         }
 
-        const collateralAvail = this.cache.userCollateral + (depositAmount ? depositAmount : BigInt(0));
-        const collateralInUsd = this.convertTokensToUsd(collateralAvail, false);
-        const currentDebt     = this.market.userDebt;
-        const notional        = collateralInUsd.sub(currentDebt);
-        const leverageFactor  = newLeverage.sub(1);
-        const borrowPrice     = borrow.getPrice(true);
-
-        const rawDebtInUsd    = notional.mul(newLeverage).sub(notional);
-        const borrowAmount    = rawDebtInUsd.sub(currentDebt).div(borrowPrice);
-
-        // Fee preview: queried from the configured fee policy.
-        const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
-        const feeBps = this.setup.feePolicy.getFeeBps({
-            operation: 'leverage-up',
-            inputToken: borrow.asset.address,
-            outputToken: this.asset.address,
-            inputAmount: borrowAssets,
-            currentLeverage,
-            targetLeverage: newLeverage,
-        });
+        const borrowPrice = borrow.getPrice(true);
+        const rawDebtInUsd = notional.mul(resolvedTargetLeverage).sub(notional);
+        const debtIncrease = Decimal.max(rawDebtInUsd.sub(currentDebt), Decimal(0));
+        const borrowAmount = borrowPrice.gt(0)
+            ? debtIncrease.div(borrowPrice)
+            : Decimal(0);
+        const borrowAssets = debtIncrease.gt(0)
+            ? FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals)
+            : 0n;
+        const feePolicyCurrentLeverage = operation === 'deposit-and-leverage'
+            ? effectiveCurrentLeverage
+            : currentLeverage;
+        const hasSwapFee = positionManagerType !== 'vault' && positionManagerType !== 'native-vault';
+        const feeBps = borrowAssets > 0n && hasSwapFee
+            ? this.setup.feePolicy.getFeeBps({
+                operation,
+                inputToken: borrow.asset.address,
+                outputToken: this.asset.address,
+                inputAmount: borrowAssets,
+                currentLeverage: feePolicyCurrentLeverage,
+                targetLeverage: resolvedTargetLeverage,
+            })
+            : 0n;
         const feeAssets = borrowAmount.mul(Decimal(Number(feeBps))).div(Decimal(10000));
         const feeUsd = feeAssets.mul(borrowPrice);
-
-        // Subtract fee from displayed collateral — the fee reduces swap
-        // output, so the user receives less collateral than rawDebtInUsd.
-        const newCollateralInUsd = notional.add(rawDebtInUsd).sub(feeUsd);
+        const collateralIncreaseFromBorrow = Decimal.max(debtIncrease.sub(feeUsd), Decimal(0));
+        const collateralIncrease = depositInUsd.add(collateralIncreaseFromBorrow);
+        const collateralIncreaseInAssets = depositInAssets.add(
+            this.convertUsdToTokens(collateralIncreaseFromBorrow, true),
+        );
+        const newCollateralInUsd = currentCollateralInUsd.add(collateralIncrease);
 
         return {
+            currentLeverage,
+            effectiveCurrentLeverage,
+            targetLeverage: resolvedTargetLeverage,
             borrowAmount,
+            borrowAssets,
+            debtIncrease,
+            debtIncreaseInAssets: borrowAmount,
             newDebt: rawDebtInUsd,
             newDebtInAssets: borrow.convertUsdToTokens(rawDebtInUsd, true),
+            collateralIncrease,
+            collateralIncreaseInAssets,
             newCollateral: newCollateralInUsd,
             newCollateralInAssets: this.convertUsdToTokens(newCollateralInUsd, true),
             feeBps,
             feeAssets,
             feeUsd,
         };
+    }
+
+    previewDepositAndLeverage(
+        newLeverage: Decimal,
+        borrow: BorrowableCToken,
+        depositAmount: bigint,
+        positionManagerType?: PositionManagerTypes,
+    ) {
+        return this.resolveLeverageUpPreview({
+            operation: 'deposit-and-leverage',
+            targetLeverage: newLeverage,
+            borrow,
+            depositAssets: depositAmount,
+            positionManagerType,
+        });
+    }
+
+    previewLeverageUp(
+        newLeverage: Decimal,
+        borrow: BorrowableCToken,
+        depositAmount?: bigint,
+        positionManagerType?: PositionManagerTypes,
+    ) {
+        if ((depositAmount ?? 0n) > 0n) {
+            return this.previewDepositAndLeverage(newLeverage, borrow, depositAmount!, positionManagerType);
+        }
+
+        return this.resolveLeverageUpPreview({
+            operation: 'leverage-up',
+            targetLeverage: newLeverage,
+            borrow,
+            positionManagerType,
+        });
     }
 
     previewLeverageDown(newLeverage: Decimal, currentLeverage: Decimal, borrow?: BorrowableCToken) {
@@ -1234,10 +1620,13 @@ export class CToken extends Calldata<ICToken> {
         }
 
 
-        const collateralAvail = this.cache.userCollateral;
-        const collateralInUsd = this.convertTokensToUsd(collateralAvail, false);
-        const currentDebt = this.market.userDebt;
+        const leverageState = this.getMarketLeverageState();
+        const collateralInUsd = leverageState.currentCollateralInUsd;
+        const currentDebt = leverageState.currentDebt;
         const equity = collateralInUsd.sub(currentDebt);
+        if (equity.lte(0)) {
+            throw new Error("Position has no positive equity to deleverage.");
+        }
         const targetCollateralUsd = equity.mul(newLeverage);
         const newDebtUsd = targetCollateralUsd.sub(equity);
 
@@ -1288,24 +1677,34 @@ export class CToken extends Calldata<ICToken> {
     ): Promise<any> {
         try {
             this.requireSigner();
-            const slippage = this._leverageUpSlippage(FormatConverter.percentageToBps(slippage_), newLeverage);
             const manager = this.getPositionManager(type);
+            if (type === 'vault' || type === 'native-vault') {
+                await this.assertVaultLeverageBorrowAssetSupported(borrow, type);
+            } else if (type === 'simple') {
+                this.assertSimpleLeverageSwapAssetsDiffer(borrow);
+            }
 
             let calldata: bytes;
             await this._getLeverageSnapshot(borrow);
-            const { borrowAmount } = this.previewLeverageUp(newLeverage, borrow);
+            const preview = this.previewLeverageUp(newLeverage, borrow, undefined, type);
+            const slippage = this._leverageUpSlippage(
+                FormatConverter.percentageToBps(slippage_),
+                preview.targetLeverage,
+            );
+            const { borrowAmount, borrowAssets, feeBps, targetLeverage } = preview;
+            if (borrowAssets === 0n) {
+                if (simulate) {
+                    return {
+                        success: false,
+                        error: "Target leverage must exceed the current leverage enough to borrow more.",
+                    };
+                }
+                throw new Error("Target leverage must exceed the current leverage enough to borrow more.");
+            }
+            await this.assertLeverageBorrowCapacity(borrow, borrowAssets);
 
             switch(type) {
                 case 'simple': {
-                    const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
-                    const feeBps = this.setup.feePolicy.getFeeBps({
-                        operation: 'leverage-up',
-                        inputToken: borrow.asset.address,
-                        outputToken: this.asset.address,
-                        inputAmount: borrowAssets,
-                        currentLeverage: this.getLeverage() ?? Decimal(1),
-                        targetLeverage: newLeverage,
-                    });
                     const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
 
                     const { action, quote } = await this.currentChainConfig.dexAgg.quoteAction(
@@ -1329,14 +1728,14 @@ export class CToken extends Calldata<ICToken> {
                     // See `amplifyContractSlippage` in helpers.ts for rationale.
                     const contractSlippage = amplifyContractSlippage(
                         slippage,
-                        newLeverage.sub(1),
+                        targetLeverage.sub(1),
                         feeBps,
                     );
 
                     calldata = manager.getLeverageCalldata(
                         {
                             borrowableCToken: borrow.address,
-                            borrowAssets    : FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
+                            borrowAssets    : borrowAssets,
                             cToken          : this.address,
                             expectedShares  : this.virtualConvertToShares(BigInt(quote.min_out), LEVERAGE.SHARES_BUFFER_BPS),
                             swapAction      : action,
@@ -1355,14 +1754,14 @@ export class CToken extends Calldata<ICToken> {
                     // `checkSlippage` reads. See LEVERAGE_UP_VAULT_DRIFT_BPS.
                     const contractSlippage = amplifyContractSlippage(
                         slippage,
-                        newLeverage.sub(1),
+                        targetLeverage.sub(1),
                         LEVERAGE.LEVERAGE_UP_VAULT_DRIFT_BPS,
                     );
 
                     calldata = manager.getLeverageCalldata(
                         {
                             borrowableCToken: borrow.address,
-                            borrowAssets    : FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
+                            borrowAssets    : borrowAssets,
                             cToken          : this.address,
                             expectedShares  : await PositionManager.getVaultExpectedShares(
                                 this,
@@ -1383,7 +1782,6 @@ export class CToken extends Calldata<ICToken> {
 
             if (simulate) return this.simulateOracleRoute(calldata, { to: manager.address });
 
-            await this._checkPositionManagerApproval(manager);
             return this.oracleRoute(calldata, { to: manager.address });
         } catch (error: any) {
             if (simulate) return { success: false, error: error?.reason || error?.message || String(error) };
@@ -1395,7 +1793,7 @@ export class CToken extends Calldata<ICToken> {
         borrowToken: BorrowableCToken,
         currentLeverage: Decimal,
         newLeverage: Decimal,
-        type: PositionManagerTypes,
+        type: 'simple',
         slippage_: Percentage = Decimal(0.05),
         simulate: boolean = false
     ): Promise<any> {
@@ -1410,11 +1808,18 @@ export class CToken extends Calldata<ICToken> {
             const config = this.currentChainConfig;
             const slippage = toBps(slippage_);
             const manager = this.getPositionManager(type);
+            if (type === 'simple') {
+                this.assertSimpleLeverageSwapAssetsDiffer(borrowToken);
+            }
             let calldata: bytes;
 
             const snapshot = await this._getLeverageSnapshot(borrowToken);
-            const { collateralAssetReduction } = this.previewLeverageDown(newLeverage, currentLeverage);
+            const preview = this.previewLeverageDown(newLeverage, currentLeverage);
+            const { collateralAssetReduction } = preview;
             const isFullDeleverage = newLeverage.equals(1);
+            const maxTokenCollateral = this.virtualConvertToAssets(
+                this.readFreshUserCache("userCollateral", "executing leverage down")
+            );
 
             switch(type) {
                 case 'simple': {
@@ -1464,17 +1869,36 @@ export class CToken extends Calldata<ICToken> {
                         const overheadBps = LEVERAGE.DELEVERAGE_OVERHEAD_BPS + feeBps;
                         swapCollateral = debtInCollateral * (10000n + overheadBps) / 10000n;
 
-                        const maxCollateral = this.virtualConvertToAssets(this.cache.userCollateral);
-                        if (swapCollateral > maxCollateral) {
-                            swapCollateral = maxCollateral;
+                        if (swapCollateral > maxTokenCollateral) {
+                            const error = "Selected collateral token does not have enough posted collateral to fully deleverage.";
+                            if (simulate) {
+                                return { success: false, error };
+                            }
+                            throw new Error(error);
                         }
-                    } else if (feeBps > 0n) {
-                        // Partial deleverage: inflate swap size to compensate
-                        // for fee deduction on input. KyberSwap deducts feeBps
-                        // from input before swapping, so without compensation
-                        // the swap underdelivers and actual leverage is slightly
-                        // higher than target.
-                        swapCollateral = swapCollateral * 10000n / (10000n - feeBps);
+                    } else {
+                        this.assertSelectedBorrowDebtCanDeleverage(
+                            borrowToken,
+                            snapshot.debtTokenBalance,
+                            Decimal.max(this.market.userDebt.sub(preview.newDebt), Decimal(0)),
+                        );
+
+                        if (feeBps > 0n) {
+                            // Partial deleverage: inflate swap size to compensate
+                            // for fee deduction on input. KyberSwap deducts feeBps
+                            // from input before swapping, so without compensation
+                            // the swap underdelivers and actual leverage is slightly
+                            // higher than target.
+                            swapCollateral = swapCollateral * 10000n / (10000n - feeBps);
+                        }
+                    }
+
+                    if (!isFullDeleverage && swapCollateral > maxTokenCollateral) {
+                        const error = "Selected collateral token does not have enough posted collateral to reach the requested leverage target.";
+                        if (simulate) {
+                            return { success: false, error };
+                        }
+                        throw new Error(error);
                     }
 
                     const { action, quote } = await config.dexAgg.quoteAction(
@@ -1535,7 +1959,6 @@ export class CToken extends Calldata<ICToken> {
 
             if (simulate) return this.simulateOracleRoute(calldata, { to: manager.address });
 
-            await this._checkPositionManagerApproval(manager);
             return this.oracleRoute(calldata, { to: manager.address });
         } catch (error: any) {
             if (simulate) return { success: false, error: error?.reason || error?.message || String(error) };
@@ -1558,26 +1981,35 @@ export class CToken extends Calldata<ICToken> {
             }
 
             depositAmount = await this.ensureUnderlyingAmount(depositAmount, 'none');
-            const slippage = this._leverageUpSlippage(toBps(slippage_), multiplier);
             const manager = this.getPositionManager(type);
+            if (type === 'vault' || type === 'native-vault') {
+                await this.assertVaultLeverageBorrowAssetSupported(borrow, type);
+            } else if (type === 'simple') {
+                this.assertSimpleLeverageSwapAssetsDiffer(borrow);
+            }
 
             let calldata: bytes;
 
             const depositAssets = FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals);
+            await this._checkTokenApproval(this.getPositionManagerDepositApprovalTarget(manager), depositAssets);
             await this._getLeverageSnapshot(borrow);
-            const { borrowAmount } = this.previewLeverageUp(multiplier, borrow, depositAssets);
+            const preview = this.previewDepositAndLeverage(multiplier, borrow, depositAssets, type);
+            if (preview.borrowAssets === 0n) {
+                if (simulate) {
+                    return {
+                        success: false,
+                        error: "Target leverage must exceed the post-deposit leverage to borrow more.",
+                    };
+                }
+                throw new Error("Target leverage must exceed the post-deposit leverage to borrow more.");
+            }
+
+            const slippage = this._leverageUpSlippage(toBps(slippage_), preview.targetLeverage);
+            const { borrowAmount, borrowAssets, feeBps, targetLeverage } = preview;
+            await this.assertLeverageBorrowCapacity(borrow, borrowAssets);
 
             switch(type) {
                 case 'simple': {
-                    const borrowAssets = FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals);
-                    const feeBps = this.setup.feePolicy.getFeeBps({
-                        operation: 'deposit-and-leverage',
-                        inputToken: borrow.asset.address,
-                        outputToken: this.asset.address,
-                        inputAmount: borrowAssets,
-                        currentLeverage: this.getLeverage() ?? Decimal(1),
-                        targetLeverage: multiplier,
-                    });
                     const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
 
                     const { action, quote } = await this.currentChainConfig.dexAgg.quoteAction(
@@ -1597,7 +2029,7 @@ export class CToken extends Calldata<ICToken> {
                     // `amplifyContractSlippage` in helpers.ts.
                     const contractSlippage = amplifyContractSlippage(
                         slippage,
-                        multiplier.sub(1),
+                        targetLeverage.sub(1),
                         feeBps,
                     );
 
@@ -1624,7 +2056,7 @@ export class CToken extends Calldata<ICToken> {
                     // leverageDelta = multiplier - 1).
                     const contractSlippage = amplifyContractSlippage(
                         slippage,
-                        multiplier.sub(1),
+                        targetLeverage.sub(1),
                         LEVERAGE.LEVERAGE_UP_VAULT_DRIFT_BPS,
                     );
 
@@ -1632,7 +2064,7 @@ export class CToken extends Calldata<ICToken> {
                         FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals),
                         {
                             borrowableCToken: borrow.address,
-                            borrowAssets: FormatConverter.decimalToBigInt(borrowAmount, borrow.asset.decimals),
+                            borrowAssets: borrowAssets,
                             cToken: this.address,
                             expectedShares: await PositionManager.getVaultExpectedShares(
                                 this,
@@ -1653,7 +2085,6 @@ export class CToken extends Calldata<ICToken> {
 
             if (simulate) return this.simulateOracleRoute(calldata, { to: manager.address });
 
-            await this._checkPositionManagerApproval(manager);
             return this.oracleRoute(calldata, { to: manager.address });
         } catch (error: any) {
             if (simulate) return { success: false, error: error?.reason || error?.message || String(error) };
@@ -1672,20 +2103,11 @@ export class CToken extends Calldata<ICToken> {
             const signer = this.requireSigner();
             receiver ??= signer.address as address;
 
-            const isZapping = typeof zap === 'object' && zap.type !== 'none';
             const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
-            let zapAssets = depositAssets;
-            if (isZapping && (zap as any).inputToken) {
-                const isNative = (zap as any).inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
-                const zapDecimals = isNative ? 18n : (() => {
-                    const inputErc20 = new ERC20(this.provider, (zap as any).inputToken as address, undefined, undefined, this.signer);
-                    return inputErc20.decimals ?? inputErc20.contract.decimals();
-                })();
-                zapAssets = FormatConverter.decimalToBigInt(amount, await zapDecimals);
-            }
+            const zapAssets = await this.getZapAssetAmount(amount, zap);
 
             const default_calldata = this.getCallData("deposit", [depositAssets, receiver]);
-            const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, false, default_calldata);
+            const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, false, default_calldata, receiver);
 
             return this.simulateOracleRoute(calldata, calldata_overrides);
         } catch (error: any) {
@@ -1703,20 +2125,14 @@ export class CToken extends Calldata<ICToken> {
             const signer = this.requireSigner();
             receiver ??= signer.address as address;
 
-            const isZapping = typeof zap === 'object' && zap.type !== 'none';
             const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
-            let zapAssets = depositAssets;
-            if (isZapping && (zap as any).inputToken) {
-                const isNative = (zap as any).inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
-                const zapDecimals = isNative ? 18n : (() => {
-                    const inputErc20 = new ERC20(this.provider, (zap as any).inputToken as address, undefined, undefined, this.signer);
-                    return inputErc20.decimals ?? inputErc20.contract.decimals();
-                })();
-                zapAssets = FormatConverter.decimalToBigInt(amount, await zapDecimals);
-            }
+            const zapAssets = await this.getZapAssetAmount(amount, zap);
 
-            const default_calldata = this.getCallData("depositAsCollateral", [depositAssets, receiver]);
-            const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, true, default_calldata);
+            const collateralMethod = receiver.toLowerCase() === signer.address.toLowerCase()
+                ? "depositAsCollateral"
+                : "depositAsCollateralFor";
+            const default_calldata = this.getCallData(collateralMethod, [depositAssets, receiver]);
+            const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, true, default_calldata, receiver);
 
             return this.simulateOracleRoute(calldata, calldata_overrides);
         } catch (error: any) {
@@ -1724,7 +2140,7 @@ export class CToken extends Calldata<ICToken> {
         }
     }
 
-    async zap(assets: bigint, zap: ZapperInstructions, collateralize = false, default_calldata : bytes) {
+    async zap(assets: bigint, zap: ZapperInstructions, collateralize = false, default_calldata : bytes, receiver: address = this.requireSigner().address as address) {
         let calldata: bytes;
         let calldata_overrides = {};
         let slippage: bigint = 0n;
@@ -1732,7 +2148,7 @@ export class CToken extends Calldata<ICToken> {
         let type_of_zap: ZapperTypes;
 
         if(typeof zap == 'object') {
-            slippage = BigInt(zap.slippage.mul(BPS).toString());
+            slippage = FormatConverter.percentageToBps(zap.slippage);
             inputToken = zap.inputToken;
             type_of_zap = zap.type;
         } else {
@@ -1752,20 +2168,20 @@ export class CToken extends Calldata<ICToken> {
         switch(type_of_zap) {
             case 'simple':
                 if(inputToken == null) throw new Error("Input token must be provided for simple zap");
-                calldata = await zapper.getSimpleZapCalldata(this, inputToken, this.asset.address, assets, collateralize, slippage);
+                calldata = await zapper.getSimpleZapCalldata(this, inputToken, this.asset.address, assets, collateralize, slippage, receiver);
                 const isNativeSimpleZap = inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
                 calldata_overrides = isNativeSimpleZap ? { value: assets, to: zapper.address } : { to: zapper.address };
                 break;
             case 'vault':
-                calldata = await zapper.getVaultZapCalldata(this, assets, collateralize);
+                calldata = await zapper.getVaultZapCalldata(this, assets, collateralize, false, receiver);
                 calldata_overrides = { to: zapper.address };
                 break;
             case 'native-vault':
-                calldata = await zapper.getNativeZapCalldata(this, assets, collateralize);
+                calldata = await zapper.getNativeZapCalldata(this, assets, collateralize, false, receiver);
                 calldata_overrides = { value: assets, to: zapper.address };
                 break;
             case 'native-simple':
-                calldata = await zapper.getNativeZapCalldata(this, assets, collateralize, true);
+                calldata = await zapper.getNativeZapCalldata(this, assets, collateralize, true, receiver);
                 calldata_overrides = { value: assets, to: zapper.address };
                 break;
             default:
@@ -1779,76 +2195,43 @@ export class CToken extends Calldata<ICToken> {
         amount = await this.ensureUnderlyingAmount(amount, zap);
         const signer = this.requireSigner();
         receiver ??= signer.address as address;
-        // When zapping, the swap amount uses input token decimals, but the
-        // default deposit calldata uses the deposit token decimals.
-        const isZapping = typeof zap === 'object' && zap.type !== 'none';
         const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
-        let zapAssets = depositAssets;
-        if (isZapping && zap.inputToken) {
-            if (zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
-                zapAssets = FormatConverter.decimalToBigInt(amount, 18n);
-            } else {
-                const inputErc20 = new ERC20(this.provider, zap.inputToken as address, undefined, undefined, this.signer);
-                const zapDecimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
-                zapAssets = FormatConverter.decimalToBigInt(amount, zapDecimals);
-            }
-        }
-        const zapType = typeof zap == 'object' ? zap.type : zap;
-        const isNative = zapType == 'native-simple' || zapType == 'native-vault' || zapType == 'none'
-            || (typeof zap == 'object' && zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase());
+        const zapAssets = await this.getZapAssetAmount(amount, zap);
+        await this._checkDepositApprovals(zap, depositAssets, zapAssets);
 
         const default_calldata = this.getCallData("deposit", [depositAssets, receiver]);
-        const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, false, default_calldata);
+        const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, false, default_calldata, receiver);
 
-        if(isNative) {
-            await this._checkAssetApproval(depositAssets);
-        } else {
-            const zapper = this.getZapper(zapType);
-            if(!zapper) {
-                throw new Error(`No zapper contract found for type '${zapType}' on ${this.symbol}`);
-            }
-            await this._checkDepositApprovals(zapper, zapAssets);
-        }
-
-        return this.oracleRoute(calldata, calldata_overrides);
+        return this.oracleRoute(calldata, calldata_overrides, receiver);
     }
 
     async depositAsCollateral(amount: Decimal, zap: ZapperInstructions = 'none',  receiver: address | null = null) {
         amount = await this.ensureUnderlyingAmount(amount, zap);
         const signer = this.requireSigner();
         receiver ??= signer.address as address;
-        // When zapping, the swap amount uses input token decimals, but collateral
-        // cap checks and the default deposit calldata use the deposit token decimals.
-        const isZapping = typeof zap === 'object' && zap.type !== 'none';
         const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
-        let zapAssets = depositAssets;
-        if (isZapping && zap.inputToken) {
-            if (zap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
-                zapAssets = FormatConverter.decimalToBigInt(amount, 18n);
-            } else {
-                const inputErc20 = new ERC20(this.provider, zap.inputToken as address, undefined, undefined, this.signer);
-                const zapDecimals = inputErc20.decimals ?? await inputErc20.contract.decimals();
-                zapAssets = FormatConverter.decimalToBigInt(amount, zapDecimals);
-            }
-        }
+        const zapAssets = await this.getZapAssetAmount(amount, zap);
 
-        if (!isZapping) {
+        if (!this.isZapInstruction(zap)) {
             const collateralCapError = "There is not enough collateral left in this tokens collateral cap for this deposit.";
             const remainingCollateral = this.getRemainingCollateral(false);
-            if(remainingCollateral == 0n) throw new Error(collateralCapError);
+            if(remainingCollateral <= 0n) throw new Error(collateralCapError);
             if(remainingCollateral > 0n) {
-                const shares = this.virtualConvertToShares(depositAssets, LEVERAGE.SHARES_BUFFER_BPS);
+                const shares = this.virtualConvertToShares(depositAssets);
                 if(shares > remainingCollateral) {
                     throw new Error(collateralCapError);
                 }
             }
         }
 
-        const default_calldata = this.getCallData("depositAsCollateral", [depositAssets, receiver]);
-        const { calldata, calldata_overrides, zapper } = await this.zap(zapAssets, zap, true, default_calldata);
+        await this._checkDepositApprovals(zap, depositAssets, zapAssets, true, receiver);
 
-        await this._checkDepositApprovals(zapper, zapAssets);
-        return this.oracleRoute(calldata, calldata_overrides);
+        const collateralMethod = receiver.toLowerCase() === signer.address.toLowerCase()
+            ? "depositAsCollateral"
+            : "depositAsCollateralFor";
+        const default_calldata = this.getCallData(collateralMethod, [depositAssets, receiver]);
+        const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, true, default_calldata, receiver);
+        return this.oracleRoute(calldata, calldata_overrides, receiver);
     }
 
     async redeem(amount: TokenInput) {
@@ -1856,13 +2239,14 @@ export class CToken extends Calldata<ICToken> {
         const receiver = signer.address as address;
         const owner    = signer.address as address;
 
-        const buffer = this.market.userDebt.greaterThan(0) ? 100n : 0n;
+        const buffer = this.getExecutionDebtBufferTime();
         const balance_avail = await this.balanceOf(signer.address as address);
         const max_shares = await this.maxRedemption(true, buffer);
         const converted_shares = this.convertTokenInputToShares(amount);
-        
-        let shares = max_shares < converted_shares ? max_shares : converted_shares;
-        if(balance_avail - shares <= 10n) {
+
+        const maxExecutableShares = max_shares < balance_avail ? max_shares : balance_avail;
+        let shares = maxExecutableShares < converted_shares ? maxExecutableShares : converted_shares;
+        if(maxExecutableShares === balance_avail && balance_avail - shares <= 10n) {
             shares = balance_avail;
         }
 
@@ -1891,6 +2275,7 @@ export class CToken extends Calldata<ICToken> {
         const snapshot = await this.contract.getSnapshot(account);
         return {
             asset: snapshot.asset,
+            underlying: snapshot.underlying,
             decimals: BigInt(snapshot.decimals),
             isCollateral: snapshot.isCollateral,
             collateralPosted: BigInt(snapshot.collateralPosted),
@@ -1931,20 +2316,62 @@ export class CToken extends Calldata<ICToken> {
         return FormatConverter.bigIntTokensToUsd(tokenAmount, price, decimals);
     }
 
-    async convertSharesToUsd(tokenAmount: bigint): Promise<USD> {
-        tokenAmount = this.virtualConvertToShares(tokenAmount);
+    convertSharesToUsdSync(tokenAmount: bigint): USD {
         const price = this.getPrice(false, false, false);
         const decimals = this.decimals;
 
         return FormatConverter.bigIntTokensToUsd(tokenAmount, price, decimals);
     }
 
-    buildMultiCallAction(calldata: bytes) {
+    async fetchConvertSharesToUsd(tokenAmount: bigint): Promise<USD> {
+        await this.fetchPrice(false);
+        await this.fetchDecimals();
+
+        return this.convertSharesToUsdSync(tokenAmount);
+    }
+
+    async convertSharesToUsd(tokenAmount: bigint): Promise<USD> {
+        return this.convertSharesToUsdSync(tokenAmount);
+    }
+
+    buildMultiCallAction(calldata: bytes, target: address = this.address) {
         return {
-            target: this.address,
+            target,
             isPriceUpdate: false,
             data: calldata
         } as MulticallAction;
+    }
+
+    private hasNonZeroNativeValueOverride(override: { [key: string]: any }) {
+        const value = override.value;
+        if (value == null) {
+            return false;
+        }
+
+        if (typeof value === "bigint") {
+            return value > 0n;
+        }
+
+        if (typeof value === "number") {
+            return value > 0;
+        }
+
+        if (typeof value === "string") {
+            return BigInt(value) > 0n;
+        }
+
+        return true;
+    }
+
+    private assertOracleMulticallSupportsValue(priceUpdates: MulticallAction[], override: { [key: string]: any }) {
+        if (priceUpdates.length === 0 || !this.hasNonZeroNativeValueOverride(override)) {
+            return;
+        }
+
+        throw new Error(
+            "Native gas-token zaps cannot be combined with oracle price-update multicalls. " +
+            "Use the wrapped-native zap path or retry when no oracle update is required.",
+        );
     }
 
     private async _checkPositionManagerApproval(manager: PositionManager) {
@@ -1955,86 +2382,211 @@ export class CToken extends Calldata<ICToken> {
     }
 
     private async _checkZapperApproval(zapper: Zapper) {
-        if(!this.setup.approval_protection) {
+        const plugin_allowed = await this.isPluginApproved(zapper.type, 'zapper');
+        if (!plugin_allowed) {
+            throw new Error(`Please approve the ${zapper.type} Zapper to be able to move ${this.symbol} on your behalf.`);
+        }
+    }
+
+    private async _checkDelegateApproval(owner: address, delegate: address, delegateLabel: string) {
+        const pluginAllowed = await this.contract.isDelegate(owner, delegate);
+        if (!pluginAllowed) {
+            throw new Error(`Please approve ${delegateLabel} as a delegate for ${this.symbol} on behalf of ${owner}.`);
+        }
+    }
+
+    private getDepositAssetApprovalTarget(): TokenApprovalTarget {
+        const asset = this.getAsset(true);
+        return {
+            token: asset,
+            spender: this.address,
+            spenderLabel: this.symbol,
+        };
+    }
+
+    private getPositionManagerDepositApprovalTarget(manager: PositionManager): TokenApprovalTarget {
+        return {
+            token: this.getAsset(true),
+            spender: manager.address,
+            spenderLabel: `${manager.type} PositionManager`,
+        };
+    }
+
+    private async resolveZapApprovalTarget(instructions: ZapperInstructions): Promise<TokenApprovalTarget | null> {
+        const zapType = typeof instructions == 'object' ? instructions.type : instructions;
+        if(zapType == 'none') {
+            return null;
+        }
+
+        const spender = this.getPluginAddress(zapType, 'zapper');
+
+        if(spender == null) {
+            throw new Error("Plugin does not have an associated contract");
+        }
+
+        switch(zapType) {
+            case 'native-vault':
+            case 'native-simple':
+                return null;
+            case 'vault':
+                return {
+                    token: await this.getVaultAsset(true),
+                    spender,
+                    spenderLabel: `${zapType} Zapper`,
+                };
+            case 'simple':
+                if(typeof instructions != 'object') {
+                    throw new Error("Input token must be provided for simple zap approval");
+                }
+
+                if(instructions.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
+                    return null;
+                }
+
+                return {
+                    token: new ERC20(this.provider, instructions.inputToken, undefined, undefined, this.signer),
+                    spender,
+                    spenderLabel: `${zapType} Zapper`,
+                };
+        }
+    }
+
+    private async hasTokenApproval(target: TokenApprovalTarget, amount: bigint) {
+        const owner = this.getAccountOrThrow();
+        const allowance = await target.token.allowance(owner, target.spender);
+        return allowance >= amount;
+    }
+
+    private async _checkTokenApproval(target: TokenApprovalTarget, amount: bigint) {
+        const allowance = await this.hasTokenApproval(target, amount);
+        if(allowance) {
             return;
         }
 
-        if (this.setup.approval_protection && zapper) {
-            const plugin_allowed = await this.isPluginApproved(zapper.type, 'zapper');
-            if (!plugin_allowed) {
-                throw new Error(`Please approve the ${zapper.type} Zapper to be able to move ${this.symbol} on your behalf.`);
+        let tokenLabel = target.token.symbol ?? target.token.address;
+        if(target.token.symbol == undefined) {
+            try {
+                tokenLabel = await target.token.fetchSymbol();
+            } catch {
+                tokenLabel = target.token.address;
             }
         }
+
+        throw new Error(`Please approve the ${tokenLabel} token for ${target.spenderLabel}`);
     }
 
-    private async _checkErc20Approval(erc20_address: address, amount: bigint, spender: address) {
+    private async _checkDepositApprovals(
+        zap: ZapperInstructions,
+        depositAssets: bigint,
+        zapAssets: bigint,
+        collateralize: boolean = false,
+        receiver: address | null = null,
+    ) {
+        const zapType = typeof zap == 'object' ? zap.type : zap;
         const signer = this.requireSigner();
-        const erc20 = new ERC20(this.provider, erc20_address, undefined, undefined, signer);
-        const allowance = await erc20.allowance(signer.address as address, spender);
-        if(allowance < amount) {
-            const symbol = await erc20.fetchSymbol();
-            throw new Error(`Please approve ${symbol} for ${spender}: ${amount}`);
-        }
-    }
 
-    private async _checkAssetApproval(assets: bigint) {
-        if(!this.setup.approval_protection) {
+        if(zapType != 'none') {
+            const zapper = this.getZapper(zapType);
+            if(!zapper) {
+                throw new Error(`No zapper contract found for type '${zapType}' on ${this.symbol}`);
+            }
+
+            if (collateralize) {
+                const receiverAddress = receiver ?? signer.address as address;
+                if (receiverAddress.toLowerCase() === signer.address.toLowerCase()) {
+                    await this._checkZapperApproval(zapper);
+                } else {
+                    await this._checkDelegateApproval(receiverAddress, signer.address as address, "the connected signer");
+                    await this._checkDelegateApproval(receiverAddress, zapper.address, `${zapper.type} Zapper`);
+                }
+            }
+        } else if (collateralize && receiver && receiver.toLowerCase() !== signer.address.toLowerCase()) {
+            await this._checkDelegateApproval(receiver, signer.address as address, "the connected signer");
+        }
+
+        const approvalTarget = zapType == 'none'
+            ? this.getDepositAssetApprovalTarget()
+            : await this.resolveZapApprovalTarget(zap);
+        if(approvalTarget == null) {
             return;
         }
 
-        const asset = this.getAsset(true);
-        const owner = this.getAccountOrThrow();
-        const allowance = await asset.allowance(owner, this.address);
-        if(allowance < assets) {
-            throw new Error(`Please approve the ${asset.symbol} token for ${this.symbol}`);
-        }
+        const approvalAmount = zapType == 'none' ? depositAssets : zapAssets;
+        await this._checkTokenApproval(approvalTarget, approvalAmount);
     }
 
-    private async _checkDepositApprovals(zapper: Zapper | null, assets: bigint) {
-        if(!this.setup.approval_protection) {
-            return;
-        }
-
-        if(zapper) {
-            await this._checkZapperApproval(zapper);
-        }
-
-        await this._checkAssetApproval(assets);
-    }
-
-    async oracleRoute(calldata: bytes, override: { [key: string]: any } = {}): Promise<TransactionResponse> {
+    async oracleRoute(
+        calldata: bytes,
+        override: { [key: string]: any } = {},
+        reloadAccount: address | null = null,
+    ): Promise<TransactionResponse> {
         const signer = this.requireSigner();
         const price_updates = await this.getPriceUpdates();
+        this.assertOracleMulticallSupportsValue(price_updates, override);
 
         if(price_updates.length > 0) {
-            const token_action = this.buildMultiCallAction(calldata);
+            const actionTarget = (override.to ?? this.address) as address;
+            const token_action = this.buildMultiCallAction(calldata, actionTarget);
             calldata = this.getCallData("multicall", [[...price_updates, token_action]]);
         }
 
         const tx = await this.executeCallData(calldata, override);
-        await this.market.reloadUserData(signer.address as address);
+        if (typeof tx.wait === "function") {
+            await tx.wait();
+        }
+        const refreshAccount = reloadAccount ?? signer.address as address;
+        await this.market.reloadUserData(refreshAccount, {
+            allowSignerMismatch: refreshAccount.toLowerCase() !== signer.address.toLowerCase(),
+        });
 
         return tx;
     }
 
     async simulateOracleRoute(calldata: bytes, override: { [key: string]: any } = {}): Promise<{ success: boolean; error?: string }> {
         const price_updates = await this.getPriceUpdates();
+        this.assertOracleMulticallSupportsValue(price_updates, override);
 
         if(price_updates.length > 0) {
-            const token_action = this.buildMultiCallAction(calldata);
+            const actionTarget = (override.to ?? this.address) as address;
+            const token_action = this.buildMultiCallAction(calldata, actionTarget);
             calldata = this.getCallData("multicall", [[...price_updates, token_action]]);
         }
 
         return this.simulateCallData(calldata, override);
     }
 
-    async getPriceUpdates(): Promise<MulticallAction[]> {
-        let price_updates = [];
-        if(this.adapters.includes(AdaptorTypes.REDSTONE_CORE)) {
-            const redstone = await Redstone.buildMultiCallAction(this);
-            price_updates.push(redstone);
+    private getRedstonePriceUpdateTokens(): CToken[] {
+        const candidates = (this.market?.tokens?.length ? this.market.tokens : [this]) as CToken[];
+        const seenAssets = new Set<string>();
+        const tokens: CToken[] = [];
+
+        for (const token of candidates) {
+            if (!token.adapters?.includes(AdaptorTypes.REDSTONE_CORE)) {
+                continue;
+            }
+
+            let assetAddress: address;
+            try {
+                assetAddress = token.getAsset(false);
+            } catch {
+                assetAddress = (token as any).cache?.asset?.address ?? token.address;
+            }
+
+            const key = assetAddress.toLowerCase();
+            if (seenAssets.has(key)) {
+                continue;
+            }
+
+            seenAssets.add(key);
+            tokens.push(token);
         }
 
-        return price_updates;
+        return tokens;
+    }
+
+    async getPriceUpdates(): Promise<MulticallAction[]> {
+        return Promise.all(
+            this.getRedstonePriceUpdateTokens().map((token) => Redstone.buildMultiCallAction(token)),
+        );
     }
 }

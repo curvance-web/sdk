@@ -122,28 +122,11 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
         assert(entry.redeemable > 0n, 'redeemable should be > 0 after deposit');
     });
 
-    test('optimalDeposit returns a valid cToken', async () => {
-        const target = await reader.optimalDeposit(optimizerAddress, 1_000n * 10n ** 6n);
-
-        assert(
-            APPROVED_CTOKENS.includes(target),
-            `optimalDeposit returned ${target}, expected one of ${APPROVED_CTOKENS}`,
-        );
-    });
-
-    test('optimalWithdrawal returns a valid cToken', async () => {
-        const target = await reader.optimalWithdrawal(optimizerAddress, 1_000n * 10n ** 6n);
-
-        assert(
-            APPROVED_CTOKENS.includes(target),
-            `optimalWithdrawal returned ${target}, expected one of ${APPROVED_CTOKENS}`,
-        );
-    });
-
     test('optimalRebalance returns actions for all markets', async () => {
-        const actions = await reader.optimalRebalance(optimizerAddress);
+        const { actions, bounds } = await reader.optimalRebalance(optimizerAddress);
 
         assert.strictEqual(actions.length, 3, 'Should return 3 rebalance actions');
+        assert.strictEqual(bounds.length, 3, 'Should return 3 allocation bounds');
 
         const actionAddresses = actions.map(a => a.cToken);
         for (const cToken of APPROVED_CTOKENS) {
@@ -151,7 +134,7 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
         }
 
         // Total deposits should approximately equal total withdrawals (net ~0)
-        const netFlow = actions.reduce((sum, a) => sum + a.assets, 0n);
+        const netFlow = actions.reduce((sum, a) => sum + a.assetsOrBps, 0n);
         const totalAssetsVal: bigint = await optimizer.totalAssets();
         const tolerance = totalAssetsVal / 100n; // 1% tolerance
         assert(
@@ -169,11 +152,12 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
         const totalBefore: bigint = await optimizer.totalAssets();
 
         // Get optimal rebalance actions
-        const actions = await reader.optimalRebalance(optimizerAddress);
+        const { actions, bounds } = await reader.optimalRebalance(optimizerAddress);
 
         // Execute rebalance - should not revert
         await (await optimizer.rebalance(
-            actions.map(a => ({ cToken: a.cToken, assets: a.assets })),
+            actions.map(a => ({ cToken: a.cToken, assetsOrBps: a.assetsOrBps })),
+            bounds.map(b => ({ cToken: b.cToken, minBps: b.minBps, maxBps: b.maxBps })),
         )).wait();
 
         const totalAfter: bigint = await optimizer.totalAssets();

@@ -43,7 +43,8 @@ export function calculateDebtPreview(
     amount: Decimal,
     isRepaying: boolean,
 ): Decimal {
-    return isRepaying ? currentDebt.minus(amount) : currentDebt.plus(amount);
+    const nextDebt = isRepaying ? currentDebt.minus(amount) : currentDebt.plus(amount);
+    return nextDebt.isNegative() ? new Decimal(0) : nextDebt;
 }
 
 export function convertAmountByCurrencyView(
@@ -52,6 +53,12 @@ export function convertAmountByCurrencyView(
     currencyView: 'dollar' | 'token',
 ): { usdAmount: string; tokenAmount: string } {
     if (!amount) return { usdAmount: '0', tokenAmount: '0' };
+
+    if (!price.isFinite() || price.lte(0)) {
+        return currencyView === 'dollar'
+            ? { usdAmount: amount, tokenAmount: '0' }
+            : { usdAmount: '0', tokenAmount: amount };
+    }
 
     const usdAmount = currencyView === 'dollar' ? amount : new Decimal(amount).mul(price).toString();
     const tokenAmount = currencyView === 'token' ? amount : new Decimal(amount).div(price).toString();

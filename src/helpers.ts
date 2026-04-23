@@ -1,10 +1,8 @@
 import { Contract, parseUnits } from "ethers";
 import { Decimal } from "decimal.js";
-import { address, bytes, curvance_provider, curvance_signer, Percentage } from "./types";
+import { address, bytes, curvance_provider, curvance_read_provider, curvance_signer, Percentage } from "./types";
 import { chains } from "./contracts";
-import { setup_config } from "./setup";
 import FormatConverter from "./classes/FormatConverter";
-import { chain_config } from "./chains";
 
 // Set Decimal.js precision to handle large numbers
 Decimal.set({ precision: 50 });
@@ -12,13 +10,13 @@ Decimal.set({ precision: 50 });
 export type ChangeRate = "year" | "month" | "week" | "day";
 export type ChainRpcPrefix = keyof typeof chains;
 
-export const BPS = BigInt(1e4);
-export const BPS_SQUARED = BigInt(1e8);
-export const WAD = BigInt(1e18);
-export const WAD_BPS = BigInt(1e22);
-export const RAY = BigInt(1e27);
-export const WAD_SQUARED = BigInt(1e36);
-export const WAD_CUBED_BPS_OFFSET = BigInt(1e50);
+export const BPS = 10_000n;
+export const BPS_SQUARED = BPS * BPS;
+export const WAD = 10n ** 18n;
+export const WAD_BPS = WAD * BPS;
+export const RAY = 10n ** 27n;
+export const WAD_SQUARED = WAD * WAD;
+export const WAD_CUBED_BPS_OFFSET = WAD * WAD * WAD / BPS;
 export const WAD_DECIMAL = new Decimal(WAD);
 
 export const SECONDS_PER_YEAR = 31_536_000n; // 365 days
@@ -27,12 +25,21 @@ export const SECONDS_PER_WEEK = 604_800n; // 7 days
 export const SECONDS_PER_DAY = 86_400n // 1 day
 
 export const DEFAULT_SLIPPAGE_BPS = 100n; // 1%
+const MAX_SWAP_SLIPPAGE_BPS = 9999n;
 
 export const UINT256_MAX = 115792089237316195423570985008687907853269984665640564039457584007913129639935n;
 export const UINT256_MAX_DECIMAL = Decimal(UINT256_MAX);
 export const EMPTY_ADDRESS = "0x0000000000000000000000000000000000000000" as address;
 export const NATIVE_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" as address;
 export const EMPTY_BYTES = "0x" as bytes;
+
+function getSetupConfig() {
+    return (require("./setup") as typeof import("./setup")).setup_config;
+}
+
+function getChainConfigMap() {
+    return (require("./chains") as typeof import("./chains")).chain_config;
+}
 
 export function getRateSeconds(rate: ChangeRate): bigint {
     switch (rate) {
@@ -112,9 +119,12 @@ export function amplifyContractSlippage(
     leverageDelta: Decimal,
     bpsToAmplify: bigint,
 ): bigint {
-    if (bpsToAmplify === 0n) return baseSlippage;
+    if (bpsToAmplify === 0n) {
+        return baseSlippage > MAX_SWAP_SLIPPAGE_BPS ? MAX_SWAP_SLIPPAGE_BPS : baseSlippage;
+    }
     const expansion = leverageDelta.mul(Number(bpsToAmplify)).ceil().toFixed(0);
-    return baseSlippage + BigInt(expansion);
+    const amplified = baseSlippage + BigInt(expansion);
+    return amplified > MAX_SWAP_SLIPPAGE_BPS ? MAX_SWAP_SLIPPAGE_BPS : amplified;
 }
 
 /**
@@ -159,13 +169,23 @@ export function amplifyContractSlippage(
  */
 export function toContractSwapSlippage(userSlippage: bigint, feeBps?: bigint): bigint {
     const effective = feeBps && feeBps > 0n ? userSlippage + feeBps : userSlippage;
+    if (effective < 0n || effective > MAX_SWAP_SLIPPAGE_BPS) {
+        throw new Error(`Swap slippage out of range (0-9999 BPS): ${effective}`);
+    }
     return effective ? FormatConverter.bpsToBpsWad(effective) : 0n;
 }
 
-export function getChainConfig(chain: ChainRpcPrefix = setup_config.chain) {
-    const config = chain_config[chain];
+export function getChainConfig(chain?: ChainRpcPrefix) {
+    const resolvedChain = chain ?? getSetupConfig()?.chain;
+    if (!resolvedChain) {
+        throw new Error(
+            "Chain is not configured. Pass a chain explicitly or initialize setupChain() first.",
+        );
+    }
+
+    const config = getChainConfigMap()[resolvedChain];
     if (!config) {
-        throw new Error(`No configuration found for chain ${chain}`);
+        throw new Error(`No configuration found for chain ${resolvedChain}`);
     }
     return config;
 }
@@ -197,6 +217,30 @@ export function requireAccount(
     }
 
     return requireSigner(signer).address as address;
+}
+
+export function resolveReadProvider(
+    provider: curvance_provider,
+    context: string,
+): curvance_read_provider {
+    if (!("address" in provider)) {
+        return provider as curvance_read_provider;
+    }
+
+    const signerProvider = provider.provider as curvance_read_provider | null | undefined;
+    if (signerProvider != null) {
+        return signerProvider;
+    }
+
+    const defaultReadProvider = getSetupConfig()?.readProvider as curvance_read_provider | undefined;
+    if (defaultReadProvider != null) {
+        return defaultReadProvider;
+    }
+
+    throw new Error(
+        `Read provider is not configured for ${context}. ` +
+        `Pass a read provider explicitly, use a signer with .provider, or initialize setupChain() first.`,
+    );
 }
 
 export function contractSetup<I>(provider: curvance_provider, contractAddress: address, abi: any): Contract & I {
@@ -250,6 +294,20 @@ function supportsGasOverrides(contract: any, methodName: string | symbol): boole
     }
 }
 
+function getContractMethodInputCount(contract: any, methodName: string | symbol): number | null {
+    if (typeof methodName !== "string") {
+        return null;
+    }
+
+    try {
+        const fragment = contract?.interface?.getFunction(methodName);
+        const inputs = fragment?.inputs;
+        return Array.isArray(inputs) ? inputs.length : null;
+    } catch {
+        return null;
+    }
+}
+
 /**
  * Attempts to estimate gas and add buffer to transaction arguments
  * @param method The contract method to estimate gas for
@@ -257,7 +315,7 @@ function supportsGasOverrides(contract: any, methodName: string | symbol): boole
  * @param bufferPercent The gas buffer percentage
  * @returns true if gas estimation was successful and added to args
  */
-async function tryAddGasBuffer(method: any, args: any[], bufferPercent: number): Promise<boolean> {
+async function tryAddGasBuffer(method: any, args: any[], bufferPercent: number, inputCount: number | null): Promise<boolean> {
     if (!canEstimateGas(method)) {
         return false;
     }
@@ -265,7 +323,14 @@ async function tryAddGasBuffer(method: any, args: any[], bufferPercent: number):
     const estimatedGas = await method.estimateGas(...args);
     const gasLimit = calculateGasWithBuffer(estimatedGas, bufferPercent);
 
-    // Add the gas limit as transaction overrides
+    if (inputCount != null && args.length > inputCount) {
+        args[args.length - 1] = {
+            ...args[args.length - 1],
+            gasLimit,
+        };
+        return true;
+    }
+
     args.push({ gasLimit });
     return true;
 }
@@ -295,17 +360,128 @@ export type MerklOpportunityLike = {
 };
 
 export type ApyOverrides = Record<string, { value: number }>;
+export type MerklMatchMode = "deposit" | "borrow";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value != null;
+}
+
+function normalizeMerklTokenKey(value: unknown): string | null {
+    if (typeof value !== "string") {
+        return null;
+    }
+
+    const normalized = value.trim().toLowerCase();
+    return normalized.length > 0 ? normalized : null;
+}
+
+function getMerklOpportunityTokenKeys(
+    opportunity: unknown,
+    mode: MerklMatchMode,
+): string[] {
+    if (!isRecord(opportunity)) {
+        return [];
+    }
+
+    const tokens = Array.isArray(opportunity.tokens) ? opportunity.tokens : [];
+    const tokenKeys = Array.from(
+        new Set(
+            tokens
+                .map((token) => isRecord(token) ? normalizeMerklTokenKey(token.address) : null)
+                .filter((value): value is string => value != null),
+        ),
+    );
+    const identifierKey = normalizeMerklTokenKey(opportunity.identifier);
+
+    if (mode === "borrow") {
+        if (identifierKey != null) {
+            return [identifierKey];
+        }
+
+        return tokenKeys;
+    }
+
+    if (tokenKeys.length > 0) {
+        return tokenKeys;
+    }
+
+    return identifierKey != null ? [identifierKey] : [];
+}
+
+function getMerklOpportunityApr(opportunity: unknown): Decimal | null {
+    if (!isRecord(opportunity)) {
+        return null;
+    }
+
+    const { apr } = opportunity;
+    if (typeof apr !== "number" && typeof apr !== "string" && typeof apr !== "bigint") {
+        return null;
+    }
+
+    try {
+        const parsed = new Decimal(typeof apr === "bigint" ? apr.toString() : apr);
+        return parsed.isFinite() && parsed.greaterThan(0) ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+export function aggregateMerklAprByToken(
+    opportunities: unknown[] | undefined,
+    mode: MerklMatchMode,
+): Map<string, Decimal> {
+    const totals = new Map<string, Decimal>();
+
+    for (const opportunity of opportunities ?? []) {
+        const apr = getMerklOpportunityApr(opportunity);
+        if (apr == null) {
+            continue;
+        }
+
+        for (const tokenKey of getMerklOpportunityTokenKeys(opportunity, mode)) {
+            const current = totals.get(tokenKey) ?? new Decimal(0);
+            totals.set(tokenKey, current.add(apr.div(100)));
+        }
+    }
+
+    return totals;
+}
+
+export function getMerklTokenIncentiveApy(
+    tokenAddress: string,
+    opportunities: MerklOpportunityLike[] | undefined,
+    mode: MerklMatchMode,
+): Decimal {
+    const tokenKey = normalizeMerklTokenKey(tokenAddress);
+    if (tokenKey == null) {
+        return new Decimal(0);
+    }
+
+    return aggregateMerklAprByToken(opportunities, mode).get(tokenKey) ?? new Decimal(0);
+}
 
 /**
  * Returns the native yield for a token — the rate provided by the asset issuer.
- * When `nativeYield` is nonzero it already includes the interest component,
+ * When `nativeApy` is nonzero it already includes the interest component,
  * so we return it directly.  Otherwise we fall back to any static APY override.
  */
+type NativeYieldTokenLike = {
+    nativeApy?: Decimal.Value | null;
+    nativeYield?: Decimal.Value | null;
+    asset: { symbol: string };
+};
+
+function getTokenNativeApy(token: NativeYieldTokenLike): Decimal {
+    return new Decimal(token.nativeApy ?? token.nativeYield ?? 0);
+}
+
+// Real CToken instances expose nativeApy; nativeYield remains accepted for older helper-shaped objects.
 export function getNativeYield(
-    token: { nativeYield: number; asset: { symbol: string } },
+    token: NativeYieldTokenLike,
     apyOverrides?: ApyOverrides,
 ): Decimal {
-    if (token.nativeYield !== 0) return new Decimal(token.nativeYield);
+    const nativeApy = getTokenNativeApy(token);
+    if (!nativeApy.isZero()) return nativeApy;
     const symbol = token.asset.symbol.toLowerCase();
     return new Decimal(apyOverrides?.[symbol]?.value ?? 0);
 }
@@ -327,26 +503,7 @@ export function getMerklDepositIncentives(
     tokenAddress: string,
     opportunities: MerklOpportunityLike[] | undefined,
 ): Decimal {
-    if (!opportunities?.length) return new Decimal(0);
-
-    const address = tokenAddress.toLowerCase();
-
-    const relevant = opportunities.filter((opp) =>
-        opp.tokens.some((t) => t.address.toLowerCase() === address),
-    );
-
-    if (!relevant.length) return new Decimal(0);
-
-    let bestApr = 0;
-    for (const opp of relevant) {
-        for (const t of opp.tokens) {
-            if (t.address.toLowerCase() === address) {
-                bestApr = Math.max(bestApr, opp.apr ?? 0);
-            }
-        }
-    }
-
-    return new Decimal(bestApr / 100);
+    return getMerklTokenIncentiveApy(tokenAddress, opportunities, "deposit");
 }
 
 /**
@@ -357,19 +514,7 @@ export function getMerklBorrowIncentives(
     tokenAddress: string,
     opportunities: MerklOpportunityLike[] | undefined,
 ): Decimal {
-    if (!opportunities?.length) return new Decimal(0);
-
-    const address = tokenAddress.toLowerCase();
-
-    const relevant = opportunities.filter(
-        (opp) => opp.identifier.toLowerCase() === address,
-    );
-
-    if (!relevant.length) return new Decimal(0);
-
-    const bestApr = relevant.reduce((max, opp) => Math.max(max, opp.apr ?? 0), 0);
-
-    return new Decimal(bestApr / 100);
+    return getMerklTokenIncentiveApy(tokenAddress, opportunities, "borrow");
 }
 
 /**
@@ -377,12 +522,13 @@ export function getMerklBorrowIncentives(
  * When `nativeYield` is nonzero it already includes interest, so we use it directly.
  */
 export function getDepositApy(
-    token: { nativeYield: number; getApy(): Decimal; asset: { symbol: string }; address: string },
+    token: NativeYieldTokenLike & { getApy(): Decimal; address: string },
     opportunities: MerklOpportunityLike[] | undefined,
     apyOverrides?: ApyOverrides,
 ): Decimal {
-    const base = token.nativeYield !== 0
-        ? new Decimal(token.nativeYield)
+    const nativeApy = getTokenNativeApy(token);
+    const base = !nativeApy.isZero()
+        ? nativeApy
         : token.getApy().add(new Decimal(apyOverrides?.[token.asset.symbol.toLowerCase()]?.value ?? 0));
     const merkl = getMerklDepositIncentives(token.address, opportunities);
     return base.add(merkl);
@@ -415,14 +561,18 @@ export function contractWithGasBuffer<T extends object>(contract: T, bufferPerce
                 return originalMethod;
             }
 
-            // Return a wrapped version of the method
-            return async (...args: any[]) => {
+            const wrappedMethod = async (...args: any[]) => {
                 try {
                     // Gas estimation is only useful on state-changing methods.
                     // Estimating read-only functions adds an unnecessary RPC round-trip
                     // and breaks fork tests when estimateGas is restricted or slow.
                     if (supportsGasOverrides(target, methodName)) {
-                        await tryAddGasBuffer(originalMethod, args, bufferPercent);
+                        await tryAddGasBuffer(
+                            originalMethod,
+                            args,
+                            bufferPercent,
+                            getContractMethodInputCount(target, methodName),
+                        );
                     }
 
                     // Call the original method with potentially modified args
@@ -433,6 +583,32 @@ export function contractWithGasBuffer<T extends object>(contract: T, bufferPerce
                     throw error;
                 }
             };
+
+            return new Proxy(wrappedMethod, {
+                get(methodTarget, property, methodReceiver) {
+                    if (property in methodTarget) {
+                        return Reflect.get(methodTarget, property, methodReceiver);
+                    }
+
+                    const value = Reflect.get(originalMethod as any, property, originalMethod);
+                    return typeof value === "function" ? value.bind(originalMethod) : value;
+                },
+                has(methodTarget, property) {
+                    return property in methodTarget || property in originalMethod;
+                },
+                ownKeys(methodTarget) {
+                    return [...new Set([
+                        ...Reflect.ownKeys(methodTarget),
+                        ...Reflect.ownKeys(originalMethod),
+                    ])];
+                },
+                getOwnPropertyDescriptor(methodTarget, property) {
+                    return (
+                        Reflect.getOwnPropertyDescriptor(methodTarget, property) ??
+                        Reflect.getOwnPropertyDescriptor(originalMethod, property)
+                    );
+                },
+            });
         }
     });
 }

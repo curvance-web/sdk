@@ -35,7 +35,6 @@ const { markets, reader, dexAgg, global_milestone } = await setupChain("monad-ma
 setupChain(
     chain: ChainRpcPrefix,
     provider: curvance_provider | null = null,   // signer (wallet) OR read-only provider; null → SDK default
-    approval_protection: boolean = false,         // revoke-before-approve pattern
     api_url: string = "https://api.curvance.com",
     options: {
         feePolicy?: FeePolicy;                    // zap/leverage fee routing (default: NO_FEE_POLICY)
@@ -56,6 +55,13 @@ setupChain(
 - **Signerless / public view** → the chain's configured RPC is primary; chain fallbacks serve as backup.
 - **Explicit `options.readProvider`** → wins over all of the above. Use when you want deterministic read transport (e.g. fork testing).
 - **Writes** always route through the connected signer; they never use the chain RPC or fallbacks.
+
+### Write approvals
+
+- High-level write methods always preflight the approvals they need before submit.
+- Missing ERC20 allowance throws a descriptive error instead of sending a revert-prone transaction.
+- Missing zapper or position-manager delegate approval also throws before submit.
+- There is no setup-time approval mode switch. Use `approveUnderlying`, `approveZapAsset`, and `approvePlugin` explicitly when the caller needs to satisfy approvals.
 
 ### Explore markets
 
@@ -222,6 +228,7 @@ token.getMaxBorrowable()             // max amount given credit
 ```ts
 token.getSnapshot(account)                // position snapshot for an account
 token.maxRedemption(inShares, bufferTime) // max redeemable amount
+token.maxRemovableCollateral(inShares, bufferTime) // max posted collateral removable without violating health
 token.simulateDeposit(amount)             // preview deposit without executing
 token.simulateDepositAsCollateral(amount)
 ```
@@ -254,7 +261,8 @@ await token.redeemCollateral(amount, receiver?, owner?)
 
 // Manage posted collateral
 await token.postCollateral(amount)   // post unposted balance as collateral
-await token.removeCollateral(amount, removeAll?)
+await token.removeCollateralExact(amount) // exact collateral removal, capped to the safe removable max
+await token.removeMaxCollateral()         // remove the maximum valid posted collateral
 ```
 
 ### Borrow & Repay (`BorrowableCToken` only)
@@ -292,6 +300,7 @@ if (!approved) await token.approvePlugin('simple', 'zapper')
 // Plugin types
 // ZapperTypes:          'none' | 'native-vault' | 'vault' | 'simple' | 'native-simple'
 // PositionManagerTypes: 'native-vault' | 'simple' | 'vault'
+// `leverageDown(...)` currently executes through the 'simple' position manager only.
 
 const zapper = token.getZapper('simple')
 const positionManager = token.getPositionManager('simple')
@@ -338,6 +347,7 @@ await collateralToken.depositAsCollateral(amount)
 await collateralToken.leverageUp(borrowToken, new Decimal(3), 'simple', new Decimal(0.005))
 
 // Reduce leverage
+// Deleverage currently executes through the simple position manager path.
 await collateralToken.leverageDown(borrowToken, currentLeverage, targetLeverage, 'simple', slippage)
 
 // Check current leverage
@@ -522,7 +532,7 @@ const feePolicy = flatFeePolicy({
     stableToStableBps: 2n,             // optional lower fee for stable↔stable swaps
 })
 
-const { markets } = await setupChain("monad-mainnet", wallet, false, undefined, { feePolicy })
+const { markets } = await setupChain("monad-mainnet", wallet, undefined, { feePolicy })
 ```
 
 The SDK automatically returns 0 bps for native ↔ wrapped-native swaps and same-token no-op zaps.
@@ -575,6 +585,8 @@ const snapshot = await takePortfolioSnapshot(account)
 const marketSnapshot = snapshotMarket(market)
 ```
 
+`snapshotMarket(...)` requires full user token data. `takePortfolioSnapshot(...)` will automatically promote summary-scoped markets back to full user data before reading token balances. If you previously called `refreshActiveUserMarketSummaries(...)` and need a direct single-market snapshot, run `market.reloadUserData(account)` or `Market.reloadUserMarkets(...)` first.
+
 ## ❯ Optimizer
 
 The `OptimizerReader` reads yield-rebalancing vaults that allocate across markets.
@@ -582,7 +594,10 @@ The `OptimizerReader` reads yield-rebalancing vaults that allocate across market
 ```ts
 import { OptimizerReader } from "curvance"
 
-const optimizer = new OptimizerReader(provider)
+const optimizer = new OptimizerReader(optimizerReaderAddress, provider)
+
+await optimizer.getOptimizerAPY(optimizerAddress)
+// Returns: weighted-average optimizer APY in WAD
 
 await optimizer.getOptimizerMarketData(optimizerAddresses)
 // Returns: { totalAssets, sharePrice, performanceFee, markets[] }
@@ -590,9 +605,8 @@ await optimizer.getOptimizerMarketData(optimizerAddresses)
 await optimizer.getOptimizerUserData(optimizerAddresses, account)
 // Returns: user balance and redeemable amounts
 
-await optimizer.optimalDeposit(optimizer, assets)    // best market to deposit into
-await optimizer.optimalWithdrawal(optimizer, assets) // best market to withdraw from
-await optimizer.optimalRebalance(optimizer)          // suggested reallocations: { cToken, assets }[]
+await optimizer.optimalRebalance(optimizer, 100n)
+// Returns: { actions: { cToken, assetsOrBps }[], bounds: { cToken, minBps, maxBps }[] }
 ```
 
 ## ❯ TypeScript Types
@@ -617,6 +631,7 @@ type CollateralSource = "Renzo" | "Upshift" | "Yuzu" | "Native" | "Circle" | "Fa
 // Operations
 type ZapperTypes = 'none' | 'native-vault' | 'vault' | 'simple' | 'native-simple'
 type PositionManagerTypes = 'native-vault' | 'simple' | 'vault'
+// `leverageDown(...)` accepts 'simple' only.
 type ChangeRate = 'year' | 'month' | 'week' | 'day'
 
 // DEX

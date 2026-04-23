@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_RETRY_CONFIG, getRpcDebugSnapshot, resetRpcDebugState, RetryableProvider } from "../src/retry-provider";
+import {
+    configureRetries,
+    DEFAULT_RETRY_CONFIG,
+    getRpcDebugSnapshot,
+    resetRpcDebugState,
+    RetryableProvider,
+    wrapProviderWithRetries,
+} from "../src/retry-provider";
 import { TransportHarness, fail, hang, ok } from "./support/transport-harness";
 
 test.beforeEach(() => {
     resetRpcDebugState();
+    configureRetries(DEFAULT_RETRY_CONFIG);
 });
 
 test("read methods fall through to fallback when primary exhausts retries", async (t) => {
@@ -64,6 +72,94 @@ test("read provider methods fall through to fallback", async (t) => {
     const result = await wrapped.getBlockNumber();
     assert.equal(result, 123);
     assert.deepEqual(harness.callLabels(), ["primary", "fallback"]);
+});
+
+test("raw write RPC send stays on the primary provider even while read fallback is active", async (t) => {
+    const harness = new TransportHarness(t);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            send: {
+                eth_call: fail("timeout: primary eth_call"),
+                eth_sendRawTransaction: ok("primary:write:ok"),
+            },
+        },
+        {
+            fallbacks: [
+                {
+                    label: "fallback",
+                    send: {
+                        eth_call: ok("fallback:eth_call:ok"),
+                        eth_sendRawTransaction: fail("fallback must not receive write RPC"),
+                    },
+                },
+            ],
+        },
+    );
+
+    assert.equal(await wrapped.send("eth_call", []), "fallback:eth_call:ok");
+    assert.equal(await wrapped.send("eth_sendRawTransaction", ["0xdeadbeef"]), "primary:write:ok");
+    assert.equal(harness.getCalls("primary", "eth_sendRawTransaction").length, 1);
+    assert.equal(harness.getCalls("fallback", "eth_sendRawTransaction").length, 0);
+});
+
+test("raw write RPC _send stays on the primary provider and is not retried as a read", async () => {
+    const calls: string[] = [];
+    const primary = {
+        _send: async (payload: { method: string }) => {
+            calls.push(`primary:${payload.method}`);
+            throw new Error("timeout: primary write RPC");
+        },
+    };
+    const fallback = {
+        _send: async (payload: { method: string }) => {
+            calls.push(`fallback:${payload.method}`);
+            return "fallback should not be used";
+        },
+    };
+    const retryProvider = new RetryableProvider({
+        maxRetries: 1,
+        baseDelay: 1,
+        maxDelay: 1,
+        backoffMultiplier: 1,
+        retryableErrors: ["timeout"],
+    }, fallback as any);
+    const wrapped = retryProvider.wrapProvider(primary as any) as any;
+
+    await assert.rejects(
+        () => wrapped._send({ method: "eth_sendRawTransaction", params: ["0xdeadbeef"] }),
+        /primary write RPC/,
+    );
+    assert.deepEqual(calls, ["primary:eth_sendRawTransaction"]);
+});
+
+test("waitForTransaction is not wrapped in the short read timeout or fallback path", async (t) => {
+    const harness = new TransportHarness(t);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            methods: {
+                waitForTransaction: ok({ status: 1 }, 25),
+            },
+        },
+        {
+            config: { timeoutMs: 1 },
+            fallbacks: [
+                {
+                    label: "fallback",
+                    methods: {
+                        waitForTransaction: fail("fallback should not be used for waitForTransaction"),
+                    },
+                },
+            ],
+        },
+    );
+
+    const result = await wrapped.waitForTransaction("0xabc");
+    assert.deepEqual(result, { status: 1 });
+    assert.deepEqual(harness.callLabels(), ["primary"]);
 });
 
 test("without a fallback, read methods fail normally after retries", async (t) => {
@@ -299,6 +395,58 @@ test("read timeouts fall through to fallback", async (t) => {
     assert.equal(harness.getCalls("fallback", "eth_call").length, 1, "fallback handles the timed out read");
 });
 
+test("read timeouts reject without a fallback instead of hanging", async (t) => {
+    const harness = new TransportHarness(t);
+    harness.enableMockTime();
+
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            send: {
+                eth_call: hang(),
+            },
+        },
+        {
+            config: { timeoutMs: 5 },
+        },
+    );
+
+    const resultPromise = wrapped.send("eth_call", []);
+    const rejection = assert.rejects(resultPromise, /timeout after 5ms/);
+    await harness.flush();
+    await harness.tick(5);
+
+    await rejection;
+    assert.equal(harness.getCalls("primary", "eth_call").length, 1, "timed out primary is attempted once");
+});
+
+test("provider method timeouts reject without a fallback instead of hanging", async (t) => {
+    const harness = new TransportHarness(t);
+    harness.enableMockTime();
+
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            methods: {
+                getBlockNumber: hang(),
+            },
+        },
+        {
+            config: { timeoutMs: 5 },
+        },
+    );
+
+    const resultPromise = wrapped.getBlockNumber();
+    const rejection = assert.rejects(resultPromise, /timeout after 5ms/);
+    await harness.flush();
+    await harness.tick(5);
+
+    await rejection;
+    assert.equal(harness.getCalls("primary", "getBlockNumber").length, 1, "timed out primary is attempted once");
+});
+
 test("fallback remains sticky during cooldown, then returns to primary", async (t) => {
     const harness = new TransportHarness(t);
     harness.enableMockTime();
@@ -342,6 +490,50 @@ test("fallback remains sticky during cooldown, then returns to primary", async (
 
     assert.equal(harness.getCalls("primary", "eth_call").length, 2, "primary is bypassed during cooldown, then retried after it expires");
     assert.equal(harness.getCalls("fallback", "eth_call").length, 2, "fallback serves the initial failure and the sticky cooldown window");
+});
+
+test("configureRetries updates active fallback-backed wrapped providers", async (t) => {
+    const harness = new TransportHarness(t);
+
+    configureRetries({
+        ...DEFAULT_RETRY_CONFIG,
+        maxRetries: 0,
+        baseDelay: 1,
+        maxDelay: 1,
+        backoffMultiplier: 1,
+        retryableErrors: ["timeout"],
+    });
+
+    const primary = harness.createProvider({
+        label: "primary",
+        methods: {
+            getBlockNumber: [
+                fail("timeout: primary getBlockNumber"),
+                ok(123),
+            ],
+        },
+    });
+    const fallback = harness.createProvider({
+        label: "fallback",
+        methods: {
+            getBlockNumber: ok(456),
+        },
+    });
+
+    const wrapped = wrapProviderWithRetries(primary as any, fallback as any);
+
+    configureRetries({
+        maxRetries: 1,
+        baseDelay: 1,
+        maxDelay: 1,
+        backoffMultiplier: 1,
+        retryableErrors: ["timeout"],
+    });
+
+    const result = await wrapped.getBlockNumber();
+    assert.equal(result, 123);
+    assert.equal(harness.getCalls("primary", "getBlockNumber").length, 2);
+    assert.equal(harness.getCalls("fallback", "getBlockNumber").length, 0);
 });
 
 test("rpc debug snapshot records endpoint health without request params", async (t) => {
