@@ -49,6 +49,13 @@ test("test:transport includes every deterministic test file", () => {
     assert.deepEqual(missing, []);
 });
 
+test("package lifecycle rebuilds dist before pack and publish", () => {
+    const packageJson = JSON.parse(readRepoFile("package.json"));
+
+    assert.equal(packageJson.scripts.prepack, "npm run build");
+    assert.equal(packageJson.scripts.prepublishOnly, "npm run build");
+});
+
 test("Kyber current-router calldata validation fails closed in source", () => {
     const source = readRepoFile("src/classes/DexAggregators/KyberSwap.ts");
     const validator = extractBlock(source, "function validateSwapCalldata");

@@ -26,6 +26,8 @@
     "crypto"
   ],
   "scripts": {
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build",
     "up": "npm run build && npm publish",
     "fetch": "ts-node fetch-deployment.ts",
     "build": "node node_modules/typescript/bin/tsc",

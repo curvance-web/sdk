@@ -109,12 +109,19 @@ function createVaultExecutionHarness({ borrowAsset = WRAPPED_NATIVE }: { borrowA
     (borrow as any).cache = {
         asset: { address: borrowAsset, decimals: 18n },
         decimals: 18n,
+        debtCap: 1_000n * WAD,
+        debt: 0n,
+        liquidity: 1_000n * WAD,
         assetPrice: WAD,
         assetPriceLower: WAD,
         sharePrice: WAD,
         sharePriceLower: WAD,
         totalAssets: WAD,
         totalSupply: WAD,
+    };
+    (borrow as any).contract = {
+        assetsHeld: async () => 1_000n * WAD,
+        marketOutstandingDebt: async () => 0n,
     };
 
     return { token, borrow, leverageCalls, depositCalls };

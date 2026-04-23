@@ -8,6 +8,7 @@ import { chain_config } from "./chains";
 import { Api } from "./classes/Api";
 import { validateApiUrl } from "./validation";
 import { FeePolicy, defaultFeePolicyForChain } from "./feePolicy";
+import type IDexAgg from "./classes/DexAggregators/IDexAgg";
 
 export interface SetupConfigSnapshot {
     chain: ChainRpcPrefix;
@@ -45,7 +46,7 @@ export interface SetupChainOptions {
 export interface SetupChainResult {
     markets: Market[];
     reader: ProtocolReader;
-    dexAgg: any;
+    dexAgg: IDexAgg;
     global_milestone: any | null;
 }
 

@@ -240,12 +240,12 @@ test("reloadUserMarkets batches addresses and applies responses by address", asy
             calls.push({ addresses, account });
             return {
                 dynamicMarkets: [
-                    { address: MARKET_B },
-                    { address: MARKET_A },
+                    { address: MARKET_B, tokens: [] },
+                    { address: MARKET_A, tokens: [] },
                 ],
                 userMarkets: [
-                    { address: MARKET_B },
-                    { address: MARKET_A },
+                    { address: MARKET_B, tokens: [] },
+                    { address: MARKET_A, tokens: [] },
                 ],
             };
         },
@@ -254,6 +254,7 @@ test("reloadUserMarkets batches addresses and applies responses by address", asy
     const marketA = Object.create(Market.prototype) as Market;
     marketA.address = MARKET_A as any;
     marketA.reader = reader;
+    marketA.tokens = [] as any;
     marketA.applyState = ((dynamic: { address: string }, user: { address: string }) => {
         applied.push({ market: MARKET_A, dynamic: dynamic.address, user: user.address });
     }) as any;
@@ -261,6 +262,7 @@ test("reloadUserMarkets batches addresses and applies responses by address", asy
     const marketB = Object.create(Market.prototype) as Market;
     marketB.address = MARKET_B as any;
     marketB.reader = reader;
+    marketB.tokens = [] as any;
     marketB.applyState = ((dynamic: { address: string }, user: { address: string }) => {
         applied.push({ market: MARKET_B, dynamic: dynamic.address, user: user.address });
     }) as any;
@@ -278,6 +280,84 @@ test("reloadUserMarkets batches addresses and applies responses by address", asy
     ]);
     assert.equal(marketA.account, ACCOUNT);
     assert.equal(marketB.account, ACCOUNT);
+});
+
+test("cached market health and credit getters fail closed on oracle error state", () => {
+    const { market } = createUserRefreshMarket();
+
+    market.cache.user.errorCodeHit = true;
+
+    assert.throws(() => market.userCollateral, /oracle error or stale price/i);
+    assert.throws(() => market.userDebt, /oracle error or stale price/i);
+    assert.throws(() => market.userMaxDebt, /oracle error or stale price/i);
+    assert.throws(() => market.userRemainingCredit, /oracle error or stale price/i);
+    assert.throws(() => market.positionHealth, /oracle error or stale price/i);
+
+    market.cache.user.errorCodeHit = false;
+    market.cache.user.priceStale = true;
+
+    assert.throws(() => market.positionHealth, /oracle error or stale price/i);
+});
+
+test("reloadUserData rejects wrong-address targeted reader rows before applying", async () => {
+    const { market, token } = createUserRefreshMarket();
+    market.account = ACCOUNT as any;
+    market.reader = {
+        getMarketStates: async () => ({
+            dynamicMarkets: [{ address: MARKET_B, tokens: [{ address: TOKEN_A as any }] }],
+            userMarkets: [{
+                address: MARKET_B,
+                collateral: 31n,
+                maxDebt: 32n,
+                debt: 33n,
+                positionHealth: 34n,
+                cooldown: 35n,
+                errorCodeHit: false,
+                priceStale: false,
+                tokens: [{
+                    address: TOKEN_A as any,
+                    userAssetBalance: 20n * WAD,
+                    userShareBalance: 21n * WAD,
+                    userUnderlyingBalance: 22n * WAD,
+                    userCollateral: 23n * WAD,
+                    userDebt: 24n * WAD,
+                    liquidationPrice: 25n * WAD,
+                }],
+            }],
+        }),
+    } as any;
+
+    await assert.rejects(
+        () => market.reloadUserData(OTHER_ACCOUNT as any),
+        /Could not reload dynamic data for market/i,
+    );
+
+    assert.equal(market.account, ACCOUNT);
+    assert.equal((token as any).cache.userAssetBalance, 10n * WAD);
+});
+
+test("reloadUserSummary rejects wrong-address targeted rows before binding", async () => {
+    const { market } = createUserRefreshMarket();
+    market.account = ACCOUNT as any;
+    market.reader = {
+        getMarketSummaries: async () => ([{
+            address: MARKET_B,
+            collateral: 31n,
+            maxDebt: 32n,
+            debt: 33n,
+            positionHealth: 34n,
+            cooldown: 35n,
+            errorCodeHit: false,
+            priceStale: false,
+        }]),
+    } as any;
+
+    await assert.rejects(
+        () => market.reloadUserSummary(OTHER_ACCOUNT as any),
+        /Could not reload user summary data for market/i,
+    );
+
+    assert.equal(market.account, ACCOUNT);
 });
 
 test("reloadUserData binds the refreshed account for downstream helpers", async () => {
@@ -416,6 +496,140 @@ test("reloadUserMarkets does not bind refreshed account when grouped state appli
     assert.equal(market.account, ACCOUNT);
 });
 
+test("reloadUserMarkets commits no partial state when a later grouped market is malformed", async () => {
+    const reader = {
+        getMarketStates: async () => ({
+            dynamicMarkets: [
+                { address: MARKET_A, tokens: [{ address: TOKEN_A as any }] },
+                { address: MARKET_B, tokens: [{ address: TOKEN_B as any }] },
+            ],
+            userMarkets: [
+                {
+                    address: MARKET_A,
+                    collateral: 0n,
+                    maxDebt: 0n,
+                    debt: 0n,
+                    positionHealth: 0n,
+                    cooldown: 0n,
+                    errorCodeHit: false,
+                    priceStale: false,
+                    tokens: [{
+                        address: TOKEN_A as any,
+                        userAssetBalance: 99n,
+                        userShareBalance: 0n,
+                        userUnderlyingBalance: 0n,
+                        userCollateral: 0n,
+                        userDebt: 0n,
+                        liquidationPrice: 0n,
+                    }],
+                },
+                {
+                    address: MARKET_B,
+                    collateral: 0n,
+                    maxDebt: 0n,
+                    debt: 0n,
+                    positionHealth: 0n,
+                    cooldown: 0n,
+                    errorCodeHit: false,
+                    priceStale: false,
+                    tokens: [],
+                },
+            ],
+        }),
+    };
+    const marketA = createRefreshHelperMarket(MARKET_A, TOKEN_A, reader);
+    const marketB = createRefreshHelperMarket(MARKET_B, TOKEN_B, reader);
+
+    await assert.rejects(
+        () => Market.reloadUserMarkets([marketA, marketB], ACCOUNT as any),
+        /Token row count mismatch.*user=0/i,
+    );
+
+    assert.equal(marketA.account, null);
+    assert.equal(marketB.account, null);
+    assert.equal((marketA.tokens[0] as any).cache.userAssetBalance, 0n);
+});
+
+test("reloadUserMarkets commits no partial state when a later reader group fails", async () => {
+    const readerA = {
+        getMarketStates: async () => ({
+            dynamicMarkets: [{ address: MARKET_A, tokens: [{ address: TOKEN_A as any }] }],
+            userMarkets: [{
+                address: MARKET_A,
+                collateral: 0n,
+                maxDebt: 0n,
+                debt: 0n,
+                positionHealth: 0n,
+                cooldown: 0n,
+                errorCodeHit: false,
+                priceStale: false,
+                tokens: [{
+                    address: TOKEN_A as any,
+                    userAssetBalance: 99n,
+                    userShareBalance: 0n,
+                    userUnderlyingBalance: 0n,
+                    userCollateral: 0n,
+                    userDebt: 0n,
+                    liquidationPrice: 0n,
+                }],
+            }],
+        }),
+    };
+    const readerB = {
+        getMarketStates: async () => ({
+            dynamicMarkets: [{ address: MARKET_B, tokens: [{ address: TOKEN_B as any }] }],
+            userMarkets: [{
+                address: MARKET_B,
+                collateral: 0n,
+                maxDebt: 0n,
+                debt: 0n,
+                positionHealth: 0n,
+                cooldown: 0n,
+                errorCodeHit: false,
+                priceStale: false,
+                tokens: [],
+            }],
+        }),
+    };
+    const marketA = createRefreshHelperMarket(MARKET_A, TOKEN_A, readerA);
+    const marketB = createRefreshHelperMarket(MARKET_B, TOKEN_B, readerB);
+
+    await assert.rejects(
+        () => Market.reloadUserMarkets([marketA, marketB], ACCOUNT as any),
+        /Token row count mismatch.*user=0/i,
+    );
+
+    assert.equal(marketA.account, null);
+    assert.equal(marketB.account, null);
+    assert.equal((marketA.tokens[0] as any).cache.userAssetBalance, 0n);
+});
+
+test("reloadUserMarketSummaries commits no partial state when a later grouped market is missing", async () => {
+    const reader = {
+        getMarketSummaries: async () => ([{
+            address: MARKET_A,
+            collateral: 1n,
+            maxDebt: 2n,
+            debt: 3n,
+            positionHealth: 4n,
+            cooldown: 5n,
+            errorCodeHit: false,
+            priceStale: false,
+        }]),
+    };
+    const marketA = createRefreshHelperMarket(MARKET_A, TOKEN_A, reader);
+    const marketB = createRefreshHelperMarket(MARKET_B, TOKEN_B, reader);
+
+    await assert.rejects(
+        () => Market.reloadUserMarketSummaries([marketA, marketB], ACCOUNT as any),
+        /Could not reload market user summary for/i,
+    );
+
+    assert.equal(marketA.account, null);
+    assert.equal(marketB.account, null);
+    assert.equal(marketA.cache.user.collateral, 0n);
+});
+
 test("reloadUserMarkets rejects signer-backed grouped refreshes for a different account before RPC", async () => {
     let readerCalled = false;
     const reader = {
@@ -443,8 +657,8 @@ test("reloadUserMarkets keeps same-chain readers with different providers separa
     readerA.getMarketStates = (async () => {
         calls.push("A");
         return {
-            dynamicMarkets: [{ address: MARKET_A }],
-            userMarkets: [{ address: MARKET_A }],
+            dynamicMarkets: [{ address: MARKET_A, tokens: [] }],
+            userMarkets: [{ address: MARKET_A, tokens: [] }],
         };
     }) as any;
 
@@ -452,19 +666,21 @@ test("reloadUserMarkets keeps same-chain readers with different providers separa
     readerB.getMarketStates = (async () => {
         calls.push("B");
         return {
-            dynamicMarkets: [{ address: MARKET_B }],
-            userMarkets: [{ address: MARKET_B }],
+            dynamicMarkets: [{ address: MARKET_B, tokens: [] }],
+            userMarkets: [{ address: MARKET_B, tokens: [] }],
         };
     }) as any;
 
     const marketA = Object.create(Market.prototype) as Market;
     marketA.address = MARKET_A as any;
     marketA.reader = readerA as any;
+    marketA.tokens = [] as any;
     marketA.applyState = (() => undefined) as any;
 
     const marketB = Object.create(Market.prototype) as Market;
     marketB.address = MARKET_B as any;
     marketB.reader = readerB as any;
+    marketB.tokens = [] as any;
     marketB.applyState = (() => undefined) as any;
 
     await Market.reloadUserMarkets([marketA, marketB], ACCOUNT as any);

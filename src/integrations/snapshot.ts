@@ -170,20 +170,33 @@ export async function takePortfolioSnapshot(
             market.assertRefreshAccountCompatible(account);
         }
 
+        const plans: Array<{
+            market: Market;
+            dynamic: Parameters<Market["applyState"]>[0];
+            user: NonNullable<Parameters<Market["applyState"]>[1]>;
+        }> = [];
+
         for (const { reader, markets: groupedMarkets } of groupMarketsByReaderDeployment(markets)) {
             const { dynamicMarket, userData } = await reader.getAllDynamicState(account);
+            const dynamicByAddress = new Map(dynamicMarket.map((market) => [market.address.toLowerCase(), market]));
+            const userByAddress = new Map(userData.markets.map((market) => [market.address.toLowerCase(), market]));
 
             for (const market of groupedMarkets) {
-                const dynamic = dynamicMarket.find((m) => m.address === market.address);
-                const user = userData.markets.find((m) => m.address === market.address);
+                const dynamic = dynamicByAddress.get(market.address.toLowerCase());
+                const user = userByAddress.get(market.address.toLowerCase());
                 if (!dynamic || !user) {
                     throw new Error(
                         `Fresh snapshot refresh missing market state for ${market.address}.`,
                     );
                 }
-                market.applyState(dynamic, user);
-                market.bindRefreshedAccount(account);
+                market.validateRefreshState(dynamic, user);
+                plans.push({ market, dynamic, user });
             }
+        }
+
+        for (const { market, dynamic, user } of plans) {
+            market.applyState(dynamic, user);
+            market.bindRefreshedAccount(account);
         }
     } else {
         const summaryScopedMarkets = markets.filter((market) => market.userDataScope === "summary");

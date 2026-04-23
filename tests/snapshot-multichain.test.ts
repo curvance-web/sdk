@@ -27,6 +27,20 @@ function createToken(symbol: string, isBorrowable = false) {
     };
 }
 
+function createRefreshDynamicMarket(address: string, tokenAddress: string) {
+    return {
+        address,
+        tokens: [{ address: tokenAddress }],
+    };
+}
+
+function createRefreshUserMarket(address: string, tokenAddress: string) {
+    return {
+        address,
+        tokens: [{ address: tokenAddress }],
+    };
+}
+
 function createSnapshotMarket({
     address,
     name,
@@ -45,12 +59,13 @@ function createSnapshotMarket({
     signer?: { address: string } | null;
 }) {
     const market = Object.create(Market.prototype) as Market;
+    const token = createToken(name, true);
     market.address = address as any;
     market.account = account as any;
     market.signer = signer as any ?? null;
     market.reader = (reader ?? { batchKey: null, getAllDynamicState: async () => ({ dynamicMarket: [], userData: { markets: [] } }) }) as any;
     market.setup = { chain } as any;
-    market.tokens = [createToken(name, true)] as any;
+    market.tokens = [token] as any;
     market.applyState = (applyState ?? (() => undefined)) as any;
 
     Object.defineProperty(market, "name", {
@@ -188,13 +203,13 @@ test("takePortfolioSnapshot refresh groups explicit markets by deployment key", 
             calls.push({ source: "A", account });
             return {
                 dynamicMarket: [
-                    { address: MARKET_A },
-                    { address: MARKET_B },
+                    createRefreshDynamicMarket(MARKET_A, marketA.tokens[0]!.address),
+                    createRefreshDynamicMarket(MARKET_B, marketB.tokens[0]!.address),
                 ],
                 userData: {
                     markets: [
-                        { address: MARKET_A },
-                        { address: MARKET_B },
+                        createRefreshUserMarket(MARKET_A, marketA.tokens[0]!.address),
+                        createRefreshUserMarket(MARKET_B, marketB.tokens[0]!.address),
                     ],
                 },
             };
@@ -232,9 +247,9 @@ test("takePortfolioSnapshot refresh groups explicit markets by deployment key", 
             getAllDynamicState: async (account: string) => {
                 calls.push({ source: "C", account });
                 return {
-                    dynamicMarket: [{ address: MARKET_C }],
+                    dynamicMarket: [createRefreshDynamicMarket(MARKET_C, marketC.tokens[0]!.address)],
                     userData: {
-                        markets: [{ address: MARKET_C }],
+                        markets: [createRefreshUserMarket(MARKET_C, marketC.tokens[0]!.address)],
                     },
                 };
             },
@@ -269,8 +284,8 @@ test("takePortfolioSnapshot refresh keeps same-chain readers with different prov
     readerA.getAllDynamicState = (async () => {
         calls.push("A");
         return {
-            dynamicMarket: [{ address: MARKET_A }],
-            userData: { markets: [{ address: MARKET_A }] },
+            dynamicMarket: [createRefreshDynamicMarket(MARKET_A, marketA.tokens[0]!.address)],
+            userData: { markets: [createRefreshUserMarket(MARKET_A, marketA.tokens[0]!.address)] },
         };
     }) as any;
 
@@ -278,8 +293,8 @@ test("takePortfolioSnapshot refresh keeps same-chain readers with different prov
     readerB.getAllDynamicState = (async () => {
         calls.push("B");
         return {
-            dynamicMarket: [{ address: MARKET_B }],
-            userData: { markets: [{ address: MARKET_B }] },
+            dynamicMarket: [createRefreshDynamicMarket(MARKET_B, marketB.tokens[0]!.address)],
+            userData: { markets: [createRefreshUserMarket(MARKET_B, marketB.tokens[0]!.address)] },
         };
     }) as any;
 
@@ -328,6 +343,84 @@ test("takePortfolioSnapshot refresh fails closed when a refreshed market payload
     );
 });
 
+test("takePortfolioSnapshot refresh commits no partial state when a later grouped market is missing", async () => {
+    const applied: string[] = [];
+    const reader = {
+        batchKey: "monad-mainnet:partial-reader",
+        getAllDynamicState: async () => ({
+            dynamicMarket: [createRefreshDynamicMarket(MARKET_A, marketA.tokens[0]!.address)],
+            userData: { markets: [createRefreshUserMarket(MARKET_A, marketA.tokens[0]!.address)] },
+        }),
+    };
+    const marketA = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Market A",
+        chain: "monad-mainnet",
+        reader,
+        applyState: (dynamic, user) => applied.push(`${dynamic.address}:${user.address}`),
+    });
+    const marketB = createSnapshotMarket({
+        address: MARKET_B,
+        name: "Market B",
+        chain: "monad-mainnet",
+        reader,
+        applyState: (dynamic, user) => applied.push(`${dynamic.address}:${user.address}`),
+    });
+
+    await assert.rejects(
+        () => takePortfolioSnapshot(OTHER_ACCOUNT as any, {
+            markets: [marketA, marketB],
+            refresh: true,
+        }),
+        /Fresh snapshot refresh missing market state/i,
+    );
+
+    assert.deepEqual(applied, []);
+    assert.equal(marketA.account, ACCOUNT);
+    assert.equal(marketB.account, ACCOUNT);
+});
+
+test("takePortfolioSnapshot refresh commits no partial state when a later reader group fails", async () => {
+    const applied: string[] = [];
+    const marketA = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Market A",
+        chain: "monad-mainnet",
+        reader: {
+            batchKey: "monad-mainnet:first-reader",
+            getAllDynamicState: async () => ({
+                dynamicMarket: [createRefreshDynamicMarket(MARKET_A, marketA.tokens[0]!.address)],
+                userData: { markets: [createRefreshUserMarket(MARKET_A, marketA.tokens[0]!.address)] },
+            }),
+        },
+        applyState: (dynamic, user) => applied.push(`${dynamic.address}:${user.address}`),
+    });
+    const marketB = createSnapshotMarket({
+        address: MARKET_B,
+        name: "Market B",
+        chain: "arb-sepolia",
+        reader: {
+            batchKey: "arb-sepolia:second-reader",
+            getAllDynamicState: async () => {
+                throw new Error("later reader failed");
+            },
+        },
+        applyState: (dynamic, user) => applied.push(`${dynamic.address}:${user.address}`),
+    });
+
+    await assert.rejects(
+        () => takePortfolioSnapshot(OTHER_ACCOUNT as any, {
+            markets: [marketA, marketB],
+            refresh: true,
+        }),
+        /later reader failed/i,
+    );
+
+    assert.deepEqual(applied, []);
+    assert.equal(marketA.account, ACCOUNT);
+    assert.equal(marketB.account, ACCOUNT);
+});
+
 test("takePortfolioSnapshot refresh does not bind account when state application fails", async () => {
     const market = createSnapshotMarket({
         address: MARKET_A,
@@ -337,8 +430,8 @@ test("takePortfolioSnapshot refresh does not bind account when state application
         reader: {
             batchKey: "monad-mainnet:malformed-reader",
             getAllDynamicState: async () => ({
-                dynamicMarket: [{ address: MARKET_A }],
-                userData: { markets: [{ address: MARKET_A }] },
+                dynamicMarket: [createRefreshDynamicMarket(MARKET_A, market.tokens[0]!.address)],
+                userData: { markets: [createRefreshUserMarket(MARKET_A, market.tokens[0]!.address)] },
             }),
         },
         applyState: () => {
@@ -413,8 +506,8 @@ test("takePortfolioSnapshot promotes summary-scoped markets back to full user da
             getMarketStates: async () => {
                 reloads += 1;
                 return {
-                    dynamicMarkets: [{ address: MARKET_A }],
-                    userMarkets: [{ address: MARKET_A }],
+                    dynamicMarkets: [createRefreshDynamicMarket(MARKET_A, market.tokens[0]!.address)],
+                    userMarkets: [createRefreshUserMarket(MARKET_A, market.tokens[0]!.address)],
                 };
             },
         },

@@ -28,6 +28,6 @@ export default interface IDexAgg {
         action: Swap;
         quote: Quote;
     }>;
-    quoteMin(...args: QuoteArgs): Promise<BigInt>;
+    quoteMin(...args: QuoteArgs): Promise<bigint>;
     quote(...args: QuoteArgs): Promise<Quote>;
 }

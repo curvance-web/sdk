@@ -1301,7 +1301,7 @@ export class CToken extends Calldata<ICToken> {
                 ),
                 type: 'native-vault'
             });
-            tokens_exclude.push(EMPTY_ADDRESS, NATIVE_ADDRESS);
+            tokens_exclude.push(EMPTY_ADDRESS.toLowerCase(), NATIVE_ADDRESS.toLowerCase());
         }
 
         if(this.zapTypes.includes('native-simple')) {
@@ -1317,7 +1317,7 @@ export class CToken extends Calldata<ICToken> {
             });
 
             if(!this.zapTypes.includes('native-vault')) {
-                tokens_exclude.push(EMPTY_ADDRESS, NATIVE_ADDRESS);
+                tokens_exclude.push(EMPTY_ADDRESS.toLowerCase(), NATIVE_ADDRESS.toLowerCase());
             }
         }
 
@@ -1432,6 +1432,47 @@ export class CToken extends Calldata<ICToken> {
     private assertSimpleLeverageSwapAssetsDiffer(borrow: BorrowableCToken) {
         if (borrow.asset.address.toLowerCase() === this.asset.address.toLowerCase()) {
             throw new Error("Simple leverage requires distinct collateral and borrow assets.");
+        }
+    }
+
+    private async assertLeverageBorrowCapacity(borrow: BorrowableCToken, borrowAssets: bigint) {
+        if (borrowAssets === 0n) {
+            return;
+        }
+
+        const [assetsHeld, outstandingDebt] = await Promise.all([
+            borrow.fetchLiquidity(),
+            borrow.marketOutstandingDebt(),
+        ]);
+        const remainingDebtCap = borrow.cache.debtCap > outstandingDebt
+            ? borrow.cache.debtCap - outstandingDebt
+            : 0n;
+        const capacity = assetsHeld < remainingDebtCap ? assetsHeld : remainingDebtCap;
+        if (borrowAssets > capacity) {
+            throw new Error("Selected borrow token does not have enough remaining debt capacity or liquidity for this leverage operation.");
+        }
+    }
+
+    private assertSelectedBorrowDebtCanDeleverage(
+        borrow: BorrowableCToken,
+        selectedDebtAssets: bigint,
+        requiredDebtReductionUsd: USD,
+    ) {
+        if (requiredDebtReductionUsd.lte(0)) {
+            return;
+        }
+
+        const price = borrow.getPrice(true);
+        if (!price.isFinite() || price.lte(0)) {
+            throw new Error("Selected borrow token has an invalid price for deleverage sizing.");
+        }
+
+        const requiredDebtAssets = FormatConverter.decimalToBigInt(
+            requiredDebtReductionUsd.div(price),
+            borrow.asset.decimals,
+        );
+        if (requiredDebtAssets > selectedDebtAssets) {
+            throw new Error("Selected borrow token debt is too small for the requested deleverage target.");
         }
     }
 
@@ -1651,6 +1692,16 @@ export class CToken extends Calldata<ICToken> {
                 preview.targetLeverage,
             );
             const { borrowAmount, borrowAssets, feeBps, targetLeverage } = preview;
+            if (borrowAssets === 0n) {
+                if (simulate) {
+                    return {
+                        success: false,
+                        error: "Target leverage must exceed the current leverage enough to borrow more.",
+                    };
+                }
+                throw new Error("Target leverage must exceed the current leverage enough to borrow more.");
+            }
+            await this.assertLeverageBorrowCapacity(borrow, borrowAssets);
 
             switch(type) {
                 case 'simple': {
@@ -1763,7 +1814,8 @@ export class CToken extends Calldata<ICToken> {
             let calldata: bytes;
 
             const snapshot = await this._getLeverageSnapshot(borrowToken);
-            const { collateralAssetReduction } = this.previewLeverageDown(newLeverage, currentLeverage);
+            const preview = this.previewLeverageDown(newLeverage, currentLeverage);
+            const { collateralAssetReduction } = preview;
             const isFullDeleverage = newLeverage.equals(1);
             const maxTokenCollateral = this.virtualConvertToAssets(
                 this.readFreshUserCache("userCollateral", "executing leverage down")
@@ -1824,13 +1876,21 @@ export class CToken extends Calldata<ICToken> {
                             }
                             throw new Error(error);
                         }
-                    } else if (feeBps > 0n) {
-                        // Partial deleverage: inflate swap size to compensate
-                        // for fee deduction on input. KyberSwap deducts feeBps
-                        // from input before swapping, so without compensation
-                        // the swap underdelivers and actual leverage is slightly
-                        // higher than target.
-                        swapCollateral = swapCollateral * 10000n / (10000n - feeBps);
+                    } else {
+                        this.assertSelectedBorrowDebtCanDeleverage(
+                            borrowToken,
+                            snapshot.debtTokenBalance,
+                            Decimal.max(this.market.userDebt.sub(preview.newDebt), Decimal(0)),
+                        );
+
+                        if (feeBps > 0n) {
+                            // Partial deleverage: inflate swap size to compensate
+                            // for fee deduction on input. KyberSwap deducts feeBps
+                            // from input before swapping, so without compensation
+                            // the swap underdelivers and actual leverage is slightly
+                            // higher than target.
+                            swapCollateral = swapCollateral * 10000n / (10000n - feeBps);
+                        }
                     }
 
                     if (!isFullDeleverage && swapCollateral > maxTokenCollateral) {
@@ -1946,6 +2006,7 @@ export class CToken extends Calldata<ICToken> {
 
             const slippage = this._leverageUpSlippage(toBps(slippage_), preview.targetLeverage);
             const { borrowAmount, borrowAssets, feeBps, targetLeverage } = preview;
+            await this.assertLeverageBorrowCapacity(borrow, borrowAssets);
 
             switch(type) {
                 case 'simple': {

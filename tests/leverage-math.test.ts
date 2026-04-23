@@ -77,6 +77,11 @@ describe('amplifyContractSlippage', () => {
             assert.strictEqual(result, 4000n);
         });
 
+        test('clamps amplified contract slippage below the contract ceiling', () => {
+            const result = amplifyContractSlippage(9_990n, Decimal(10), 4n);
+            assert.strictEqual(result, 9_999n);
+        });
+
         test('handles high-precision Decimal leverageDelta values', () => {
             const result = amplifyContractSlippage(0n, Decimal('9.9999999999'), 4n);
             assert.strictEqual(result, 40n);

@@ -82,6 +82,20 @@ function createDynamicMarket(address: string = MARKET_A): DynamicMarketData {
     };
 }
 
+function createRefreshDynamicMarket(address: string) {
+    return {
+        address,
+        tokens: [{ address: TOKEN_A }],
+    };
+}
+
+function createRefreshUserMarket(address: string) {
+    return {
+        address,
+        tokens: [{ address: TOKEN_A }],
+    };
+}
+
 function createMarket(
     address: string,
     reader: any,
@@ -183,8 +197,8 @@ test("query budget: refreshActiveUserMarkets refreshes all requested markets bef
         getMarketStates: async (addresses: string[], account: string) => {
             calls.push({ addresses, account });
             return {
-                dynamicMarkets: addresses.map((address) => ({ address })),
-                userMarkets: addresses.map((address) => ({ address })),
+                dynamicMarkets: addresses.map(createRefreshDynamicMarket),
+                userMarkets: addresses.map(createRefreshUserMarket),
             };
         },
     } as any;
@@ -228,8 +242,8 @@ test("query budget: refreshActiveUserMarkets batches same deployment across read
         getMarketStates: async (addresses: string[], account: string) => {
             calls.push({ source: "A", addresses, account });
             return {
-                dynamicMarkets: addresses.map((address) => ({ address })),
-                userMarkets: addresses.map((address) => ({ address })),
+                dynamicMarkets: addresses.map(createRefreshDynamicMarket),
+                userMarkets: addresses.map(createRefreshUserMarket),
             };
         },
     } as any;
@@ -319,8 +333,8 @@ test("query budget: reloadUserData uses one targeted market-state call", async (
         getMarketStates: async (addresses: string[], account: string) => {
             calls.push({ addresses, account });
             return {
-                dynamicMarkets: [{ address: MARKET_A }],
-                userMarkets: [{ address: MARKET_A }],
+                dynamicMarkets: [createRefreshDynamicMarket(MARKET_A)],
+                userMarkets: [createRefreshUserMarket(MARKET_A)],
             };
         },
     });

@@ -152,6 +152,10 @@ export class BorrowableCToken extends CToken {
     async borrow(amount: TokenInput, receiver: address | null = null) {
         const signer = this.requireSigner();
         receiver ??= signer.address as address;
+        if (this.readFreshUserCache("userCollateral", "borrowing") > 0n) {
+            throw new Error("Cannot borrow from a token that is currently posted as collateral.");
+        }
+
         const assets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
 
         const calldata = this.getCallData("borrow", [ assets, receiver ]);

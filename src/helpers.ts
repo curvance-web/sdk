@@ -119,9 +119,12 @@ export function amplifyContractSlippage(
     leverageDelta: Decimal,
     bpsToAmplify: bigint,
 ): bigint {
-    if (bpsToAmplify === 0n) return baseSlippage;
+    if (bpsToAmplify === 0n) {
+        return baseSlippage > MAX_SWAP_SLIPPAGE_BPS ? MAX_SWAP_SLIPPAGE_BPS : baseSlippage;
+    }
     const expansion = leverageDelta.mul(Number(bpsToAmplify)).ceil().toFixed(0);
-    return baseSlippage + BigInt(expansion);
+    const amplified = baseSlippage + BigInt(expansion);
+    return amplified > MAX_SWAP_SLIPPAGE_BPS ? MAX_SWAP_SLIPPAGE_BPS : amplified;
 }
 
 /**

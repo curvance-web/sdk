@@ -185,6 +185,84 @@ test("BorrowableCToken.repay preflights projected full-repay debt before encodin
     }
 });
 
+test("BorrowableCToken.borrow fails before calldata when the same token is posted as collateral", async () => {
+    const token = Object.create(BorrowableCToken.prototype) as BorrowableCToken & {
+        __state: {
+            callDataCalls: unknown[];
+            oracleRouteCalled: boolean;
+        };
+    };
+
+    (token as any).address = CTOKEN;
+    (token as any).market = { address: "0x0000000000000000000000000000000000000abc" };
+    (token as any).cache = {
+        userCollateral: 1n,
+        asset: {
+            address: ASSET,
+            decimals: 18n,
+        },
+    };
+    (token as any).requireSigner = () => ({ address: OWNER });
+    token.__state = {
+        callDataCalls: [],
+        oracleRouteCalled: false,
+    };
+    (token as any).getCallData = (...args: unknown[]) => {
+        token.__state.callDataCalls.push(args);
+        return "0xborrow";
+    };
+    (token as any).oracleRoute = async () => {
+        token.__state.oracleRouteCalled = true;
+        return {} as any;
+    };
+
+    await assert.rejects(
+        () => token.borrow(Decimal(1)),
+        /Cannot borrow from a token that is currently posted as collateral/i,
+    );
+    assert.deepEqual(token.__state.callDataCalls, []);
+    assert.equal(token.__state.oracleRouteCalled, false);
+});
+
+test("BorrowableCToken.borrow encodes when same-token collateral is absent", async () => {
+    const token = Object.create(BorrowableCToken.prototype) as BorrowableCToken & {
+        __state: {
+            callDataCalls: Array<{ method: string; args: unknown[] }>;
+            oracleRouteCalled: boolean;
+        };
+    };
+
+    (token as any).address = CTOKEN;
+    (token as any).market = { address: "0x0000000000000000000000000000000000000abc" };
+    (token as any).cache = {
+        userCollateral: 0n,
+        asset: {
+            address: ASSET,
+            decimals: 18n,
+        },
+    };
+    (token as any).requireSigner = () => ({ address: OWNER });
+    token.__state = {
+        callDataCalls: [],
+        oracleRouteCalled: false,
+    };
+    (token as any).getCallData = (method: string, args: unknown[]) => {
+        token.__state.callDataCalls.push({ method, args });
+        return "0xborrow";
+    };
+    (token as any).oracleRoute = async () => {
+        token.__state.oracleRouteCalled = true;
+        return {} as any;
+    };
+
+    await token.borrow(Decimal(2));
+    assert.deepEqual(token.__state.callDataCalls, [{
+        method: "borrow",
+        args: [2n * WAD, OWNER],
+    }]);
+    assert.equal(token.__state.oracleRouteCalled, true);
+});
+
 test("BorrowableCToken refresh helpers use assetsHeld as the IRM denominator", async () => {
     const token = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
     const calls: Array<{ method: string; assetsHeld: bigint; debt: bigint; fee?: bigint }> = [];

@@ -36,6 +36,10 @@ function createSimpleExecutionHarness({
     tokenCollateralUsd = Decimal(100),
     userDebtUsd = Decimal(40),
     borrowAsset = DEBT,
+    borrowDebtCapAssets = 1_000n * WAD,
+    borrowOutstandingDebtAssets = 0n,
+    borrowLiquidityAssets = 1_000n * WAD,
+    selectedDebtTokenBalance = toWad(userDebtUsd.toString()),
 }: {
     feeByOperation?: Partial<Record<'leverage-up' | 'deposit-and-leverage' | 'leverage-down', bigint>>;
     maxLeverage?: Decimal;
@@ -43,6 +47,10 @@ function createSimpleExecutionHarness({
     tokenCollateralUsd?: Decimal;
     userDebtUsd?: Decimal;
     borrowAsset?: string;
+    borrowDebtCapAssets?: bigint;
+    borrowOutstandingDebtAssets?: bigint;
+    borrowLiquidityAssets?: bigint;
+    selectedDebtTokenBalance?: bigint;
 } = {}) {
     const feeCalls: FeePolicyContext[] = [];
     const quoteCalls: Array<{
@@ -161,7 +169,7 @@ function createSimpleExecutionHarness({
         spenderLabel: 'simple PositionManager',
     });
     (token as any)._getLeverageSnapshot = async () => ({
-        debtTokenBalance: toWad(userDebtUsd.toString()),
+        debtTokenBalance: selectedDebtTokenBalance,
         debtAssetPrice: WAD,
         collateralAssetPrice: WAD,
     });
@@ -185,6 +193,13 @@ function createSimpleExecutionHarness({
         sharePriceLower: WAD,
         totalAssets: WAD,
         totalSupply: WAD,
+        debtCap: borrowDebtCapAssets,
+        debt: borrowOutstandingDebtAssets,
+        liquidity: borrowLiquidityAssets,
+    };
+    (borrow as any).contract = {
+        assetsHeld: async () => borrowLiquidityAssets,
+        marketOutstandingDebt: async () => borrowOutstandingDebtAssets,
     };
 
     return { token, borrow, feeCalls, quoteCalls, leverageCalls, deleverageCalls, depositCalls };
@@ -497,6 +512,108 @@ describe('CToken simple leverage execution', () => {
         });
         assert.deepEqual(quoteCalls, []);
         assert.deepEqual(leverageCalls, []);
+    });
+
+    test('partial leverageDown fails closed when selected debt token cannot absorb the requested repayment', async () => {
+        const { token, borrow, quoteCalls, leverageCalls } = createSimpleExecutionHarness({
+            marketCollateralUsd: Decimal(100),
+            tokenCollateralUsd: Decimal(100),
+            userDebtUsd: Decimal(50),
+            selectedDebtTokenBalance: toWad(5),
+        });
+
+        const result = await token.leverageDown(
+            borrow,
+            Decimal(2),
+            Decimal('1.5'),
+            'simple',
+            Decimal(0.01),
+            true,
+        );
+
+        assert.deepEqual(result, {
+            success: false,
+            error: 'Selected borrow token debt is too small for the requested deleverage target.',
+        });
+        assert.deepEqual(quoteCalls, []);
+        assert.deepEqual(leverageCalls, []);
+    });
+
+    test('leverageUp fails closed when selected borrow token capacity is below the previewed borrow', async () => {
+        const { token, borrow, quoteCalls, leverageCalls } = createSimpleExecutionHarness({
+            borrowDebtCapAssets: toWad(10),
+            borrowOutstandingDebtAssets: 0n,
+            borrowLiquidityAssets: toWad(100),
+        });
+
+        const result = await token.leverageUp(
+            borrow,
+            Decimal(2),
+            'simple',
+            Decimal(0.01),
+            true,
+        );
+
+        assert.deepEqual(result, {
+            success: false,
+            error: 'Selected borrow token does not have enough remaining debt capacity or liquidity for this leverage operation.',
+        });
+        assert.deepEqual(quoteCalls, []);
+        assert.deepEqual(leverageCalls, []);
+    });
+
+    test('leverageUp fails closed when the target rounds to zero borrow assets', async () => {
+        const { token, borrow, quoteCalls, leverageCalls } = createSimpleExecutionHarness();
+        const originalPreviewLeverageUp = token.previewLeverageUp.bind(token);
+        (token as any).previewLeverageUp = (
+            newLeverage: Decimal,
+            previewBorrow: BorrowableCToken,
+            depositAmount?: bigint,
+            positionManagerType?: any,
+        ) => ({
+            ...originalPreviewLeverageUp(newLeverage, previewBorrow, depositAmount, positionManagerType),
+            borrowAmount: Decimal(0),
+            borrowAssets: 0n,
+        });
+
+        const result = await token.leverageUp(
+            borrow,
+            Decimal(2),
+            'simple',
+            Decimal(0.01),
+            true,
+        );
+
+        assert.deepEqual(result, {
+            success: false,
+            error: 'Target leverage must exceed the current leverage enough to borrow more.',
+        });
+        assert.deepEqual(quoteCalls, []);
+        assert.deepEqual(leverageCalls, []);
+    });
+
+    test('depositAndLeverage fails closed when selected borrow token liquidity is below the previewed borrow', async () => {
+        const { token, borrow, quoteCalls, depositCalls } = createSimpleExecutionHarness({
+            borrowDebtCapAssets: toWad(100),
+            borrowOutstandingDebtAssets: 0n,
+            borrowLiquidityAssets: toWad(1),
+        });
+
+        const result = await token.depositAndLeverage(
+            Decimal(10),
+            borrow,
+            Decimal('1.60'),
+            'simple',
+            Decimal(0.01),
+            true,
+        );
+
+        assert.deepEqual(result, {
+            success: false,
+            error: 'Selected borrow token does not have enough remaining debt capacity or liquidity for this leverage operation.',
+        });
+        assert.deepEqual(quoteCalls, []);
+        assert.deepEqual(depositCalls, []);
     });
 
     test('leverageUp uses leverage-up fee policy output in quote and calldata', async () => {

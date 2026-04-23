@@ -109,7 +109,7 @@ export class MultiDexAgg implements IDexAgg {
     /**
      * Returns the minimum output from the best quote.
      */
-    async quoteMin(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address): Promise<BigInt> {
+    async quoteMin(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address): Promise<bigint> {
         if (this.aggregators.length === 1) {
             return this.primary.quoteMin(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
         }

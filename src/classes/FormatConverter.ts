@@ -60,6 +60,10 @@ export default class FormatConverter {
             price = this.bigIntToUsd(price);
         }
 
+        if (!price.isFinite() || price.lte(0)) {
+            throw new Error("Cannot convert USD to tokens with a non-positive or non-finite price.");
+        }
+
         if (typeof decimals === 'bigint') {
             decimals = Number(decimals);
         }

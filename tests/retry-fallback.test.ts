@@ -74,22 +74,83 @@ test("read provider methods fall through to fallback", async (t) => {
     assert.deepEqual(harness.callLabels(), ["primary", "fallback"]);
 });
 
-test("waitForTransaction stays on the retry/fallback path", async (t) => {
+test("raw write RPC send stays on the primary provider even while read fallback is active", async (t) => {
     const harness = new TransportHarness(t);
     const wrapped = harness.wrapReadProvider(
         RetryableProvider,
         {
             label: "primary",
-            methods: {
-                waitForTransaction: fail("timeout: primary waitForTransaction"),
+            send: {
+                eth_call: fail("timeout: primary eth_call"),
+                eth_sendRawTransaction: ok("primary:write:ok"),
             },
         },
         {
             fallbacks: [
                 {
                     label: "fallback",
+                    send: {
+                        eth_call: ok("fallback:eth_call:ok"),
+                        eth_sendRawTransaction: fail("fallback must not receive write RPC"),
+                    },
+                },
+            ],
+        },
+    );
+
+    assert.equal(await wrapped.send("eth_call", []), "fallback:eth_call:ok");
+    assert.equal(await wrapped.send("eth_sendRawTransaction", ["0xdeadbeef"]), "primary:write:ok");
+    assert.equal(harness.getCalls("primary", "eth_sendRawTransaction").length, 1);
+    assert.equal(harness.getCalls("fallback", "eth_sendRawTransaction").length, 0);
+});
+
+test("raw write RPC _send stays on the primary provider and is not retried as a read", async () => {
+    const calls: string[] = [];
+    const primary = {
+        _send: async (payload: { method: string }) => {
+            calls.push(`primary:${payload.method}`);
+            throw new Error("timeout: primary write RPC");
+        },
+    };
+    const fallback = {
+        _send: async (payload: { method: string }) => {
+            calls.push(`fallback:${payload.method}`);
+            return "fallback should not be used";
+        },
+    };
+    const retryProvider = new RetryableProvider({
+        maxRetries: 1,
+        baseDelay: 1,
+        maxDelay: 1,
+        backoffMultiplier: 1,
+        retryableErrors: ["timeout"],
+    }, fallback as any);
+    const wrapped = retryProvider.wrapProvider(primary as any) as any;
+
+    await assert.rejects(
+        () => wrapped._send({ method: "eth_sendRawTransaction", params: ["0xdeadbeef"] }),
+        /primary write RPC/,
+    );
+    assert.deepEqual(calls, ["primary:eth_sendRawTransaction"]);
+});
+
+test("waitForTransaction is not wrapped in the short read timeout or fallback path", async (t) => {
+    const harness = new TransportHarness(t);
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            methods: {
+                waitForTransaction: ok({ status: 1 }, 25),
+            },
+        },
+        {
+            config: { timeoutMs: 1 },
+            fallbacks: [
+                {
+                    label: "fallback",
                     methods: {
-                        waitForTransaction: ok({ status: 1 }),
+                        waitForTransaction: fail("fallback should not be used for waitForTransaction"),
                     },
                 },
             ],
@@ -98,7 +159,7 @@ test("waitForTransaction stays on the retry/fallback path", async (t) => {
 
     const result = await wrapped.waitForTransaction("0xabc");
     assert.deepEqual(result, { status: 1 });
-    assert.deepEqual(harness.callLabels(), ["primary", "fallback"]);
+    assert.deepEqual(harness.callLabels(), ["primary"]);
 });
 
 test("without a fallback, read methods fail normally after retries", async (t) => {

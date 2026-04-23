@@ -32,6 +32,25 @@ describe('Conversions', () => {
         assert.strictEqual(token_input.toFixed(6), '54.545454');
     });
 
+    test('USD to token conversion rejects invalid prices', function() {
+        assert.throws(
+            () => FormatConverter.usdToDecimalTokens(Decimal(12), Decimal(0), 6),
+            /non-positive or non-finite price/i,
+        );
+        assert.throws(
+            () => FormatConverter.usdToDecimalTokens(Decimal(12), Decimal(-1), 6),
+            /non-positive or non-finite price/i,
+        );
+        assert.throws(
+            () => FormatConverter.usdToDecimalTokens(Decimal(12), Decimal(Infinity), 6),
+            /non-positive or non-finite price/i,
+        );
+        assert.throws(
+            () => FormatConverter.usdToBigIntTokens(Decimal(12), 0n, 6),
+            /non-positive or non-finite price/i,
+        );
+    });
+
     test('BigInt Tokens to USD', function() {
         const tokens = BigInt(1000e6);
         const price = BigInt(0.75 * 1e18);

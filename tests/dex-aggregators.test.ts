@@ -12,6 +12,7 @@ import FormatConverter from "../src/classes/FormatConverter";
 import { chain_config } from "../src/chains";
 import { safeBigInt, validateSlippageBps } from "../src/validation";
 import type { address, bytes } from "../src/types";
+import type { IDexAgg, Quote, QuoteArgs, SetupChainResult } from "../src";
 
 // ─── Fee-aware slippage expansion ───────────────────────────────────────────
 //
@@ -40,6 +41,27 @@ const KYBER_SWAP_PARAMS_TYPE =
     "tuple(address srcToken,address dstToken,address[] srcReceivers,uint256[] srcAmounts," +
     "address[] feeReceivers,uint256[] feeAmounts,address dstReceiver,uint256 amount," +
     "uint256 minReturnAmount,uint256 flags,bytes permit) desc,bytes clientData)";
+
+test("IDexAgg quoteMin exposes primitive bigint", () => {
+    const quoteMinShape = (agg: IDexAgg): Promise<bigint> =>
+        agg.quoteMin(WALLET, TOKEN_IN, TOKEN_OUT, 1n, 50n);
+    assert.equal(typeof quoteMinShape, "function");
+});
+
+test("public SDK surface exports DEX aggregator types", () => {
+    const args: QuoteArgs = [WALLET, TOKEN_IN, TOKEN_OUT, 1n, 50n];
+    const quote: Quote = {
+        to: TOKEN_OUT,
+        calldata: "0x" as bytes,
+        min_out: 1n,
+        out: 2n,
+    };
+    const extractDexAgg = (result: SetupChainResult): IDexAgg => result.dexAgg;
+
+    assert.equal(args[0], WALLET);
+    assert.equal(quote.min_out, 1n);
+    assert.equal(typeof extractDexAgg, "function");
+});
 
 function stubKyberSwapQuote(kyber: KyberSwap) {
     (kyber as any).quote = async () => ({

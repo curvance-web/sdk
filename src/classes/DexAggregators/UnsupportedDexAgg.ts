@@ -22,7 +22,7 @@ export class UnsupportedDexAgg implements IDexAgg {
         throw this.unsupportedError();
     }
 
-    async quoteMin(..._args: QuoteArgs): Promise<BigInt> {
+    async quoteMin(..._args: QuoteArgs): Promise<bigint> {
         throw this.unsupportedError();
     }
 

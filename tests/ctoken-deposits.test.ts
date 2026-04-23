@@ -30,6 +30,9 @@ import { CToken, BorrowableCToken, ERC20, FormatConverter, NATIVE_ADDRESS } from
  */
 
 const ADDR = '0x0000000000000000000000000000000000000001';
+const ORACLE_MANAGER = '0x0000000000000000000000000000000000000abc';
+const DEX_ROUTER = '0x0000000000000000000000000000000000000def';
+const ZAP_ASSET = '0x00000000000000000000000000000000000000f1';
 
 interface MockCache {
     totalSupply: bigint;
@@ -114,6 +117,69 @@ function createBorrowableCToken(cacheOverrides: Partial<MockCache> = {}): Borrow
     (token as any).cache = { ...makeDefaultCache(), ...borrowableDefaults, ...cacheOverrides };
     return token;
 }
+
+test('getDepositTokens does not expose a duplicate simple native route for native-vault tokens', async () => {
+    const token = createCToken({
+        asset: {
+            address: ADDR,
+            decimals: 18n,
+        },
+    });
+    (token as any).provider = {
+        getBalance: async () => 0n,
+    };
+    (token as any).market = {
+        signer: null,
+        account: null,
+        setup: {
+            chain: 'monad-mainnet',
+            contracts: {
+                OracleManager: ORACLE_MANAGER,
+            },
+        },
+    };
+    (token as any).zapTypes = ['native-vault', 'simple'];
+    (token as any).isWrappedNative = false;
+    (token as any).getAsset = () => ({
+        address: ADDR,
+        decimals: 18n,
+        symbol: 'cVAULT',
+        name: 'Vault Token',
+    });
+    Object.defineProperty(token, 'currentChainConfig', {
+        configurable: true,
+        get: () => ({
+            dexAgg: {
+                router: DEX_ROUTER,
+                getAvailableTokens: async () => ([{
+                    interface: {
+                        address: NATIVE_ADDRESS,
+                        decimals: 18n,
+                        symbol: 'MON',
+                        name: 'Monad',
+                    },
+                    type: 'simple',
+                }, {
+                    interface: {
+                        address: ZAP_ASSET,
+                        decimals: 18n,
+                        symbol: 'USDC',
+                        name: 'USD Coin',
+                    },
+                    type: 'simple',
+                }]),
+            },
+        }),
+    });
+
+    const options = await token.getDepositTokens();
+    const nativeRoutes = options
+        .filter((option) => option.interface.address.toLowerCase() === NATIVE_ADDRESS.toLowerCase())
+        .map((option) => option.type);
+
+    assert.deepEqual(nativeRoutes, ['native-vault']);
+    assert.ok(options.some((option) => option.interface.address === ZAP_ASSET && option.type === 'simple'));
+});
 
 describe('getDeposits — Issue 3 fix (renamed from getTvl, valued from totalAssets)', () => {
     test('exchangeRate == WAD: getDeposits(true) equals totalAssets × assetPrice', () => {

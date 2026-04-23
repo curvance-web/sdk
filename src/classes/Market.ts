@@ -168,6 +168,15 @@ export class Market {
         );
     }
 
+    private requireValidCachedUserHealth(accessLabel: string) {
+        if (this.cache.user.errorCodeHit || this.cache.user.priceStale) {
+            throw new Error(
+                `Cached market user data for ${this.address} is not reliable for ${accessLabel} because ` +
+                `the reader reported an oracle error or stale price.`
+            );
+        }
+    }
+
     private cooldownDateFromUnlockTime(unlockTime: bigint, cooldownLength: bigint = this.cooldownLength): Date | null {
         if (unlockTime === cooldownLength) {
             return null;
@@ -194,13 +203,23 @@ export class Market {
     /** @returns The scope of the latest whole-market user refresh. */
     get userDataScope(): UserDataScope { return this._userDataScope ?? "full"; }
     /** @returns {Decimal} - The user's collateral in Shares. */
-    get userCollateral() { return toDecimal(this.cache.user.collateral, 18n); }
+    get userCollateral() {
+        this.requireValidCachedUserHealth("reading userCollateral");
+        return toDecimal(this.cache.user.collateral, 18n);
+    }
     /** @returns {USD} - The user's debt in USD. */
-    get userDebt() { return toDecimal(this.cache.user.debt, 18n); }
+    get userDebt() {
+        this.requireValidCachedUserHealth("reading userDebt");
+        return toDecimal(this.cache.user.debt, 18n);
+    }
     /** @returns {USD} - The user's maximum debt in USD. */
-    get userMaxDebt() { return toDecimal(this.cache.user.maxDebt, 18n); }
+    get userMaxDebt() {
+        this.requireValidCachedUserHealth("reading userMaxDebt");
+        return toDecimal(this.cache.user.maxDebt, 18n);
+    }
     /** @returns {USD} - The user's remaining credit with a .1% buffer in USD */
     get userRemainingCredit(): USD {
+        this.requireValidCachedUserHealth("reading userRemainingCredit");
         const remaining = this.cache.user.maxDebt - this.cache.user.debt;
         return toDecimal(remaining, 18n).mul(.999);
     }
@@ -210,6 +229,7 @@ export class Market {
      * @returns {Percentage | null} - The user's position health Percentage or null if infinity
      */
     get positionHealth() {
+        this.requireValidCachedUserHealth("reading positionHealth");
         if (this.cache.user.positionHealth == UINT256_MAX) {
             return null;
         }
@@ -446,7 +466,44 @@ export class Market {
         return rowsByAddress;
     }
 
+    private requireRefreshMarketAddress(row: { address: address }, label: string) {
+        if (row.address.toLowerCase() !== this.address.toLowerCase()) {
+            throw new Error(
+                `Mismatched ${label} market data during refresh: expected=${this.address} received=${row.address}.`
+            );
+        }
+    }
+
+    private validateStateRows(dynamicData: DynamicMarketData, userData?: UserMarket) {
+        this.requireRefreshMarketAddress(dynamicData, "dynamic");
+        if (userData != undefined) {
+            this.requireRefreshMarketAddress(userData, "user");
+        }
+
+        this.requireRefreshTokenRows(dynamicData.tokens, "dynamic");
+        if (userData != undefined) {
+            this.requireRefreshTokenRows(userData.tokens, "user");
+        }
+    }
+
+    validateRefreshState(dynamicData: DynamicMarketData, userData?: UserMarket) {
+        this.validateStateRows(dynamicData, userData);
+    }
+
+    private static requireMarketRow<T extends { address: address }>(
+        rows: T[],
+        market: Market,
+        label: string,
+    ): T {
+        const row = new Map(rows.map((entry) => [entry.address.toLowerCase(), entry])).get(market.address.toLowerCase());
+        if (row == undefined) {
+            throw new Error(`Could not reload ${label} data for market ${market.address}.`);
+        }
+        return row;
+    }
+
     applyState(dynamicData: DynamicMarketData, userData?: UserMarket) {
+        this.validateStateRows(dynamicData, userData);
         const dynamicRowsByAddress = this.requireRefreshTokenRows(dynamicData.tokens, "dynamic");
         const userRowsByAddress = userData != undefined
             ? this.requireRefreshTokenRows(userData.tokens, "user")
@@ -499,12 +556,8 @@ export class Market {
         const allowSignerMismatch = options.allowSignerMismatch ?? false;
         this.assertRefreshAccountCompatible(account, allowSignerMismatch);
         const { dynamicMarkets, userMarkets } = await this.reader.getMarketStates([this.address], account);
-        const dynamic = dynamicMarkets[0];
-        const user = userMarkets[0];
-
-        if(dynamic == undefined || user == undefined) {
-            throw new Error(`Could not reload market state for ${this.address}.`);
-        }
+        const dynamic = Market.requireMarketRow(dynamicMarkets, this, "dynamic");
+        const user = Market.requireMarketRow(userMarkets, this, "user");
 
         this.applyState(dynamic, user);
         this.bindRefreshedAccount(account, allowSignerMismatch);
@@ -513,14 +566,10 @@ export class Market {
     async reloadUserSummary(account: address) {
         this.assertRefreshAccountCompatible(account);
         const userMarkets = await this.reader.getMarketSummaries([this.address], account);
-        const user = userMarkets[0];
+        const user = Market.requireMarketRow(userMarkets, this, "user summary");
 
-        if(user == undefined) {
-            throw new Error(`Could not reload market user summary for ${this.address}.`);
-        }
-
-        this.bindRefreshedAccount(account);
         this.applyUserSummary(user);
+        this.bindRefreshedAccount(account);
     }
 
     static getActiveUserMarkets(markets: Market[]): Market[] {
@@ -555,23 +604,30 @@ export class Market {
             market.assertRefreshAccountCompatible(account);
         }
 
+        const plans: Array<{ market: Market; dynamic: DynamicMarketData; user: UserMarket }> = [];
+
         for(const { reader, markets: groupedMarkets } of this.groupByReaderDeployment(markets)) {
             const addresses = groupedMarkets.map((market) => market.address);
             const { dynamicMarkets, userMarkets } = await reader.getMarketStates(addresses, account);
-            const dynamicByAddress = new Map(dynamicMarkets.map((market) => [market.address, market]));
-            const userByAddress = new Map(userMarkets.map((market) => [market.address, market]));
+            const dynamicByAddress = new Map(dynamicMarkets.map((market) => [market.address.toLowerCase(), market]));
+            const userByAddress = new Map(userMarkets.map((market) => [market.address.toLowerCase(), market]));
 
             for(const market of groupedMarkets) {
-                const dynamic = dynamicByAddress.get(market.address);
-                const user = userByAddress.get(market.address);
+                const dynamic = dynamicByAddress.get(market.address.toLowerCase());
+                const user = userByAddress.get(market.address.toLowerCase());
 
                 if(dynamic == undefined || user == undefined) {
                     throw new Error(`Could not reload market state for ${market.address}.`);
                 }
 
-                market.applyState(dynamic, user);
-                market.bindRefreshedAccount(account);
+                market.validateStateRows(dynamic, user);
+                plans.push({ market, dynamic, user });
             }
+        }
+
+        for (const { market, dynamic, user } of plans) {
+            market.applyState(dynamic, user);
+            market.bindRefreshedAccount(account);
         }
 
         return markets;
@@ -586,21 +642,28 @@ export class Market {
             market.assertRefreshAccountCompatible(account);
         }
 
+        const plans: Array<{ market: Market; user: UserMarketSummary }> = [];
+
         for(const { reader, markets: groupedMarkets } of this.groupByReaderDeployment(markets)) {
             const addresses = groupedMarkets.map((market) => market.address);
             const userMarkets = await reader.getMarketSummaries(addresses, account);
-            const userByAddress = new Map(userMarkets.map((market) => [market.address, market]));
+            const userByAddress = new Map(userMarkets.map((market) => [market.address.toLowerCase(), market]));
 
             for(const market of groupedMarkets) {
-                const user = userByAddress.get(market.address);
+                const user = userByAddress.get(market.address.toLowerCase());
 
                 if(user == undefined) {
                     throw new Error(`Could not reload market user summary for ${market.address}.`);
                 }
 
-                market.bindRefreshedAccount(account);
-                market.applyUserSummary(user);
+                market.requireRefreshMarketAddress(user, "user summary");
+                plans.push({ market, user });
             }
+        }
+
+        for (const { market, user } of plans) {
+            market.applyUserSummary(user);
+            market.bindRefreshedAccount(account);
         }
 
         return markets;

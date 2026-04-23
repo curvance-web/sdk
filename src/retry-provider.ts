@@ -17,9 +17,30 @@ const RPC_PROVIDER_METHODS = new Set([
     'getLogs',
     'getNetwork',
     'detectNetwork',
-    'waitForTransaction',
     'call',
     'estimateGas',
+]);
+
+/** Raw JSON-RPC methods that are safe to route through read fallbacks. */
+const READ_RPC_METHODS = new Set([
+    'eth_call',
+    'eth_estimateGas',
+    'eth_getBalance',
+    'eth_getCode',
+    'eth_getStorageAt',
+    'eth_getTransactionCount',
+    'eth_blockNumber',
+    'eth_gasPrice',
+    'eth_feeHistory',
+    'eth_maxPriorityFeePerGas',
+    'eth_getBlockByNumber',
+    'eth_getBlockByHash',
+    'eth_getTransactionByHash',
+    'eth_getTransactionReceipt',
+    'eth_getLogs',
+    'eth_chainId',
+    'net_version',
+    'web3_clientVersion',
 ]);
 
 export interface RetryConfig {
@@ -823,6 +844,24 @@ class RetryableProvider {
         }
     }
 
+    private isReadRpcMethod(method: unknown): method is string {
+        return typeof method === 'string' && READ_RPC_METHODS.has(method);
+    }
+
+    private getPayloadMethods(payload: any): string[] {
+        const payloads = Array.isArray(payload) ? payload : [payload];
+        return payloads.map((entry) => typeof entry?.method === 'string' ? entry.method : 'unknown');
+    }
+
+    private isReadRpcPayload(payload: any): boolean {
+        const methods = this.getPayloadMethods(payload);
+        return methods.length > 0 && methods.every((method) => this.isReadRpcMethod(method));
+    }
+
+    private getRpcContext(methods: string[]): string {
+        return methods.length === 1 ? `RPC ${methods[0]}` : `RPC batch ${methods.join(',')}`;
+    }
+
     wrapProvider(provider: curvance_read_provider): curvance_read_provider {
         // If it's already wrapped, return as-is
         if ((provider as any)._isRetryable) {
@@ -849,34 +888,44 @@ class RetryableProvider {
                 if (prop === 'send' && typeof original === 'function') {
                     return async (method: string, params: any[]) => {
                         const primaryOp = () => original.apply(target, [method, params]);
+                        const context = `RPC ${method}`;
+
+                        if (!this.isReadRpcMethod(method)) {
+                            return primaryOp();
+                        }
 
                         if (hasFallback) {
                             const fallbackOps = this.fallbackProviderStates.map((state) => ({
                                 state,
                                 operation: () => state.provider.send(method, params),
                             }));
-                            return this.executeWithReadFallback(primaryOp, fallbackOps, `RPC ${method}`, primaryState);
+                            return this.executeWithReadFallback(primaryOp, fallbackOps, context, primaryState);
                         }
 
-                        return this.executeWithRetry(this.withReadTimeout(primaryOp, `RPC ${method}`), `RPC ${method}`, primaryState);
+                        return this.executeWithRetry(this.withReadTimeout(primaryOp, context), context, primaryState);
                     };
                 }
 
                 // For JsonRpcProvider, also wrap _send if it exists
                 if (prop === '_send' && typeof original === 'function') {
                     return async (payload: any, callback?: any) => {
-                        const method = payload.method || 'unknown';
+                        const methods = this.getPayloadMethods(payload);
+                        const context = this.getRpcContext(methods);
                         const primaryOp = () => original.apply(target, [payload, callback]);
+
+                        if (!this.isReadRpcPayload(payload)) {
+                            return primaryOp();
+                        }
 
                         if (hasFallback) {
                             const fallbackOps = this.fallbackProviderStates.map((state) => ({
                                 state,
                                 operation: () => (state.provider as any)._send(payload, callback),
                             }));
-                            return this.executeWithReadFallback(primaryOp, fallbackOps, `RPC ${method}`, primaryState);
+                            return this.executeWithReadFallback(primaryOp, fallbackOps, context, primaryState);
                         }
 
-                        return this.executeWithRetry(this.withReadTimeout(primaryOp, `RPC ${method}`), `RPC ${method}`, primaryState);
+                        return this.executeWithRetry(this.withReadTimeout(primaryOp, context), context, primaryState);
                     };
                 }
 
