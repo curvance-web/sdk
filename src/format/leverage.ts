@@ -22,12 +22,12 @@ export function calculateDeleverageAmount(
     targetLeverage: number,
     totalValue: Decimal,
 ): Decimal {
-    if (targetLeverage >= currentLeverage) return new Decimal(0);
+    const current = new Decimal(currentLeverage);
+    const target = new Decimal(targetLeverage);
+    if (target.gte(current) || current.lte(0)) return new Decimal(0);
 
-    const currentDebt = totalValue.mul(1 - 1 / currentLeverage);
-    const targetDebt = targetLeverage === 1 ? new Decimal(0) : totalValue.mul(1 - 1 / targetLeverage);
-
-    return currentDebt.minus(targetDebt);
+    const equity = totalValue.div(current);
+    return Decimal.max(equity.mul(current.sub(target)), 0);
 }
 
 export function calculatePositionSize(tokenAmount: Decimal, leverage: number): Decimal {

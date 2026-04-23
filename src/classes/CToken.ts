@@ -176,6 +176,7 @@ interface ResolveLeverageUpPreviewParams {
     targetLeverage: Decimal;
     borrow: BorrowableCToken;
     depositAssets?: bigint;
+    positionManagerType?: PositionManagerTypes | undefined;
 }
 
 interface TokenApprovalTarget {
@@ -1429,6 +1430,7 @@ export class CToken extends Calldata<ICToken> {
         targetLeverage,
         borrow,
         depositAssets = 0n,
+        positionManagerType,
     }: ResolveLeverageUpPreviewParams): LeverageUpPreview {
         const leverageState = this.getMarketLeverageState();
         const currentLeverage = leverageState.currentLeverage ?? Decimal(1);
@@ -1470,7 +1472,8 @@ export class CToken extends Calldata<ICToken> {
         const feePolicyCurrentLeverage = operation === 'deposit-and-leverage'
             ? effectiveCurrentLeverage
             : currentLeverage;
-        const feeBps = borrowAssets > 0n
+        const hasSwapFee = positionManagerType !== 'vault' && positionManagerType !== 'native-vault';
+        const feeBps = borrowAssets > 0n && hasSwapFee
             ? this.setup.feePolicy.getFeeBps({
                 operation,
                 inputToken: borrow.asset.address,
@@ -1509,24 +1512,36 @@ export class CToken extends Calldata<ICToken> {
         };
     }
 
-    previewDepositAndLeverage(newLeverage: Decimal, borrow: BorrowableCToken, depositAmount: bigint) {
+    previewDepositAndLeverage(
+        newLeverage: Decimal,
+        borrow: BorrowableCToken,
+        depositAmount: bigint,
+        positionManagerType?: PositionManagerTypes,
+    ) {
         return this.resolveLeverageUpPreview({
             operation: 'deposit-and-leverage',
             targetLeverage: newLeverage,
             borrow,
             depositAssets: depositAmount,
+            positionManagerType,
         });
     }
 
-    previewLeverageUp(newLeverage: Decimal, borrow: BorrowableCToken, depositAmount?: bigint) {
+    previewLeverageUp(
+        newLeverage: Decimal,
+        borrow: BorrowableCToken,
+        depositAmount?: bigint,
+        positionManagerType?: PositionManagerTypes,
+    ) {
         if ((depositAmount ?? 0n) > 0n) {
-            return this.previewDepositAndLeverage(newLeverage, borrow, depositAmount!);
+            return this.previewDepositAndLeverage(newLeverage, borrow, depositAmount!, positionManagerType);
         }
 
         return this.resolveLeverageUpPreview({
             operation: 'leverage-up',
             targetLeverage: newLeverage,
             borrow,
+            positionManagerType,
         });
     }
 
@@ -1606,7 +1621,7 @@ export class CToken extends Calldata<ICToken> {
 
             let calldata: bytes;
             await this._getLeverageSnapshot(borrow);
-            const preview = this.previewLeverageUp(newLeverage, borrow);
+            const preview = this.previewLeverageUp(newLeverage, borrow, undefined, type);
             const slippage = this._leverageUpSlippage(
                 FormatConverter.percentageToBps(slippage_),
                 preview.targetLeverage,
@@ -1896,7 +1911,7 @@ export class CToken extends Calldata<ICToken> {
             const depositAssets = FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals);
             await this._checkTokenApproval(this.getPositionManagerDepositApprovalTarget(manager), depositAssets);
             await this._getLeverageSnapshot(borrow);
-            const preview = this.previewDepositAndLeverage(multiplier, borrow, depositAssets);
+            const preview = this.previewDepositAndLeverage(multiplier, borrow, depositAssets, type);
             if (preview.borrowAssets === 0n) {
                 if (simulate) {
                     return {
@@ -2105,7 +2120,7 @@ export class CToken extends Calldata<ICToken> {
         const default_calldata = this.getCallData("deposit", [depositAssets, receiver]);
         const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, false, default_calldata, receiver);
 
-        return this.oracleRoute(calldata, calldata_overrides);
+        return this.oracleRoute(calldata, calldata_overrides, receiver);
     }
 
     async depositAsCollateral(amount: Decimal, zap: ZapperInstructions = 'none',  receiver: address | null = null) {
@@ -2120,7 +2135,7 @@ export class CToken extends Calldata<ICToken> {
             const remainingCollateral = this.getRemainingCollateral(false);
             if(remainingCollateral <= 0n) throw new Error(collateralCapError);
             if(remainingCollateral > 0n) {
-                const shares = this.virtualConvertToShares(depositAssets, LEVERAGE.SHARES_BUFFER_BPS);
+                const shares = this.virtualConvertToShares(depositAssets);
                 if(shares > remainingCollateral) {
                     throw new Error(collateralCapError);
                 }
@@ -2134,7 +2149,7 @@ export class CToken extends Calldata<ICToken> {
             : "depositAsCollateralFor";
         const default_calldata = this.getCallData(collateralMethod, [depositAssets, receiver]);
         const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, true, default_calldata, receiver);
-        return this.oracleRoute(calldata, calldata_overrides);
+        return this.oracleRoute(calldata, calldata_overrides, receiver);
     }
 
     async redeem(amount: TokenInput) {
@@ -2146,9 +2161,10 @@ export class CToken extends Calldata<ICToken> {
         const balance_avail = await this.balanceOf(signer.address as address);
         const max_shares = await this.maxRedemption(true, buffer);
         const converted_shares = this.convertTokenInputToShares(amount);
-        
-        let shares = max_shares < converted_shares ? max_shares : converted_shares;
-        if(balance_avail - shares <= 10n) {
+
+        const maxExecutableShares = max_shares < balance_avail ? max_shares : balance_avail;
+        let shares = maxExecutableShares < converted_shares ? maxExecutableShares : converted_shares;
+        if(maxExecutableShares === balance_avail && balance_avail - shares <= 10n) {
             shares = balance_avail;
         }
 
@@ -2242,6 +2258,38 @@ export class CToken extends Calldata<ICToken> {
             isPriceUpdate: false,
             data: calldata
         } as MulticallAction;
+    }
+
+    private hasNonZeroNativeValueOverride(override: { [key: string]: any }) {
+        const value = override.value;
+        if (value == null) {
+            return false;
+        }
+
+        if (typeof value === "bigint") {
+            return value > 0n;
+        }
+
+        if (typeof value === "number") {
+            return value > 0;
+        }
+
+        if (typeof value === "string") {
+            return BigInt(value) > 0n;
+        }
+
+        return true;
+    }
+
+    private assertOracleMulticallSupportsValue(priceUpdates: MulticallAction[], override: { [key: string]: any }) {
+        if (priceUpdates.length === 0 || !this.hasNonZeroNativeValueOverride(override)) {
+            return;
+        }
+
+        throw new Error(
+            "Native gas-token zaps cannot be combined with oracle price-update multicalls. " +
+            "Use the wrapped-native zap path or retry when no oracle update is required.",
+        );
     }
 
     private async _checkPositionManagerApproval(manager: PositionManager) {
@@ -2385,9 +2433,14 @@ export class CToken extends Calldata<ICToken> {
         await this._checkTokenApproval(approvalTarget, approvalAmount);
     }
 
-    async oracleRoute(calldata: bytes, override: { [key: string]: any } = {}): Promise<TransactionResponse> {
+    async oracleRoute(
+        calldata: bytes,
+        override: { [key: string]: any } = {},
+        reloadAccount: address | null = null,
+    ): Promise<TransactionResponse> {
         const signer = this.requireSigner();
         const price_updates = await this.getPriceUpdates();
+        this.assertOracleMulticallSupportsValue(price_updates, override);
 
         if(price_updates.length > 0) {
             const actionTarget = (override.to ?? this.address) as address;
@@ -2396,13 +2449,20 @@ export class CToken extends Calldata<ICToken> {
         }
 
         const tx = await this.executeCallData(calldata, override);
-        await this.market.reloadUserData(signer.address as address);
+        if (typeof tx.wait === "function") {
+            await tx.wait();
+        }
+        const refreshAccount = reloadAccount ?? signer.address as address;
+        await this.market.reloadUserData(refreshAccount, {
+            allowSignerMismatch: refreshAccount.toLowerCase() !== signer.address.toLowerCase(),
+        });
 
         return tx;
     }
 
     async simulateOracleRoute(calldata: bytes, override: { [key: string]: any } = {}): Promise<{ success: boolean; error?: string }> {
         const price_updates = await this.getPriceUpdates();
+        this.assertOracleMulticallSupportsValue(price_updates, override);
 
         if(price_updates.length > 0) {
             const actionTarget = (override.to ?? this.address) as address;

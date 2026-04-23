@@ -3,7 +3,7 @@ import { Market } from "./classes/Market";
 import { address, curvance_provider, curvance_read_provider, curvance_signer } from './types';
 import { ProtocolReader } from "./classes/ProtocolReader";
 import { OracleManager } from "./classes/OracleManager";
-import { getRetryableProviderTarget, wrapProviderWithRetries } from "./retry-provider";
+import { getActiveRetryConfig, getRetryableProviderTarget, wrapProviderWithRetries } from "./retry-provider";
 import { chain_config } from "./chains";
 import { Api } from "./classes/Api";
 import { validateApiUrl } from "./validation";
@@ -80,7 +80,20 @@ function validateSetupConfig(config: SetupConfigSnapshot) {
 async function validateProviderChain(chain: ChainRpcPrefix, provider: curvance_read_provider, label: string) {
     const expectedChainId = BigInt(chain_config[chain].chainId);
     const providerTarget = getRetryableProviderTarget(provider);
-    const network = await providerTarget.getNetwork();
+    const timeoutMs = getActiveRetryConfig().timeoutMs;
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+    const network = await Promise.race([
+        providerTarget.getNetwork(),
+        new Promise<never>((_, reject) => {
+            timeoutHandle = setTimeout(() => {
+                reject(new Error(`[rpc] ${label} getNetwork: timeout after ${timeoutMs}ms`));
+            }, timeoutMs);
+        }),
+    ]).finally(() => {
+        if (timeoutHandle != null) {
+            clearTimeout(timeoutHandle);
+        }
+    });
     const actualChainId = BigInt(network.chainId);
 
     if (actualChainId !== expectedChainId) {

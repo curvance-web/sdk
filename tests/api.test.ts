@@ -104,6 +104,44 @@ test("Api.getRewards filters malformed reward rows from successful responses", a
     assert.equal(rewards.incentives[normalizedMarket]?.[0]?.image, "stars-rewards");
 });
 
+test("Api.getRewards degrades non-OK responses even when the body is valid-shaped", async () => {
+    const market = "0x00000000000000000000000000000000000000AA";
+    globalThis.fetch = (async () => ({
+        ok: false,
+        status: 503,
+        statusText: "Service Unavailable",
+        json: async () => ({
+            milestones: [{
+                market,
+                tvl: 1,
+                multiplier: 2,
+                fail_multiplier: 3,
+                chain_network: "monad-mainnet",
+                start_date: "2026-01-01",
+                end_date: "2026-01-02",
+                duration_in_days: 1,
+            }],
+            incentives: [{
+                market,
+                type: "supply",
+                rate: 4,
+                description: "reward",
+                image: "stars-rewards",
+            }],
+        }),
+    })) as unknown as typeof fetch;
+
+    const rewards = await Api.getRewards({
+        chain: "monad-mainnet",
+        api_url: "https://api.curvance.test",
+    } as any);
+
+    assert.deepEqual(rewards, {
+        milestones: {},
+        incentives: {},
+    });
+});
+
 test("Api.fetchNativeYields filters malformed rows from successful responses", async () => {
     globalThis.fetch = (async () => ({
         ok: true,
@@ -122,4 +160,22 @@ test("Api.fetchNativeYields filters malformed rows from successful responses", a
     } as any);
 
     assert.deepEqual(yields, [{ symbol: "WMON", apy: 4.25 }]);
+});
+
+test("Api.fetchNativeYields degrades non-OK responses even when the body is valid-shaped", async () => {
+    globalThis.fetch = (async () => ({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        json: async () => ({
+            native_apy: [{ symbol: "WMON", apy: 4.25 }],
+        }),
+    })) as unknown as typeof fetch;
+
+    const yields = await Api.fetchNativeYields({
+        chain: "monad-mainnet",
+        api_url: "https://api.curvance.test",
+    } as any);
+
+    assert.deepEqual(yields, []);
 });

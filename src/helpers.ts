@@ -438,14 +438,26 @@ export function getMerklTokenIncentiveApy(
 
 /**
  * Returns the native yield for a token — the rate provided by the asset issuer.
- * When `nativeYield` is nonzero it already includes the interest component,
+ * When `nativeApy` is nonzero it already includes the interest component,
  * so we return it directly.  Otherwise we fall back to any static APY override.
  */
+type NativeYieldTokenLike = {
+    nativeApy?: Decimal.Value | null;
+    nativeYield?: Decimal.Value | null;
+    asset: { symbol: string };
+};
+
+function getTokenNativeApy(token: NativeYieldTokenLike): Decimal {
+    return new Decimal(token.nativeApy ?? token.nativeYield ?? 0);
+}
+
+// Real CToken instances expose nativeApy; nativeYield remains accepted for older helper-shaped objects.
 export function getNativeYield(
-    token: { nativeYield: number; asset: { symbol: string } },
+    token: NativeYieldTokenLike,
     apyOverrides?: ApyOverrides,
 ): Decimal {
-    if (token.nativeYield !== 0) return new Decimal(token.nativeYield);
+    const nativeApy = getTokenNativeApy(token);
+    if (!nativeApy.isZero()) return nativeApy;
     const symbol = token.asset.symbol.toLowerCase();
     return new Decimal(apyOverrides?.[symbol]?.value ?? 0);
 }
@@ -486,12 +498,13 @@ export function getMerklBorrowIncentives(
  * When `nativeYield` is nonzero it already includes interest, so we use it directly.
  */
 export function getDepositApy(
-    token: { nativeYield: number; getApy(): Decimal; asset: { symbol: string }; address: string },
+    token: NativeYieldTokenLike & { getApy(): Decimal; address: string },
     opportunities: MerklOpportunityLike[] | undefined,
     apyOverrides?: ApyOverrides,
 ): Decimal {
-    const base = token.nativeYield !== 0
-        ? new Decimal(token.nativeYield)
+    const nativeApy = getTokenNativeApy(token);
+    const base = !nativeApy.isZero()
+        ? nativeApy
         : token.getApy().add(new Decimal(apyOverrides?.[token.asset.symbol.toLowerCase()]?.value ?? 0));
     const merkl = getMerklDepositIncentives(token.address, opportunities);
     return base.add(merkl);

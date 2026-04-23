@@ -52,7 +52,8 @@ export class Zapper extends Calldata<IZapper> {
     }
 
     async nativeZap(ctoken: CToken, amount: bigint, collateralize: boolean, receiver: address = this.signer.address as address) {
-        const calldata = await this.getNativeZapCalldata(ctoken, amount, collateralize, false, receiver);
+        const wrapped = this.type === 'native-simple' || ctoken.isWrappedNative;
+        const calldata = await this.getNativeZapCalldata(ctoken, amount, collateralize, wrapped, receiver);
         return this.executeCallData(calldata, { value: amount });
     }
 

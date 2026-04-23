@@ -7,6 +7,7 @@ import {
     getDepositApy,
     getMerklBorrowIncentives,
     getMerklDepositIncentives,
+    getNativeYield,
 } from "../src/helpers";
 import Decimal from "decimal.js";
 
@@ -166,4 +167,27 @@ test("Merkl helper APYs match the shared rollup semantics used by market hydrati
 
     assert.ok(getDepositApy(depositToken, lendOpps).eq(new Decimal(0.17)));
     assert.ok(getBorrowCost(borrowToken, borrowOpps).eq(new Decimal(0.02)));
+});
+
+test("APY helpers read current nativeApy from real SDK-shaped tokens", () => {
+    const token = {
+        nativeApy: new Decimal("0.04"),
+        getApy: () => new Decimal("0.02"),
+        asset: { symbol: "WMON" },
+        address: "0x00000000000000000000000000000000000000a1",
+    };
+
+    assert.ok(getNativeYield(token).eq(new Decimal("0.04")));
+    assert.ok(getDepositApy(token, []).eq(new Decimal("0.04")));
+});
+
+test("APY helpers fall back to interest plus overrides when nativeApy is absent", () => {
+    const token = {
+        getApy: () => new Decimal("0.02"),
+        asset: { symbol: "WMON" },
+        address: "0x00000000000000000000000000000000000000a1",
+    };
+
+    assert.ok(getNativeYield(token, { wmon: { value: 0.03 } }).eq(new Decimal("0.03")));
+    assert.ok(getDepositApy(token, [], { wmon: { value: 0.03 } }).eq(new Decimal("0.05")));
 });

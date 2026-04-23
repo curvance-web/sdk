@@ -239,4 +239,27 @@ describe('CToken collateral removal APIs', () => {
         assert.deepEqual(harness.getCallDataCalls, []);
         assert.deepEqual(harness.oracleRouteCalls, []);
     });
+
+    test('redeem dust cleanup does not exceed a health-limited max redemption', async () => {
+        const token = Object.create(CToken.prototype) as CToken;
+        const getCallDataCalls: Array<{ method: string; shares: bigint }> = [];
+
+        (token as any).requireSigner = () => ({ address: '0x00000000000000000000000000000000000000aa' });
+        (token as any).getExecutionDebtBufferTime = () => 100n;
+        (token as any).balanceOf = async () => 1_005n;
+        (token as any).maxRedemption = async () => 1_000n;
+        (token as any).convertTokenInputToShares = () => 1_000n;
+        (token as any).getCallData = (method: string, [shares]: [bigint]) => {
+            getCallDataCalls.push({ method, shares });
+            return `0xredeem${shares.toString()}`;
+        };
+        (token as any).oracleRoute = async (calldata: string) => ({ hash: calldata });
+
+        const tx = await token.redeem(new Decimal(1));
+
+        assert.deepEqual(getCallDataCalls, [
+            { method: 'redeem', shares: 1_000n },
+        ]);
+        assert.deepEqual(tx, { hash: '0xredeem1000' });
+    });
 });

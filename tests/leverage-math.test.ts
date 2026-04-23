@@ -3,6 +3,13 @@ import assert from 'node:assert';
 import Decimal from 'decimal.js';
 import { CToken } from '../src';
 import { amplifyContractSlippage, toContractSwapSlippage } from '../src/helpers';
+import { calculateDeleverageAmount } from '../src/format/leverage';
+import {
+    formatHealthFactor,
+    formatHealthFactorPercentage,
+    getHealthStatus,
+    healthFactorToPercentage,
+} from '../src/format/health';
 
 describe('amplifyContractSlippage', () => {
     const makeMaxLeverageToken = (maxLeverageBps: bigint) => {
@@ -197,5 +204,34 @@ describe('toContractSwapSlippage', () => {
             assert.strictEqual(toContractSwapSlippage(0n, 0n), 0n);
             assert.strictEqual(toContractSwapSlippage(0n), 0n);
         });
+    });
+});
+
+describe('format leverage helpers', () => {
+    test('calculateDeleverageAmount preserves equity instead of holding collateral constant', () => {
+        const result = calculateDeleverageAmount(2, 1.5, new Decimal(100));
+
+        assert.equal(result.toString(), '25');
+    });
+
+    test('calculateDeleverageAmount fully closes current debt at 1x', () => {
+        const result = calculateDeleverageAmount(2, 1, new Decimal(100));
+
+        assert.equal(result.toString(), '50');
+    });
+});
+
+describe('format health helpers', () => {
+    test('health helpers accept SDK fractional health values', () => {
+        assert.equal(getHealthStatus(0.04), 'Danger');
+        assert.equal(getHealthStatus(0.20), 'Caution');
+        assert.equal(getHealthStatus(0.21), 'Healthy');
+        assert.equal(formatHealthFactorPercentage(0.2), '20%');
+        assert.equal(formatHealthFactor(0.2), '20%');
+    });
+
+    test('healthFactorToPercentage returns fractional margin for formatter compatibility', () => {
+        assert.ok(Math.abs(healthFactorToPercentage(1.2) - 0.2) < Number.EPSILON);
+        assert.equal(formatHealthFactor(healthFactorToPercentage(1.2)), '20%');
     });
 });

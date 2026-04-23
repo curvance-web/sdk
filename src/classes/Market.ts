@@ -12,6 +12,7 @@ import { BorrowableCToken } from "./BorrowableCToken";
 import FormatConverter from "./FormatConverter";
 import { Api, IncentiveResponse, Incentives, MilestoneResponse, Milestones } from "./Api";
 import { chain_config } from "../chains";
+import type { PositionManagerTypes } from "./PositionManager";
 
 export type MarketToken = CToken | BorrowableCToken;
 export type PluginTypes = 'zapper' | 'positionManager';
@@ -132,7 +133,11 @@ export class Market {
         return requireAccount(this.account, this.signer);
     }
 
-    assertRefreshAccountCompatible(account: address) {
+    assertRefreshAccountCompatible(account: address, allowSignerMismatch = false) {
+        if (allowSignerMismatch) {
+            return;
+        }
+
         const signerAddress = this.signer?.address as address | undefined;
         if (signerAddress == null || signerAddress.toLowerCase() === account.toLowerCase()) {
             return;
@@ -144,8 +149,8 @@ export class Market {
         );
     }
 
-    bindRefreshedAccount(account: address) {
-        this.assertRefreshAccountCompatible(account);
+    bindRefreshedAccount(account: address, allowSignerMismatch = false) {
+        this.assertRefreshAccountCompatible(account, allowSignerMismatch);
         this.account = account;
     }
 
@@ -160,6 +165,19 @@ export class Market {
         );
     }
 
+    private cooldownDateFromUnlockTime(unlockTime: bigint, cooldownLength: bigint = this.cooldownLength): Date | null {
+        if (unlockTime === cooldownLength) {
+            return null;
+        }
+
+        const now = BigInt(Math.floor(Date.now() / 1000));
+        if (unlockTime <= now) {
+            return null;
+        }
+
+        return new Date(Number(unlockTime * 1000n));
+    }
+
     /** @returns {string} - The name of the market at deployment. */
     get name() { return this.cache.deploy.name; }
     /** @returns {Plugins} - The address of the market's plugins by deploy name. */
@@ -169,7 +187,7 @@ export class Market {
     /** @returns {bigint[]} - A list of oracle identifiers which can be mapped to AdaptorTypes enum */
     get adapters() { return this.cache.static.adapters; }
     /** @returns {Date | null} - Market cooldown, activated by Collateralization or Borrowing. Lasts as long as {this.cooldownLength} which is currently 20mins */
-    get cooldown() { return this.cache.user.cooldown == this.cooldownLength ? null : new Date(Number(this.cache.user.cooldown * 1000n)); }
+    get cooldown() { return this.cooldownDateFromUnlockTime(this.cache.user.cooldown); }
     /** @returns The scope of the latest whole-market user refresh. */
     get userDataScope(): UserDataScope { return this._userDataScope ?? "full"; }
     /** @returns {Decimal} - The user's collateral in Shares. */
@@ -462,8 +480,9 @@ export class Market {
         this.applyState(dynamic);
     }
 
-    async reloadUserData(account: address) {
-        this.assertRefreshAccountCompatible(account);
+    async reloadUserData(account: address, options: { allowSignerMismatch?: boolean } = {}) {
+        const allowSignerMismatch = options.allowSignerMismatch ?? false;
+        this.assertRefreshAccountCompatible(account, allowSignerMismatch);
         const { dynamicMarkets, userMarkets } = await this.reader.getMarketStates([this.address], account);
         const dynamic = dynamicMarkets[0];
         const user = userMarkets[0];
@@ -472,7 +491,7 @@ export class Market {
             throw new Error(`Could not reload market state for ${this.address}.`);
         }
 
-        this.bindRefreshedAccount(account);
+        this.bindRefreshedAccount(account, allowSignerMismatch);
         this.applyState(dynamic, user);
     }
 
@@ -623,7 +642,14 @@ export class Market {
         const amount_in = toBigInt(deposit_amount, collateral_ctoken.asset.decimals);
         const amount_out = toBigInt(borrow_amount, debt_ctoken.asset.decimals);
 
-        const { supply, borrow } = await this.reader.previewAssetImpact(user, collateral_ctoken.address, debt_ctoken.address, amount_in, amount_out);
+        let { supply, borrow } = await this.reader.previewAssetImpact(user, collateral_ctoken.address, debt_ctoken.address, amount_in, amount_out);
+        if (amount_out > 0n) {
+            const irm = await debt_ctoken.dynamicIRM();
+            const currentAssetsHeld = await debt_ctoken.contract.assetsHeld();
+            const currentDebt = await debt_ctoken.contract.marketOutstandingDebt();
+            const projectedAssetsHeld = currentAssetsHeld > amount_out ? currentAssetsHeld - amount_out : 0n;
+            borrow = await irm.borrowRate(projectedAssetsHeld, currentDebt + amount_out);
+        }
 
         const supply_apy = Decimal(supply * getRateSeconds('year')).div(WAD);
         const borrow_apy = Decimal(borrow * getRateSeconds('year')).div(WAD);
@@ -675,8 +701,13 @@ export class Market {
             return null;
         }
 
-        const { collateralAssetReduction } = deposit_ctoken.previewLeverageDown(newLeverage, currentLeverage);
-        const repayUsd = deposit_ctoken.convertTokensToUsd(collateralAssetReduction, true);
+        const preview = deposit_ctoken.previewLeverageDown(newLeverage, currentLeverage, borrow_ctoken);
+        const repayCollateralAssets = preview.collateralAssetReduction;
+        let { collateralAssetReduction } = preview;
+        if (preview.feeBps > 0n) {
+            collateralAssetReduction = collateralAssetReduction * 10000n / (10000n - preview.feeBps);
+        }
+        const repayUsd = deposit_ctoken.convertTokensToUsd(repayCollateralAssets, true);
         const repayTokens = borrow_ctoken.convertUsdToTokens(repayUsd, true);
 
         return this.previewPositionHealth(
@@ -693,7 +724,8 @@ export class Market {
         deposit_ctoken: CToken,
         borrow_ctoken: BorrowableCToken,
         newLeverage: Decimal,
-        depositAssets?: bigint
+        depositAssets?: bigint,
+        positionManagerType?: PositionManagerTypes,
     ) {
         if ((depositAssets ?? 0n) > 0n) {
             return this.previewPositionHealthDepositAndLeverage(
@@ -701,10 +733,11 @@ export class Market {
                 borrow_ctoken,
                 newLeverage,
                 depositAssets!,
+                positionManagerType,
             );
         }
 
-        const preview = deposit_ctoken.previewLeverageUp(newLeverage, borrow_ctoken);
+        const preview = deposit_ctoken.previewLeverageUp(newLeverage, borrow_ctoken, undefined, positionManagerType);
 
         return this.previewPositionHealth(
             deposit_ctoken,
@@ -720,12 +753,14 @@ export class Market {
         deposit_ctoken: CToken,
         borrow_ctoken: BorrowableCToken,
         newLeverage: Decimal,
-        depositAssets: bigint
+        depositAssets: bigint,
+        positionManagerType?: PositionManagerTypes,
     ) {
         const preview = deposit_ctoken.previewDepositAndLeverage(
             newLeverage,
             borrow_ctoken,
             depositAssets,
+            positionManagerType,
         );
 
         return this.previewPositionHealth(
@@ -933,7 +968,7 @@ export class Market {
         const cooldownTimestamp = await this.contract.accountAssets(account);
         const cooldownLength = fetch || this.cooldownLength == 0n ? await this.contract.MIN_HOLD_PERIOD() : this.cooldownLength;
         const unlockTime = cooldownTimestamp + cooldownLength;
-        return unlockTime == cooldownLength ? null : new Date(Number(unlockTime * 1000n));
+        return this.cooldownDateFromUnlockTime(unlockTime, cooldownLength);
     }
 
     /**
@@ -956,7 +991,7 @@ export class Market {
             const cooldownTimestamp = cooldownTimestamps[i]!;
             const cooldownLength = market.cooldownLength;
 
-            cooldowns[market.address] = cooldownTimestamp == cooldownLength ? null : new Date(Number(cooldownTimestamp * 1000n));
+            cooldowns[market.address] = market.cooldownDateFromUnlockTime(cooldownTimestamp, cooldownLength);
         }
 
         return cooldowns;

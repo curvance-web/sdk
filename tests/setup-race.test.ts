@@ -5,7 +5,14 @@ import { Api } from "../src/classes/Api";
 import { Market } from "../src/classes/Market";
 import { getChainRpcConfig } from "../src/chains";
 import { CURVANCE_DAO_FEE_RECEIVER, CURVANCE_FEE_BPS } from "../src/feePolicy";
-import { getRpcDebugSnapshot, isRetryableReadProvider, resetRpcDebugState, wrapProviderWithRetries } from "../src/retry-provider";
+import {
+    configureRetries,
+    DEFAULT_RETRY_CONFIG,
+    getRpcDebugSnapshot,
+    isRetryableReadProvider,
+    resetRpcDebugState,
+    wrapProviderWithRetries,
+} from "../src/retry-provider";
 import { all_markets, setup_config, setupChain } from "../src/setup";
 
 function defer<T>() {
@@ -589,6 +596,50 @@ test("setupChain fails fast when an explicit read provider is connected to a dif
         }),
         /Read provider is connected to chainId 421614 but setupChain\('monad-mainnet'\) expects 143\./i,
     );
+    assert.equal(rewardsCalls, 0);
+    assert.equal(marketCalls, 0);
+});
+
+test("setupChain times out a hanging explicit readProvider during chain validation", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const hangingReadProvider = new JsonRpcProvider("https://hanging-rpc.example");
+    hangingReadProvider.getNetwork = async () => new Promise(() => undefined);
+
+    let rewardsCalls = 0;
+    let marketCalls = 0;
+    configureRetries({
+        ...DEFAULT_RETRY_CONFIG,
+        maxRetries: 0,
+        baseDelay: 0,
+        maxDelay: 0,
+        timeoutMs: 25,
+    });
+    Api.getRewards = (async () => {
+        rewardsCalls += 1;
+        return { milestones: {}, incentives: {} };
+    }) as typeof Api.getRewards;
+    Market.getAll = (async () => {
+        marketCalls += 1;
+        return [] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+        configureRetries(DEFAULT_RETRY_CONFIG);
+        resetRpcDebugState();
+    });
+
+    const startedAt = Date.now();
+    await assert.rejects(
+        () => setupChain("monad-mainnet", null, "https://api.example", {
+            readProvider: hangingReadProvider,
+        }),
+        /Read provider getNetwork: timeout after 25ms/i,
+    );
+
+    assert.ok(Date.now() - startedAt < 500, "chain validation should use the configured read timeout");
     assert.equal(rewardsCalls, 0);
     assert.equal(marketCalls, 0);
 });

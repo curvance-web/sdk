@@ -128,6 +128,10 @@ export class Api {
         if(['monad'].includes(chain)) {
             try {
                 const res = await fetchWithTimeout(`${api_url}/v1/${chain}/native_apy`);
+                if (!res.ok) {
+                    throw new Error(`Native yields request failed: ${res.status} ${res.statusText}`);
+                }
+
                 const yields = await res.json() as {
                     "native_apy": {
                         symbol: string,
@@ -159,7 +163,12 @@ export class Api {
 
         let rewards;
         try {
-            const payload = await fetchWithTimeout(`${api_url}/v1/rewards/active/${chain}`).then(res => res.json());
+            const response = await fetchWithTimeout(`${api_url}/v1/rewards/active/${chain}`);
+            if (!response.ok) {
+                throw new Error(`Rewards request failed: ${response.status} ${response.statusText}`);
+            }
+
+            const payload = await response.json();
             if (!isRewardsResponse(payload)) {
                 throw new Error("Invalid rewards response structure");
             }

@@ -144,4 +144,153 @@ describe('Market position health units', () => {
         assert.equal(capturedDebtAssets, UINT256_MAX);
         assert.equal(result?.toString(), '1');
     });
+
+    test('previewAssetImpact recomputes borrow impact with the new borrow included in utilization', async () => {
+        const market = Object.create(Market.prototype) as Market;
+        const collateral = Object.create(CToken.prototype) as CToken;
+        const debt = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
+        let borrowRateArgs: { assetsHeld: bigint; debt: bigint } | null = null;
+
+        (market as any).reader = {
+            previewAssetImpact: async () => ({
+                supply: 0n,
+                borrow: 0n,
+            }),
+        };
+        (collateral as any).address = '0x00000000000000000000000000000000000000c1';
+        (collateral as any).cache = { asset: { decimals: 0n } };
+        (collateral as any).convertTokensToUsd = (amount: bigint) => new Decimal(amount.toString());
+        (debt as any).address = '0x00000000000000000000000000000000000000d1';
+        (debt as any).cache = { asset: { decimals: 0n } };
+        (debt as any).convertTokensToUsd = (amount: bigint) => new Decimal(amount.toString());
+        (debt as any).contract = {
+            assetsHeld: async () => 100n,
+            marketOutstandingDebt: async () => 20n,
+        };
+        (debt as any).dynamicIRM = async () => ({
+            borrowRate: async (assetsHeld: bigint, nextDebt: bigint) => {
+                borrowRateArgs = { assetsHeld, debt: nextDebt };
+                return WAD;
+            },
+        });
+
+        const result = await market.previewAssetImpact(
+            ACCOUNT as any,
+            collateral,
+            debt,
+            Decimal(0),
+            Decimal(30),
+            'year' as any,
+        );
+
+        assert.deepEqual(borrowRateArgs, { assetsHeld: 70n, debt: 50n });
+        assert.ok(result.borrow.percent.gt(0));
+        assert.ok(result.borrow.change.gt(0));
+    });
+
+    test('previewPositionHealthLeverageDown removes fee-gross collateral but credits net repay output', async () => {
+        const market = Object.create(Market.prototype) as Market;
+        const deposit = Object.create(CToken.prototype) as CToken;
+        const borrow = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
+        let capturedDepositAmount: Decimal | null = null;
+        let capturedDebtAmount: Decimal | null = null;
+        let capturedBorrowArg: BorrowableCToken | null = null;
+
+        (market as any).previewPositionHealth = async (
+            _deposit: CToken,
+            _borrow: BorrowableCToken,
+            _isDeposit: boolean,
+            depositAmount: Decimal,
+            _isRepay: boolean,
+            debtAmount: Decimal,
+        ) => {
+            capturedDepositAmount = depositAmount;
+            capturedDebtAmount = debtAmount;
+            return new Decimal(2);
+        };
+        (deposit as any).cache = { asset: { decimals: 0n } };
+        (deposit as any).convertTokensToUsd = (amount: bigint) => new Decimal(amount.toString());
+        (deposit as any).previewLeverageDown = (
+            _newLeverage: Decimal,
+            _currentLeverage: Decimal,
+            borrowArg?: BorrowableCToken,
+        ) => {
+            capturedBorrowArg = borrowArg ?? null;
+            return {
+                collateralAssetReduction: 10_000n,
+                feeBps: 4n,
+            };
+        };
+        (borrow as any).convertUsdToTokens = (amount: Decimal) => amount;
+
+        const result = await market.previewPositionHealthLeverageDown(
+            deposit,
+            borrow,
+            Decimal('1.5'),
+            Decimal(2),
+        );
+
+        assert.equal(result?.toString(), '2');
+        assert.equal(capturedBorrowArg, borrow);
+        assert.notEqual(capturedDepositAmount, null);
+        assert.equal((capturedDepositAmount as unknown as Decimal).toString(), '10004');
+        assert.notEqual(capturedDebtAmount, null);
+        assert.equal((capturedDebtAmount as unknown as Decimal).toString(), '10000');
+    });
+
+    test('cooldown helpers return null for expired unlock times', async () => {
+        const originalNow = Date.now;
+        Date.now = () => 2_000_000_000;
+
+        try {
+            const market = Object.create(Market.prototype) as Market;
+            const active = Object.create(Market.prototype) as Market;
+            const expired = Object.create(Market.prototype) as Market;
+            const sentinel = Object.create(Market.prototype) as Market;
+            const cooldownLength = 1200n;
+
+            for (const [instance, address] of [
+                [market, MARKET],
+                [active, '0x00000000000000000000000000000000000000a1'],
+                [expired, '0x00000000000000000000000000000000000000a2'],
+                [sentinel, '0x00000000000000000000000000000000000000a3'],
+            ] as const) {
+                (instance as any).address = address;
+                (instance as any).cache = {
+                    static: { cooldownLength },
+                    user: { cooldown: 0n },
+                };
+            }
+
+            (market as any).cache.user.cooldown = 2_000_010n;
+            assert.equal(market.cooldown?.getTime(), 2_000_010_000);
+            (market as any).cache.user.cooldown = 1_999_999n;
+            assert.equal(market.cooldown, null);
+            (market as any).cache.user.cooldown = cooldownLength;
+            assert.equal(market.cooldown, null);
+
+            (market as any).account = ACCOUNT;
+            (market as any).contract = {
+                accountAssets: async () => 1_998_700n,
+                MIN_HOLD_PERIOD: async () => cooldownLength,
+            };
+            assert.equal(await market.expiresAt(ACCOUNT as any), null);
+            (market as any).contract.accountAssets = async () => 1_999_000n;
+            assert.equal((await market.expiresAt(ACCOUNT as any))?.getTime(), 2_000_200_000);
+
+            (market as any).reader = {
+                marketMultiCooldown: async () => [
+                    2_000_200n,
+                    1_999_999n,
+                    cooldownLength,
+                ],
+            };
+            const result = await market.multiHoldExpiresAt([active, expired, sentinel]);
+            assert.equal(result[active.address]?.getTime(), 2_000_200_000);
+            assert.equal(result[expired.address], null);
+            assert.equal(result[sentinel.address], null);
+        } finally {
+            Date.now = originalNow;
+        }
+    });
 });

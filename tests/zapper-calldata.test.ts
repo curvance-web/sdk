@@ -85,3 +85,28 @@ test("native simple zap expectedShares uses buffered convertToShares", async () 
     assert.equal(args[3], 19_996n);
     assert.equal(args[2].inputToken, NATIVE_ADDRESS);
 });
+
+test("Zapper.nativeZap wraps native input for native-simple wrapped-native deposits", async () => {
+    const { token } = createBufferedToken();
+    const { zapper, calls: calldataCalls } = createZapper();
+    const executeCalls: Array<{ calldata: unknown; overrides: Record<string, unknown> }> = [];
+
+    (token as any).isWrappedNative = true;
+    (zapper as any).type = "native-simple";
+    (zapper as any).executeCallData = async (calldata: unknown, overrides: Record<string, unknown>) => {
+        executeCalls.push({ calldata, overrides });
+        return { hash: "0xnative" };
+    };
+
+    const tx = await zapper.nativeZap(token, 20_000n, false, RECEIVER);
+
+    assert.deepEqual(tx, { hash: "0xnative" });
+    assert.deepEqual(executeCalls, [{
+        calldata: "0xencoded",
+        overrides: { value: 20_000n },
+    }]);
+    const args = calldataCalls[0]?.args as any[];
+    assert.equal(args[1], true);
+    assert.equal(args[2].inputToken, NATIVE_ADDRESS);
+    assert.notEqual(args[2].outputToken.toLowerCase(), NATIVE_ADDRESS.toLowerCase());
+});

@@ -154,6 +154,36 @@ describe('CToken leverage planning', () => {
         expectClose(feeCalls[0]?.currentLeverage ?? Decimal(0), '1.6666666667');
     });
 
+    test('vault leverage-up preview does not charge a swap fee on the no-swap path', () => {
+        const { token, borrow, feeCalls } = createLeveragePlanningHarness({
+            feeByOperation: {
+                'leverage-up': 11n,
+            },
+        });
+
+        const preview = token.previewLeverageUp(Decimal('2.00'), borrow, undefined, 'vault');
+
+        assert.equal(preview.feeBps, 0n);
+        assert.deepEqual(feeCalls, []);
+        expectClose(preview.collateralIncreaseInAssets, '20');
+        expectClose(preview.newCollateral, '120');
+    });
+
+    test('vault deposit-and-leverage preview does not charge a swap fee on the no-swap path', () => {
+        const { token, borrow, feeCalls } = createLeveragePlanningHarness({
+            feeByOperation: {
+                'deposit-and-leverage': 37n,
+            },
+        });
+
+        const preview = token.previewDepositAndLeverage(Decimal('1.60'), borrow, toWad(10), 'vault');
+
+        assert.equal(preview.feeBps, 0n);
+        assert.deepEqual(feeCalls, []);
+        expectClose(preview.collateralIncreaseInAssets, '12');
+        expectClose(preview.newCollateral, '112');
+    });
+
     test('previewDepositAndLeverage caps requested leverage at maxLeverage before planning fees and borrow', () => {
         const { token, borrow, feeCalls } = createLeveragePlanningHarness({
             feeByOperation: {

@@ -218,6 +218,7 @@ describe('Approval preflights â€” single-path execution', () => {
                 zapCollateralize: boolean | null;
                 zapReceiver: string | null;
                 callDataCalls: Array<{ method: string; args: unknown[] }>;
+                oracleRouteCalls: Array<{ calldata: string; overrides: Record<string, unknown>; reloadAccount?: string | null | undefined }>;
             };
         };
 
@@ -253,6 +254,7 @@ describe('Approval preflights â€” single-path execution', () => {
             zapCollateralize: null,
             zapReceiver: null,
             callDataCalls: [],
+            oracleRouteCalls: [],
         };
         (token as any).ensureUnderlyingAmount = async (amount: Decimal) => amount;
         (token as any).requireSigner = () => ({ address: OWNER } as any);
@@ -273,8 +275,13 @@ describe('Approval preflights â€” single-path execution', () => {
             token.__state.zapReceiver = receiver;
             return { calldata: defaultCalldata, calldata_overrides: {} };
         };
-        (token as any).oracleRoute = async () => {
+        (token as any).oracleRoute = async (
+            calldata: string,
+            overrides: Record<string, unknown> = {},
+            reloadAccount?: string | null,
+        ) => {
             token.__state.oracleRouteCalled = true;
+            token.__state.oracleRouteCalls.push({ calldata, overrides, reloadAccount });
             return {} as any;
         };
 
@@ -355,6 +362,183 @@ describe('Approval preflights â€” single-path execution', () => {
             '50',
         );
     });
+
+    const simpleZap = {
+        type: 'simple',
+        inputToken: INPUT_TOKEN,
+        slippage: new Decimal('0.005'),
+    } as const;
+
+    const nativeSimpleZap = {
+        type: 'simple',
+        inputToken: NATIVE_ADDRESS,
+        slippage: new Decimal('0.005'),
+    } as const;
+
+    const writeSurfaceMatrix = [
+        {
+            name: 'direct deposit to self',
+            method: 'deposit',
+            zap: 'none',
+            receiver: null,
+            expectedCall: { method: 'deposit', args: [WAD, OWNER] },
+            expectedAssetAllowance: [{ owner: OWNER, spender: CTOKEN }],
+            expectedZapAllowance: [],
+            expectedPluginChecks: [],
+            expectedDelegateChecks: [],
+            expectedZap: { assets: WAD, collateralize: false, receiver: OWNER },
+        },
+        {
+            name: 'simple zap deposit to third-party receiver',
+            method: 'deposit',
+            zap: simpleZap,
+            receiver: RECEIVER,
+            expectedCall: { method: 'deposit', args: [WAD, RECEIVER] },
+            expectedAssetAllowance: [],
+            expectedZapAllowance: [{ owner: OWNER, spender: SIMPLE_ZAPPER, token: INPUT_TOKEN }],
+            expectedPluginChecks: [],
+            expectedDelegateChecks: [],
+            expectedZap: { assets: 1_000_000n, collateralize: false, receiver: RECEIVER },
+        },
+        {
+            name: 'native simple zap deposit to third-party receiver',
+            method: 'deposit',
+            zap: nativeSimpleZap,
+            receiver: RECEIVER,
+            expectedCall: { method: 'deposit', args: [WAD, RECEIVER] },
+            expectedAssetAllowance: [],
+            expectedZapAllowance: [],
+            expectedPluginChecks: [],
+            expectedDelegateChecks: [],
+            expectedZap: { assets: 1_000_000n, collateralize: false, receiver: RECEIVER },
+        },
+        {
+            name: 'direct collateral deposit to self',
+            method: 'depositAsCollateral',
+            zap: 'none',
+            receiver: null,
+            expectedCall: { method: 'depositAsCollateral', args: [WAD, OWNER] },
+            expectedAssetAllowance: [{ owner: OWNER, spender: CTOKEN }],
+            expectedZapAllowance: [],
+            expectedPluginChecks: [],
+            expectedDelegateChecks: [],
+            expectedZap: { assets: WAD, collateralize: true, receiver: OWNER },
+        },
+        {
+            name: 'direct collateral deposit to third-party receiver',
+            method: 'depositAsCollateral',
+            zap: 'none',
+            receiver: RECEIVER,
+            expectedCall: { method: 'depositAsCollateralFor', args: [WAD, RECEIVER] },
+            expectedAssetAllowance: [{ owner: OWNER, spender: CTOKEN }],
+            expectedZapAllowance: [],
+            expectedPluginChecks: [],
+            expectedDelegateChecks: [{ owner: RECEIVER, delegate: OWNER }],
+            expectedZap: { assets: WAD, collateralize: true, receiver: RECEIVER },
+        },
+        {
+            name: 'simple collateral zap to self',
+            method: 'depositAsCollateral',
+            zap: simpleZap,
+            receiver: null,
+            expectedCall: { method: 'depositAsCollateral', args: [WAD, OWNER] },
+            expectedAssetAllowance: [],
+            expectedZapAllowance: [{ owner: OWNER, spender: SIMPLE_ZAPPER, token: INPUT_TOKEN }],
+            expectedPluginChecks: [{ type: 'simple', pluginType: 'zapper' }],
+            expectedDelegateChecks: [],
+            expectedZap: { assets: 1_000_000n, collateralize: true, receiver: OWNER },
+        },
+        {
+            name: 'simple collateral zap to third-party receiver',
+            method: 'depositAsCollateral',
+            zap: simpleZap,
+            receiver: RECEIVER,
+            expectedCall: { method: 'depositAsCollateralFor', args: [WAD, RECEIVER] },
+            expectedAssetAllowance: [],
+            expectedZapAllowance: [{ owner: OWNER, spender: SIMPLE_ZAPPER, token: INPUT_TOKEN }],
+            expectedPluginChecks: [],
+            expectedDelegateChecks: [
+                { owner: RECEIVER, delegate: OWNER },
+                { owner: RECEIVER, delegate: SIMPLE_ZAPPER },
+            ],
+            expectedZap: { assets: 1_000_000n, collateralize: true, receiver: RECEIVER },
+        },
+    ] as const;
+
+    for (const scenario of writeSurfaceMatrix) {
+        test(`write-surface matrix: ${scenario.name}`, async () => {
+            const token = createExecutionToken();
+            const assetAllowanceChecks: Array<{ owner: string; spender: string }> = [];
+            const zapAllowanceChecks: Array<{ owner: string; spender: string; token: string }> = [];
+            const pluginChecks: Array<{ type: string; pluginType: string }> = [];
+            const delegateChecks: Array<{ owner: string; delegate: string }> = [];
+
+            (token as any).getAsset = () => ({
+                address: ADDR,
+                symbol: 'WMON',
+                decimals: 18n,
+                allowance: async (owner: string, spender: string) => {
+                    assetAllowanceChecks.push({ owner, spender });
+                    return 10n ** 30n;
+                },
+            });
+            (token as any).getZapAssetAmount = async (_amount: Decimal, zap: unknown) =>
+                zap === 'none' ? WAD : 1_000_000n;
+            (token as any).getZapper = (type: string) => ({
+                type,
+                address: type === 'vault' || type === 'native-vault' ? VAULT_ZAPPER : SIMPLE_ZAPPER,
+            });
+            (token as any).isPluginApproved = async (type: string, pluginType: string) => {
+                pluginChecks.push({ type, pluginType });
+                return true;
+            };
+            (token as any).contract = {
+                isDelegate: async (owner: string, delegate: string) => {
+                    delegateChecks.push({ owner, delegate });
+                    return true;
+                },
+            };
+            (token as any).zap = async (
+                assets: bigint,
+                zap: unknown,
+                collateralize: boolean,
+                defaultCalldata: string,
+                receiver: string,
+            ) => {
+                const zapType = typeof zap === 'object' && zap != null
+                    ? (zap as { type: string }).type
+                    : zap;
+                token.__state.zapAssets = assets;
+                token.__state.zapCollateralize = collateralize;
+                token.__state.zapReceiver = receiver;
+                return {
+                    calldata: defaultCalldata,
+                    calldata_overrides: zapType === 'none' ? {} : { to: SIMPLE_ZAPPER },
+                };
+            };
+            ERC20.prototype.allowance = async function (owner, spender) {
+                zapAllowanceChecks.push({ owner, spender, token: this.address });
+                return 10n ** 30n;
+            };
+
+            if (scenario.method === 'deposit') {
+                await token.deposit(Decimal(1), scenario.zap as any, scenario.receiver as any);
+            } else {
+                await token.depositAsCollateral(Decimal(1), scenario.zap as any, scenario.receiver as any);
+            }
+
+            assert.deepEqual(token.__state.callDataCalls.at(-1), scenario.expectedCall);
+            assert.deepEqual(assetAllowanceChecks, scenario.expectedAssetAllowance);
+            assert.deepEqual(zapAllowanceChecks, scenario.expectedZapAllowance);
+            assert.deepEqual(pluginChecks, scenario.expectedPluginChecks);
+            assert.deepEqual(delegateChecks, scenario.expectedDelegateChecks);
+            assert.equal(token.__state.zapAssets, scenario.expectedZap.assets);
+            assert.equal(token.__state.zapCollateralize, scenario.expectedZap.collateralize);
+            assert.equal(token.__state.zapReceiver, scenario.expectedZap.receiver);
+            assert.equal(token.__state.oracleRouteCalled, true);
+            assert.equal(token.__state.oracleRouteCalls.at(-1)?.reloadAccount, scenario.expectedZap.receiver);
+        });
+    }
 
     test('depositAsCollateral blocks submission when self-collateral zapper delegate approval is missing', async () => {
         const token = createExecutionToken();
@@ -659,6 +843,23 @@ describe('Approval preflights â€” single-path execution', () => {
         (token as any).getAsset = () => ({
             allowance: async () => {
                 throw new Error('approval should not be checked');
+            },
+            symbol: 'WMON',
+        });
+
+        await assert.rejects(
+            () => token.depositAsCollateral(Decimal(1), 'none'),
+            /not enough collateral left/i,
+        );
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('depositAsCollateral cap preflight uses unbuffered minted shares', async () => {
+        const token = createExecutionToken();
+        (token as any).getRemainingCollateral = () => WAD - 1n;
+        (token as any).getAsset = () => ({
+            allowance: async () => {
+                throw new Error('approval should not be checked after cap failure');
             },
             symbol: 'WMON',
         });

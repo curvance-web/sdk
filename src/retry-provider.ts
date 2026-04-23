@@ -977,6 +977,10 @@ function getGlobalRetryProvider(): RetryableProvider {
     return globalRetryProvider;
 }
 
+export function getActiveRetryConfig(): RetryConfig {
+    return getGlobalRetryProvider().getConfig();
+}
+
 /**
  * Wrap a provider with the global retry configuration.
  *

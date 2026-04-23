@@ -14,6 +14,7 @@ import type { FeePolicyContext } from '../src/feePolicy';
 
 const WAD = 10n ** 18n;
 const ACCOUNT = '0x00000000000000000000000000000000000000aa';
+const RECEIVER = '0x00000000000000000000000000000000000000bb';
 const COLLATERAL = '0x00000000000000000000000000000000000000c1';
 const DEBT = '0x00000000000000000000000000000000000000d1';
 const MANAGER = '0x0000000000000000000000000000000000000fed';
@@ -253,10 +254,13 @@ describe('CToken simple leverage execution', () => {
         const token = Object.create(CToken.prototype) as CToken;
         const multicalls: unknown[] = [];
         const executeCalls: Array<{ calldata: string; override: Record<string, unknown> }> = [];
+        const events: string[] = [];
 
         (token as any).address = COLLATERAL;
         (token as any).market = {
-            reloadUserData: async () => undefined,
+            reloadUserData: async () => {
+                events.push('reload');
+            },
         };
         (token as any).requireSigner = () => ({ address: ACCOUNT });
         (token as any).getPriceUpdates = async () => [{
@@ -271,7 +275,12 @@ describe('CToken simple leverage execution', () => {
         };
         (token as any).executeCallData = async (calldata: string, override: Record<string, unknown>) => {
             executeCalls.push({ calldata, override });
-            return { hash: '0xhash' };
+            return {
+                hash: '0xhash',
+                wait: async () => {
+                    events.push('wait');
+                },
+            };
         };
 
         await token.oracleRoute('0xaction' as any, { to: MANAGER });
@@ -291,6 +300,65 @@ describe('CToken simple leverage execution', () => {
         assert.deepEqual(executeCalls, [{
             calldata: '0xmulticall',
             override: { to: MANAGER },
+        }]);
+        assert.deepEqual(events, ['wait', 'reload']);
+    });
+
+    test('oracleRoute fails before native-value multicalls when oracle price updates are required', async () => {
+        const token = Object.create(CToken.prototype) as CToken;
+
+        (token as any).address = COLLATERAL;
+        (token as any).market = {
+            reloadUserData: async () => {
+                throw new Error('reload should not run');
+            },
+        };
+        (token as any).requireSigner = () => ({ address: ACCOUNT });
+        (token as any).getPriceUpdates = async () => [{
+            target: '0x0000000000000000000000000000000000000aaa',
+            isPriceUpdate: true,
+            data: '0xprice',
+        }];
+        (token as any).getCallData = () => {
+            throw new Error('multicall calldata should not be encoded for native value');
+        };
+        (token as any).executeCallData = async () => {
+            throw new Error('send should not run');
+        };
+
+        await assert.rejects(
+            () => token.oracleRoute('0xnativezap' as any, { to: MANAGER, value: 1n }),
+            /Native gas-token zaps cannot be combined with oracle price-update multicalls/i,
+        );
+    });
+
+    test('oracleRoute refreshes an explicit receiver account after execution', async () => {
+        const token = Object.create(CToken.prototype) as CToken;
+        const reloads: Array<{ account: string; allowSignerMismatch: boolean | undefined }> = [];
+        const events: string[] = [];
+
+        (token as any).address = COLLATERAL;
+        (token as any).market = {
+            reloadUserData: async (account: string, options?: { allowSignerMismatch?: boolean }) => {
+                events.push('reload');
+                reloads.push({ account, allowSignerMismatch: options?.allowSignerMismatch });
+            },
+        };
+        (token as any).requireSigner = () => ({ address: ACCOUNT });
+        (token as any).getPriceUpdates = async () => [];
+        (token as any).executeCallData = async () => ({
+            hash: '0xhash',
+            wait: async () => {
+                events.push('wait');
+            },
+        });
+
+        await token.oracleRoute('0xdeposit' as any, {}, RECEIVER as any);
+
+        assert.deepEqual(events, ['wait', 'reload']);
+        assert.deepEqual(reloads, [{
+            account: RECEIVER,
+            allowSignerMismatch: true,
         }]);
     });
 
