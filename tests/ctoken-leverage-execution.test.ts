@@ -14,6 +14,7 @@ const WAD = 10n ** 18n;
 const ACCOUNT = '0x00000000000000000000000000000000000000aa';
 const COLLATERAL = '0x00000000000000000000000000000000000000c1';
 const DEBT = '0x00000000000000000000000000000000000000d1';
+const MANAGER = '0x0000000000000000000000000000000000000fed';
 
 const toWad = (value: string | number) =>
     BigInt(new Decimal(value).mul(new Decimal(10).pow(18)).toFixed(0));
@@ -176,6 +177,51 @@ function createSimpleExecutionHarness({
 }
 
 describe('CToken simple leverage execution', () => {
+    test('oracleRoute targets manager multicall action when execution is submitted to a manager', async () => {
+        const token = Object.create(CToken.prototype) as CToken;
+        const multicalls: unknown[] = [];
+        const executeCalls: Array<{ calldata: string; override: Record<string, unknown> }> = [];
+
+        (token as any).address = COLLATERAL;
+        (token as any).market = {
+            reloadUserData: async () => undefined,
+        };
+        (token as any).requireSigner = () => ({ address: ACCOUNT });
+        (token as any).getPriceUpdates = async () => [{
+            target: '0x0000000000000000000000000000000000000aaa',
+            isPriceUpdate: true,
+            data: '0xprice',
+        }];
+        (token as any).getCallData = (method: string, args: unknown[]) => {
+            assert.equal(method, 'multicall');
+            multicalls.push(args);
+            return '0xmulticall';
+        };
+        (token as any).executeCallData = async (calldata: string, override: Record<string, unknown>) => {
+            executeCalls.push({ calldata, override });
+            return { hash: '0xhash' };
+        };
+
+        await token.oracleRoute('0xaction' as any, { to: MANAGER });
+
+        assert.deepEqual(multicalls, [[[
+            {
+                target: '0x0000000000000000000000000000000000000aaa',
+                isPriceUpdate: true,
+                data: '0xprice',
+            },
+            {
+                target: MANAGER,
+                isPriceUpdate: false,
+                data: '0xaction',
+            },
+        ]]]);
+        assert.deepEqual(executeCalls, [{
+            calldata: '0xmulticall',
+            override: { to: MANAGER },
+        }]);
+    });
+
     test('leverageDown fails closed for unsupported position manager types before quoting', async () => {
         const { token, borrow, quoteCalls } = createSimpleExecutionHarness();
 

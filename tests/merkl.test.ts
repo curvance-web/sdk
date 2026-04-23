@@ -41,6 +41,21 @@ test("fetchMerklOpportunities forwards action and chainId in the request URL", a
     assert.equal(url.searchParams.get("chainId"), "421614");
 });
 
+test("fetchMerklOpportunities degrades malformed successful responses to no opportunities", async (t) => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => ({ broken: true }),
+    } as Response)) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    assert.deepEqual(await fetchMerklOpportunities({ action: "LEND", chainId: 143 }), []);
+});
+
 test("aggregateMerklAprByToken rolls duplicate lend opportunities up by token membership", () => {
     const WMON = "0x00000000000000000000000000000000000000a1";
     const AUSD = "0x00000000000000000000000000000000000000a2";

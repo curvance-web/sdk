@@ -157,5 +157,10 @@ export async function fetchMerklOpportunities({
         throw new Error('Failed to fetch Merkl opportunities');
     }
 
-    return (await response.json()) as MerklOpportunity[];
+    const body = await response.json();
+    if (!Array.isArray(body)) {
+        return [];
+    }
+
+    return body as MerklOpportunity[];
 }

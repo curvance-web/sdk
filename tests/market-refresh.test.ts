@@ -3,11 +3,13 @@ import test from "node:test";
 import { Market } from "../src/classes/Market";
 import { CToken } from "../src/classes/CToken";
 import { ProtocolReader } from "../src/classes/ProtocolReader";
+import { refreshActiveUserMarkets, refreshActiveUserMarketSummaries } from "../src/setup";
 
 const ACCOUNT = "0x00000000000000000000000000000000000000aa";
 const MARKET_A = "0x00000000000000000000000000000000000000a1";
 const MARKET_B = "0x00000000000000000000000000000000000000b2";
 const TOKEN_A = "0x00000000000000000000000000000000000000d1";
+const TOKEN_B = "0x00000000000000000000000000000000000000d2";
 const WAD = 10n ** 18n;
 
 function createMarket(tokenCache: Partial<{
@@ -74,6 +76,50 @@ function createUserRefreshMarket() {
     return { market, token };
 }
 
+function createRefreshHelperMarket(address: string, tokenAddress: string, reader: any) {
+    const market = Object.create(Market.prototype) as Market;
+    market.address = address as any;
+    market.account = null;
+    market.reader = reader;
+    market.cache = {
+        static: {} as any,
+        dynamic: { address: address as any, tokens: [] },
+        user: {
+            address: address as any,
+            collateral: 0n,
+            maxDebt: 0n,
+            debt: 0n,
+            positionHealth: 0n,
+            cooldown: 0n,
+            errorCodeHit: false,
+            priceStale: false,
+            tokens: [],
+        },
+        deploy: {} as any,
+    };
+
+    const token = Object.create(CToken.prototype) as CToken;
+    token.address = tokenAddress as any;
+    token.market = market;
+    token.cache = {
+        address: tokenAddress as any,
+        decimals: 18n,
+        asset: {
+            address: tokenAddress as any,
+            decimals: 18n,
+        },
+        userAssetBalance: 0n,
+        userShareBalance: 0n,
+        userUnderlyingBalance: 0n,
+        userCollateral: 0n,
+        userDebt: 0n,
+        liquidationPrice: 0n,
+    } as any;
+    market.tokens = [token] as any;
+
+    return market;
+}
+
 test("getActiveUserMarkets ignores wallet-only balances", () => {
     const activeDeposit = createMarket({ userAssetBalance: 1n });
     const activeDebt = createMarket({ userDebt: 2n });
@@ -82,6 +128,106 @@ test("getActiveUserMarkets ignores wallet-only balances", () => {
     const active = Market.getActiveUserMarkets([activeDeposit, walletOnly, activeDebt]);
 
     assert.deepEqual(active, [activeDeposit, activeDebt]);
+});
+
+test("refreshActiveUserMarkets refreshes the requested account before filtering activity", async () => {
+    const calls: Array<{ addresses: string[]; account: string }> = [];
+    const reader = {
+        getMarketStates: async (addresses: string[], account: string) => {
+            calls.push({ addresses, account });
+            return {
+                dynamicMarkets: [
+                    { address: MARKET_A, tokens: [] },
+                    { address: MARKET_B, tokens: [] },
+                ],
+                userMarkets: [
+                    {
+                        address: MARKET_A,
+                        collateral: 0n,
+                        maxDebt: 0n,
+                        debt: 0n,
+                        positionHealth: 0n,
+                        cooldown: 0n,
+                        errorCodeHit: false,
+                        priceStale: false,
+                        tokens: [{
+                            address: TOKEN_A as any,
+                            userAssetBalance: 1n,
+                            userShareBalance: 0n,
+                            userUnderlyingBalance: 0n,
+                            userCollateral: 0n,
+                            userDebt: 0n,
+                            liquidationPrice: 0n,
+                        }],
+                    },
+                    {
+                        address: MARKET_B,
+                        collateral: 0n,
+                        maxDebt: 0n,
+                        debt: 0n,
+                        positionHealth: 0n,
+                        cooldown: 0n,
+                        errorCodeHit: false,
+                        priceStale: false,
+                        tokens: [{
+                            address: TOKEN_B as any,
+                            userAssetBalance: 0n,
+                            userShareBalance: 0n,
+                            userUnderlyingBalance: 0n,
+                            userCollateral: 0n,
+                            userDebt: 0n,
+                            liquidationPrice: 0n,
+                        }],
+                    },
+                ],
+            };
+        },
+    };
+    const marketA = createRefreshHelperMarket(MARKET_A, TOKEN_A, reader);
+    const marketB = createRefreshHelperMarket(MARKET_B, TOKEN_B, reader);
+
+    const refreshed = await refreshActiveUserMarkets(ACCOUNT as any, [marketA, marketB]);
+
+    assert.deepEqual(calls, [{
+        addresses: [MARKET_A, MARKET_B],
+        account: ACCOUNT,
+    }]);
+    assert.deepEqual(refreshed, [marketA]);
+    assert.equal(marketA.account, ACCOUNT);
+    assert.equal(marketB.account, ACCOUNT);
+});
+
+test("refreshActiveUserMarketSummaries does not prefilter from stale full-token activity", async () => {
+    const calls: Array<{ addresses: string[]; account: string }> = [];
+    const reader = {
+        getMarketSummaries: async (addresses: string[], account: string) => {
+            calls.push({ addresses, account });
+            return addresses.map((address) => ({
+                address,
+                collateral: 0n,
+                maxDebt: 0n,
+                debt: 0n,
+                positionHealth: 0n,
+                cooldown: 0n,
+                errorCodeHit: false,
+                priceStale: false,
+            }));
+        },
+    };
+    const marketA = createRefreshHelperMarket(MARKET_A, TOKEN_A, reader);
+    const marketB = createRefreshHelperMarket(MARKET_B, TOKEN_B, reader);
+
+    const refreshed = await refreshActiveUserMarketSummaries(ACCOUNT as any, [marketA, marketB]);
+
+    assert.deepEqual(calls, [{
+        addresses: [MARKET_A, MARKET_B],
+        account: ACCOUNT,
+    }]);
+    assert.deepEqual(refreshed, [marketA, marketB]);
+    assert.equal(marketA.account, ACCOUNT);
+    assert.equal(marketA.userDataScope, "summary");
+    assert.equal(marketB.account, ACCOUNT);
+    assert.equal(marketB.userDataScope, "summary");
 });
 
 test("reloadUserMarkets batches addresses and applies responses by address", async () => {

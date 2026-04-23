@@ -176,7 +176,7 @@ test("query budget: connected boot uses static + combined reader calls only", as
     });
 });
 
-test("query budget: refreshActiveUserMarkets batches only active markets", async () => {
+test("query budget: refreshActiveUserMarkets refreshes all requested markets before filtering", async () => {
     const calls: Array<{ addresses: string[]; account: string }> = [];
     const applied: string[] = [];
     const reader = {
@@ -195,8 +195,8 @@ test("query budget: refreshActiveUserMarkets batches only active markets", async
     }) as any;
 
     const walletOnly = createMarket(MARKET_B, reader, { userUnderlyingBalance: 99n });
-    walletOnly.applyState = (() => {
-        throw new Error("wallet-only market should not be refreshed");
+    walletOnly.applyState = ((dynamic: { address: string }, user: { address: string }) => {
+        applied.push(`${dynamic.address}:${user.address}`);
     }) as any;
 
     const activeDebt = createMarket(MARKET_C, reader, { userDebt: 5n });
@@ -208,11 +208,12 @@ test("query budget: refreshActiveUserMarkets batches only active markets", async
 
     assert.deepEqual(refreshed, [activeDeposit, activeDebt]);
     assert.deepEqual(calls, [{
-        addresses: [MARKET_A, MARKET_C],
+        addresses: [MARKET_A, MARKET_B, MARKET_C],
         account: ACCOUNT,
     }]);
     assert.deepEqual(applied, [
         `${MARKET_A}:${MARKET_A}`,
+        `${MARKET_B}:${MARKET_B}`,
         `${MARKET_C}:${MARKET_C}`,
     ]);
 });
@@ -265,7 +266,7 @@ test("query budget: refreshActiveUserMarkets batches same deployment across read
     ]);
 });
 
-test("query budget: refreshActiveUserMarketSummaries batches only active markets", async () => {
+test("query budget: refreshActiveUserMarketSummaries refreshes all requested markets", async () => {
     const calls: Array<{ addresses: string[]; account: string }> = [];
     const applied: string[] = [];
     const reader = {
@@ -290,8 +291,8 @@ test("query budget: refreshActiveUserMarketSummaries batches only active markets
     }) as any;
 
     const walletOnly = createMarket(MARKET_B, reader, { userUnderlyingBalance: 99n });
-    walletOnly.applyUserSummary = (() => {
-        throw new Error("wallet-only market should not receive a summary refresh");
+    walletOnly.applyUserSummary = ((user: { address: string }) => {
+        applied.push(user.address);
     }) as any;
 
     const activeDebt = createMarket(MARKET_C, reader, { userDebt: 5n });
@@ -301,12 +302,12 @@ test("query budget: refreshActiveUserMarketSummaries batches only active markets
 
     const refreshed = await refreshActiveUserMarketSummaries(ACCOUNT as any, [activeDeposit, walletOnly, activeDebt]);
 
-    assert.deepEqual(refreshed, [activeDeposit, activeDebt]);
+    assert.deepEqual(refreshed, [activeDeposit, walletOnly, activeDebt]);
     assert.deepEqual(calls, [{
-        addresses: [MARKET_A, MARKET_C],
+        addresses: [MARKET_A, MARKET_B, MARKET_C],
         account: ACCOUNT,
     }]);
-    assert.deepEqual(applied, [MARKET_A, MARKET_C]);
+    assert.deepEqual(applied, [MARKET_A, MARKET_B, MARKET_C]);
 });
 
 test("query budget: reloadUserData uses one targeted market-state call", async () => {

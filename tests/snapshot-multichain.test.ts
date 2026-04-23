@@ -31,15 +31,18 @@ function createSnapshotMarket({
     chain,
     reader,
     applyState,
+    account = ACCOUNT,
 }: {
     address: string;
     name: string;
     chain: string;
     reader?: any;
     applyState?: (dynamic: { address: string }, user: { address: string }) => void;
+    account?: string | null;
 }) {
     const market = Object.create(Market.prototype) as Market;
     market.address = address as any;
+    market.account = account as any;
     market.reader = (reader ?? { batchKey: null, getAllDynamicState: async () => ({ dynamicMarket: [], userData: { markets: [] } }) }) as any;
     market.setup = { chain } as any;
     market.tokens = [createToken(name, true)] as any;
@@ -190,6 +193,9 @@ test("takePortfolioSnapshot refresh groups explicit markets by deployment key", 
         `${MARKET_B}:${MARKET_B}`,
         `${MARKET_C}:${MARKET_C}`,
     ]);
+    assert.equal(marketA.account, ACCOUNT);
+    assert.equal(marketB.account, ACCOUNT);
+    assert.equal(marketC.account, ACCOUNT);
 });
 
 test("takePortfolioSnapshot refresh keeps same-chain readers with different providers separate", async () => {
@@ -255,6 +261,22 @@ test("takePortfolioSnapshot refresh fails closed when a refreshed market payload
             refresh: true,
         }),
         /Fresh snapshot refresh missing market state/i,
+    );
+});
+
+test("takePortfolioSnapshot rejects full caches bound to a different account unless refreshed", async () => {
+    const market = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Wrong Account Market",
+        chain: "monad-mainnet",
+        account: "0x00000000000000000000000000000000000000bb",
+    });
+
+    await assert.rejects(
+        () => takePortfolioSnapshot(ACCOUNT as any, {
+            markets: [market],
+        }),
+        /cache is bound to 0x00000000000000000000000000000000000000bb/i,
     );
 });
 

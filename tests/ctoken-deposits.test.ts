@@ -321,6 +321,20 @@ describe('Approval preflights â€” single-path execution', () => {
         assert.equal(token.__state.oracleRouteCalled, false);
     });
 
+    test('ensureUnderlyingAmount fails exact instead of shrinking requested deposits to wallet balance', async () => {
+        const token = createCToken();
+        (token as any).getZapBalance = async () => 50n * WAD;
+
+        await assert.rejects(
+            () => token.ensureUnderlyingAmount(Decimal(51), 'none'),
+            /Insufficient balance: requested 51, available 50/i,
+        );
+        assert.equal(
+            (await token.ensureUnderlyingAmount(Decimal(50), 'none')).toString(),
+            '50',
+        );
+    });
+
     test('deposit blocks submission when zapper delegate approval is missing', async () => {
         const token = createExecutionToken();
         (token as any).getZapper = () => ({ type: 'simple' });

@@ -1026,7 +1026,6 @@ export class CToken extends Calldata<ICToken> {
         return asset.balanceOf(signer.address as address, false);
     }
 
-    // TODO: Hack to remove
     async ensureUnderlyingAmount(amount: TokenInput, zap: ZapperInstructions) : Promise<TokenInput> {
         const balance = await this.getZapBalance(zap);
         const isZapping = typeof zap === 'object' && zap.type !== 'none';
@@ -1045,16 +1044,10 @@ export class CToken extends Calldata<ICToken> {
         const assets = FormatConverter.decimalToBigInt(amount, decimals);
 
         if(assets > balance) {
-            console.warn('[WARNING] Detected higher deposit amount then underlying balance, changing to the underlying balance. Diff: ', {
-                balance: balance,
-                formatted: FormatConverter.bigIntToDecimal(balance, decimals),
-                attempt: {
-                    raw: assets,
-                    formatted: amount
-                },
-            });
-
-            return FormatConverter.bigIntToDecimal(balance, decimals);
+            const formattedBalance = FormatConverter.bigIntToDecimal(balance, decimals);
+            throw new Error(
+                `Insufficient balance: requested ${amount.toString()}, available ${formattedBalance.toString()}.`,
+            );
         }
 
         return amount;
@@ -2172,9 +2165,9 @@ export class CToken extends Calldata<ICToken> {
         return FormatConverter.bigIntTokensToUsd(tokenAmount, price, decimals);
     }
 
-    buildMultiCallAction(calldata: bytes) {
+    buildMultiCallAction(calldata: bytes, target: address = this.address) {
         return {
-            target: this.address,
+            target,
             isPriceUpdate: false,
             data: calldata
         } as MulticallAction;
@@ -2301,7 +2294,8 @@ export class CToken extends Calldata<ICToken> {
         const price_updates = await this.getPriceUpdates();
 
         if(price_updates.length > 0) {
-            const token_action = this.buildMultiCallAction(calldata);
+            const actionTarget = (override.to ?? this.address) as address;
+            const token_action = this.buildMultiCallAction(calldata, actionTarget);
             calldata = this.getCallData("multicall", [[...price_updates, token_action]]);
         }
 
@@ -2315,7 +2309,8 @@ export class CToken extends Calldata<ICToken> {
         const price_updates = await this.getPriceUpdates();
 
         if(price_updates.length > 0) {
-            const token_action = this.buildMultiCallAction(calldata);
+            const actionTarget = (override.to ?? this.address) as address;
+            const token_action = this.buildMultiCallAction(calldata, actionTarget);
             calldata = this.getCallData("multicall", [[...price_updates, token_action]]);
         }
 

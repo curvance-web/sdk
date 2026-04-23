@@ -1,14 +1,12 @@
-import { address, bytes, curvance_read_provider, Percentage, TokenInput } from "../../types";
+import { address, bytes, curvance_read_provider } from "../../types";
 import { ZapToken } from "../CToken";
 import IDexAgg from "./IDexAgg";
 import { Swap } from "../Zapper";
-import { all_markets } from "../../setup";
-import { EMPTY_ADDRESS, toBigInt, toContractSwapSlippage } from "../../helpers";
-import { ERC20 } from "../ERC20";
-import FormatConverter from "../FormatConverter";
+import { all_markets, setup_config } from "../../setup";
+import { toContractSwapSlippage } from "../../helpers";
 import { safeBigInt, fetchWithTimeout, validateRouterAddress, validateSlippageBps } from "../../validation";
 import { AbiCoder } from "ethers";
-import { CURVANCE_FEE_BPS, CURVANCE_DAO_FEE_RECEIVER } from "../../feePolicy";
+import { buildLocalSimpleZapTokens } from "./helpers";
 
 // ── Calldata validation ─────────────────────────────────────────────
 // The KyberSwap API returns an opaque calldata blob. We trust the API to
@@ -196,50 +194,37 @@ export class KyberSwap implements IDexAgg {
         page: number = 1,
         pageSize: number = 25,
     ): Promise<ZapToken[]> {
-        let zap_tokens: ZapToken[] = [];
+        void page;
+        void pageSize;
 
-        let tokens_set = new Set<string>();
-        for(const market of all_markets) {
-            for(const token of market.tokens) {
-                const asset = token.getAsset(true);
-                if(tokens_set.has(asset.address)) {
-                    continue;
-                }
-                tokens_set.add(asset.address);
-
-                if(query) {
-                    const lowerQuery = query.toLowerCase();
-                    if(!token.name.toLowerCase().includes(lowerQuery) && !token.symbol.toLowerCase().includes(lowerQuery)) {
-                        continue;
-                    }
+        return buildLocalSimpleZapTokens(
+            all_markets,
+            provider,
+            query,
+            account,
+            (wallet, tokenIn, tokenOut, amount, formattedSlippage, feeBps, feeReceiver) =>
+                this.quote(wallet, tokenIn, tokenOut, amount, formattedSlippage, feeBps, feeReceiver),
+            (tokenIn, tokenOut, amount) => {
+                const feePolicy = setup_config?.feePolicy;
+                if (feePolicy == null) {
+                    return { feeBps: 0n };
                 }
 
-                zap_tokens.push({
-                    interface: token.getAsset(true),
-                    type: 'simple',
-                    quote: async (tokenIn: string, tokenOut: string, amount: TokenInput, slippage: Percentage) => {
-                        const wallet = account ?? EMPTY_ADDRESS;
-                        const erc20in = new ERC20(provider, tokenIn as address, undefined, undefined, null);
-                        const decimalsIn = erc20in.decimals ?? await erc20in.contract.decimals();
-                        const amount_bigint = toBigInt(amount, decimalsIn);
-                        const erc20Out = new ERC20(provider, tokenOut as address, undefined, undefined, null);
-                        const decimalsOut = erc20Out.decimals ?? await erc20Out.contract.decimals();
-
-                        const results = await this.quote(wallet, tokenIn, tokenOut, amount_bigint, FormatConverter.percentageToBps(slippage));
-                        return {
-                            minOut_raw: results.min_out,
-                            output_raw: results.out,
-                            minOut: FormatConverter.bigIntToDecimal(results.min_out, decimalsOut),
-                            output: FormatConverter.bigIntToDecimal(results.out, decimalsOut),
-                            extra: results.raw
-                        }
-                    }
+                const feeBps = feePolicy.getFeeBps({
+                    operation: 'zap',
+                    inputToken: tokenIn as address,
+                    outputToken: tokenOut as address,
+                    inputAmount: amount,
+                    currentLeverage: null,
+                    targetLeverage: null,
                 });
-            }
-        }
 
-        // https://ks-setting.kyberswap.com/api/v1/tokens?chainIds=143&page=1&pageSize=25&isWhitelisted=true
-        return zap_tokens;
+                return {
+                    feeBps,
+                    feeReceiver: feeBps > 0n ? feePolicy.feeReceiver : undefined,
+                };
+            },
+        );
     }
 
     async quoteAction(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {

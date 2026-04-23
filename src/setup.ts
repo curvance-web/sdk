@@ -264,12 +264,13 @@ export async function refreshActiveUserMarkets(
     account: address,
     markets: Market[] = all_markets,
 ): Promise<Market[]> {
-    return Market.reloadUserMarkets(getActiveUserMarkets(markets), account);
+    const refreshed = await Market.reloadUserMarkets(markets, account);
+    return Market.getActiveUserMarkets(refreshed);
 }
 
 export async function refreshActiveUserMarketSummaries(
     account: address,
     markets: Market[] = all_markets,
 ): Promise<Market[]> {
-    return Market.reloadUserMarketSummaries(getActiveUserMarkets(markets), account);
+    return Market.reloadUserMarketSummaries(markets, account);
 }

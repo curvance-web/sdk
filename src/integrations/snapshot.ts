@@ -87,6 +87,18 @@ function assertSnapshotCompatibleMarket(market: Market) {
     );
 }
 
+function assertSnapshotAccount(market: Market, account: address) {
+    if (market.account?.toLowerCase() === account.toLowerCase()) {
+        return;
+    }
+
+    throw new Error(
+        `takePortfolioSnapshot cannot snapshot ${market.address} for ${account} ` +
+        `because the market cache is bound to ${market.account ?? "no account"}. ` +
+        `Call takePortfolioSnapshot(account, { refresh: true }) or reload the market for this account first.`,
+    );
+}
+
 // ── Functions ────────────────────────────────────────────────────────────────
 
 /**
@@ -158,6 +170,7 @@ export async function takePortfolioSnapshot(
                         `Fresh snapshot refresh missing market state for ${market.address}.`,
                     );
                 }
+                market.account = account;
                 market.applyState(dynamic, user);
             }
         }
@@ -175,6 +188,7 @@ export async function takePortfolioSnapshot(
     let dailyCost = 0;
 
     for (const market of markets) {
+        assertSnapshotAccount(market, account);
         const snap = snapshotMarket(market);
         marketSnapshots.push(snap);
         totalDepositsUSD += snap.totalDepositsUSD;
