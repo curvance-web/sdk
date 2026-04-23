@@ -876,7 +876,9 @@ export class Market {
      */
     async previewPositionHealthRepay(token: BorrowableCToken, amount: TokenInput) {
         const user = this.getAccountOrThrow();
-        const repayAmount = amount.eq(0) ? token.getUserDebt(false) : amount;
+        const repayAssets = amount.eq(0)
+            ? UINT256_MAX
+            : FormatConverter.decimalToBigInt(amount, token.decimals);
         const data = await this.reader.getPositionHealth(
             this.address,
             user,
@@ -885,7 +887,7 @@ export class Market {
             false,
             0n,
             true,
-            FormatConverter.decimalToBigInt(repayAmount, token.decimals),
+            repayAssets,
             0n
         );
 

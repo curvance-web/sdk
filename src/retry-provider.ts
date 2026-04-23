@@ -858,7 +858,7 @@ class RetryableProvider {
                             return this.executeWithReadFallback(primaryOp, fallbackOps, `RPC ${method}`, primaryState);
                         }
 
-                        return this.executeWithRetry(primaryOp, `RPC ${method}`, primaryState);
+                        return this.executeWithRetry(this.withReadTimeout(primaryOp, `RPC ${method}`), `RPC ${method}`, primaryState);
                     };
                 }
 
@@ -876,7 +876,7 @@ class RetryableProvider {
                             return this.executeWithReadFallback(primaryOp, fallbackOps, `RPC ${method}`, primaryState);
                         }
 
-                        return this.executeWithRetry(primaryOp, `RPC ${method}`, primaryState);
+                        return this.executeWithRetry(this.withReadTimeout(primaryOp, `RPC ${method}`), `RPC ${method}`, primaryState);
                     };
                 }
 
@@ -905,7 +905,7 @@ class RetryableProvider {
                             }
                         }
 
-                        return this.executeWithRetry(primaryOp, `Provider method ${String(prop)}`, primaryState);
+                        return this.executeWithRetry(this.withReadTimeout(primaryOp, `Provider method ${String(prop)}`), `Provider method ${String(prop)}`, primaryState);
                     };
                 }
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import Decimal from 'decimal.js';
-import { CToken, Market } from '../src';
+import { CToken, Market, UINT256_MAX } from '../src';
 import { BorrowableCToken } from '../src/classes/BorrowableCToken';
 
 const ACCOUNT = '0x00000000000000000000000000000000000000aa';
@@ -79,7 +79,7 @@ describe('Market position health units', () => {
         );
     });
 
-    test('previewPositionHealthRepay treats Decimal(0) as full repay when sizing the reader call', async () => {
+    test('previewPositionHealthRepay passes the reader closeout sentinel for Decimal(0)', async () => {
         const market = Object.create(Market.prototype) as Market;
         const token = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
         let capturedDebtAssets: bigint | null = null;
@@ -111,11 +111,9 @@ describe('Market position health units', () => {
             decimals: 18n,
             asset: { decimals: 18 },
         };
-        (token as any).getUserDebt = (_inUsd: boolean) => Decimal(7);
-
         const result = await market.previewPositionHealthRepay(token, Decimal(0));
 
-        assert.equal(capturedDebtAssets, toWad(7));
+        assert.equal(capturedDebtAssets, UINT256_MAX);
         assert.equal(result?.toString(), '1');
     });
 });

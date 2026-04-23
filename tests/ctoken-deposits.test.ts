@@ -207,6 +207,7 @@ describe('Approval preflights â€” single-path execution', () => {
     const VAULT_ZAPPER = '0x00000000000000000000000000000000000000b2';
     const INPUT_TOKEN = '0x00000000000000000000000000000000000000d1';
     const VAULT_ASSET = '0x00000000000000000000000000000000000000d2';
+    const RECEIVER = '0x00000000000000000000000000000000000000f2';
 
     function createExecutionToken() {
         const token = createCToken() as CToken & {
@@ -215,6 +216,8 @@ describe('Approval preflights â€” single-path execution', () => {
                 assetChecked: boolean;
                 zapAssets: bigint | null;
                 zapCollateralize: boolean | null;
+                zapReceiver: string | null;
+                callDataCalls: Array<{ method: string; args: unknown[] }>;
             };
         };
 
@@ -240,24 +243,34 @@ describe('Approval preflights â€” single-path execution', () => {
             },
             plugins: {},
         };
+        (token as any).contract = {
+            isDelegate: async () => true,
+        };
         (token as any).__state = {
             oracleRouteCalled: false,
             assetChecked: false,
             zapAssets: null,
             zapCollateralize: null,
+            zapReceiver: null,
+            callDataCalls: [],
         };
         (token as any).ensureUnderlyingAmount = async (amount: Decimal) => amount;
         (token as any).requireSigner = () => ({ address: OWNER } as any);
         (token as any).getAccountOrThrow = () => OWNER;
-        (token as any).getCallData = () => '0xdeadbeef';
+        (token as any).getCallData = (method: string, args: unknown[]) => {
+            token.__state.callDataCalls.push({ method, args });
+            return '0xdeadbeef';
+        };
         (token as any).zap = async (
             assets: bigint,
             _zap: unknown,
             collateralize: boolean,
             defaultCalldata: string,
+            receiver: string,
         ) => {
             token.__state.zapAssets = assets;
             token.__state.zapCollateralize = collateralize;
+            token.__state.zapReceiver = receiver;
             return { calldata: defaultCalldata, calldata_overrides: {} };
         };
         (token as any).oracleRoute = async () => {
@@ -431,6 +444,134 @@ describe('Approval preflights â€” single-path execution', () => {
         assert.equal(token.__state.assetChecked, false);
     });
 
+    test('deposit passes a third-party receiver through simple zap calldata', async () => {
+        const token = createExecutionToken();
+        const zapCalls: Array<{ receiver: string; collateralize: boolean }> = [];
+        (token as any).zap = (CToken.prototype as any).zap;
+        (token as any).isPluginApproved = async () => true;
+        (token as any).getZapper = () => ({
+            address: SIMPLE_ZAPPER,
+            getSimpleZapCalldata: async (
+                _ctoken: unknown,
+                _inputToken: string,
+                _outputToken: string,
+                _amount: bigint,
+                collateralize: boolean,
+                _slippage: bigint,
+                receiver: string,
+            ) => {
+                zapCalls.push({ receiver, collateralize });
+                return '0xzapped';
+            },
+        });
+
+        await token.deposit(
+            Decimal(1),
+            {
+                type: 'simple',
+                inputToken: NATIVE_ADDRESS,
+                slippage: new Decimal('0.005'),
+            },
+            RECEIVER as any,
+        );
+
+        assert.deepEqual(zapCalls, [{
+            receiver: RECEIVER,
+            collateralize: false,
+        }]);
+        assert.equal(token.__state.oracleRouteCalled, true);
+    });
+
+    test('depositAsCollateral uses depositAsCollateralFor for delegated third-party deposits', async () => {
+        const token = createExecutionToken();
+        (token as any).getAsset = () => ({
+            allowance: async () => 10n ** 30n,
+            symbol: 'WMON',
+        });
+
+        await token.depositAsCollateral(Decimal(1), 'none', RECEIVER as any);
+
+        assert.equal(token.__state.callDataCalls[0]?.method, 'depositAsCollateralFor');
+        assert.deepEqual(token.__state.callDataCalls[0]?.args, [1n * WAD, RECEIVER]);
+        assert.equal(token.__state.zapReceiver, RECEIVER);
+        assert.equal(token.__state.oracleRouteCalled, true);
+    });
+
+    test('depositAsCollateral fails before submit when third-party receiver has not delegated signer', async () => {
+        const token = createExecutionToken();
+        const delegateChecks: Array<{ owner: string; delegate: string }> = [];
+        (token as any).contract = {
+            isDelegate: async (owner: string, delegate: string) => {
+                delegateChecks.push({ owner, delegate });
+                return false;
+            },
+        };
+        (token as any).getAsset = () => ({
+            allowance: async () => {
+                throw new Error('asset allowance should not be checked before receiver delegation');
+            },
+            symbol: 'WMON',
+        });
+
+        await assert.rejects(
+            () => token.depositAsCollateral(Decimal(1), 'none', RECEIVER as any),
+            /Please approve the connected signer as a delegate for cWMON/i,
+        );
+        assert.deepEqual(delegateChecks, [{ owner: RECEIVER, delegate: OWNER }]);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('depositAsCollateral fails before zap submit when third-party receiver has not delegated zapper', async () => {
+        const token = createExecutionToken();
+        const delegateChecks: Array<{ owner: string; delegate: string }> = [];
+        (token as any).isPluginApproved = async () => true;
+        (token as any).getZapper = () => ({
+            type: 'simple',
+            address: SIMPLE_ZAPPER,
+        });
+        (token as any).contract = {
+            isDelegate: async (owner: string, delegate: string) => {
+                delegateChecks.push({ owner, delegate });
+                return false;
+            },
+        };
+        ERC20.prototype.allowance = async function () {
+            throw new Error(`unexpected ERC20 allowance check for ${this.address}`);
+        };
+
+        await assert.rejects(
+            () => token.depositAsCollateral(
+                Decimal(1),
+                {
+                    type: 'simple',
+                    inputToken: NATIVE_ADDRESS,
+                    slippage: new Decimal('0.005'),
+                },
+                RECEIVER as any,
+            ),
+            /Please approve simple Zapper as a delegate for cWMON/i,
+        );
+        assert.deepEqual(delegateChecks, [{ owner: RECEIVER, delegate: SIMPLE_ZAPPER }]);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('depositAsCollateral rejects negative remaining collateral capacity before approvals', async () => {
+        const token = createExecutionToken();
+        (token as any).getRemainingCollateral = () => -1n;
+        (token as any).getAsset = () => ({
+            allowance: async () => {
+                throw new Error('approval should not be checked');
+            },
+            symbol: 'WMON',
+        });
+
+        await assert.rejects(
+            () => token.depositAsCollateral(Decimal(1), 'none'),
+            /not enough collateral left/i,
+        );
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
     test('depositAsCollateral checks vault zaps against the underlying vault asset allowance', async () => {
         const token = createExecutionToken();
         let vaultAllowanceCheck: { owner: string; spender: string } | null = null;
@@ -503,6 +644,73 @@ describe('Preservation — sibling getters must keep returning shares / raw unit
     // These getters feed share-denominated contract operations. Collapsing any
     // of them to assets would break redeem-all, collateral-cap-sized flows,
     // and the maxRedemption path. The Issue 3 fix MUST NOT touch them.
+
+    test('share-denominated collateral USD getters use share price, not asset price', () => {
+        const ctoken = createCToken({
+            totalSupply: 100n * WAD,
+            totalAssets: 200n * WAD,
+            collateral: 5n * WAD,
+            collateralCap: 20n * WAD,
+            sharePrice: 4n * WAD,
+            assetPrice: 2n * WAD,
+        });
+
+        assert.equal(
+            ctoken.getCollateralCap(true).toString(),
+            FormatConverter.bigIntTokensToUsd(20n * WAD, 4n * WAD, 18n).toString(),
+        );
+        assert.equal(
+            ctoken.getCollateral(true).toString(),
+            FormatConverter.bigIntTokensToUsd(5n * WAD, 4n * WAD, 18n).toString(),
+        );
+        assert.equal(
+            ctoken.getRemainingCollateral(true).toString(),
+            FormatConverter.bigIntTokensToUsd(15n * WAD, 4n * WAD, 18n).toString(),
+        );
+        assert.equal(
+            ctoken.getTotalCollateral(true).toString(),
+            FormatConverter.bigIntTokensToUsd(5n * WAD, 4n * WAD, 18n).toString(),
+        );
+    });
+
+    test('convertSharesToUsd prices the provided share amount exactly once', async () => {
+        const ctoken = createCToken({
+            totalSupply: 100n * WAD,
+            totalAssets: 200n * WAD,
+            sharePrice: 4n * WAD,
+            assetPrice: 2n * WAD,
+        });
+
+        const actual = await ctoken.convertSharesToUsd(10n * WAD);
+        const expected = FormatConverter.bigIntTokensToUsd(10n * WAD, 4n * WAD, 18n);
+        const doubleConverted = FormatConverter.bigIntTokensToUsd(5n * WAD, 4n * WAD, 18n);
+
+        assert.equal(actual.toString(), expected.toString());
+        assert.notEqual(actual.toString(), doubleConverted.toString());
+    });
+
+    test('fetchTotalCollateral(true) refreshes share price and prices returned collateral shares', async () => {
+        const ctoken = createCToken({
+            sharePrice: 3n * WAD,
+            assetPrice: 1n * WAD,
+        });
+        let fetchedAssetPriceArg: boolean | null = null;
+        (ctoken as any).contract = {
+            marketCollateralPosted: async () => 7n * WAD,
+        };
+        (ctoken as any).fetchPrice = async (asset: boolean) => {
+            fetchedAssetPriceArg = asset;
+        };
+        (ctoken as any).fetchDecimals = async () => 18n;
+
+        const actual = await ctoken.fetchTotalCollateral(true);
+
+        assert.equal(fetchedAssetPriceArg, false);
+        assert.equal(
+            actual.toString(),
+            FormatConverter.bigIntTokensToUsd(7n * WAD, 3n * WAD, 18n).toString(),
+        );
+    });
 
     test('getCollateral(false) returns cache.collateral unchanged (shares)', () => {
         const ctoken = createCToken({

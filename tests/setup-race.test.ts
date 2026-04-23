@@ -228,6 +228,7 @@ test("setupChain wraps explicit read-provider overrides with chain fallbacks", a
         address: "0x000000000000000000000000000000000000dEaD",
     } as any;
     const customReadProvider = new JsonRpcProvider("https://wallet-rpc.example");
+    customReadProvider.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
     const customAccount = fakeSigner.address;
 
     let captured: {
@@ -306,6 +307,7 @@ test("setupChain re-wraps an already retry-wrapped explicit read provider per in
     const originalGetRewards = Api.getRewards;
     const originalGetAll = Market.getAll;
     const baseProvider = new JsonRpcProvider("https://wallet-rpc.example");
+    baseProvider.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
 
     Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
     Market.getAll = (async () => [] as any) as typeof Market.getAll;
@@ -377,6 +379,7 @@ test("setupChain removes fallback origins that duplicate the selected read prima
     const originalGetAll = Market.getAll;
     const monadRpc = getChainRpcConfig("monad-mainnet");
     const primaryOverride = new JsonRpcProvider(monadRpc.primary);
+    primaryOverride.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
 
     resetRpcDebugState();
     Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
@@ -523,6 +526,7 @@ test("explicit readProvider option wins over the signer's own provider", async (
         provider: walletRpcProvider,
     } as any;
     const overrideProvider = new JsonRpcProvider("https://override-rpc.example");
+    overrideProvider.getNetwork = async () => ({ chainId: 143n, name: "monad-mainnet" } as any);
 
     resetRpcDebugState();
     Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
@@ -555,6 +559,38 @@ test("explicit readProvider option wins over the signer's own provider", async (
         !fallbackUrls.includes("https://wallet-rpc.example"),
         "wallet's provider must not appear in the fallback chain when an explicit override was given",
     );
+});
+
+test("setupChain fails fast when an explicit read provider is connected to a different chain", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const wrongReadProvider = new JsonRpcProvider("https://wrong-chain.example");
+    wrongReadProvider.getNetwork = async () => ({ chainId: 421614n, name: "arb-sepolia" } as any);
+
+    let rewardsCalls = 0;
+    let marketCalls = 0;
+    Api.getRewards = (async () => {
+        rewardsCalls += 1;
+        return { milestones: {}, incentives: {} };
+    }) as typeof Api.getRewards;
+    Market.getAll = (async () => {
+        marketCalls += 1;
+        return [] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    await assert.rejects(
+        () => setupChain("monad-mainnet", null, "https://api.example", {
+            readProvider: wrongReadProvider,
+        }),
+        /Read provider is connected to chainId 421614 but setupChain\('monad-mainnet'\) expects 143\./i,
+    );
+    assert.equal(rewardsCalls, 0);
+    assert.equal(marketCalls, 0);
 });
 
 test("setupChain fails fast when the signer provider is connected to a different chain", async (t) => {

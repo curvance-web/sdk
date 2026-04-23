@@ -9,14 +9,21 @@ import { address } from "./types";
  * @param context - Human-readable label for error messages (e.g. "KyberSwap amountOut")
  */
 export function safeBigInt(value: unknown, context: string): bigint {
-    if (typeof value === 'bigint') return value;
+    if (typeof value === 'bigint') {
+        if (value < 0n) {
+            throw new Error(`Invalid unsigned numeric value from ${context}: "${value}"`);
+        }
+        return value;
+    }
 
     const str = String(value ?? '');
 
-    // BigInt() accepts integer strings only — reject floats, hex, empty, etc. early
+    // BigInt() accepts integer strings only — reject floats, hex, empty,
+    // negatives, etc. early. API quantities decoded through this helper are
+    // unsigned domain values.
     // to give a useful error instead of generic SyntaxError
-    if (!/^-?\d+$/.test(str)) {
-        throw new Error(`Invalid numeric value from ${context}: "${str.slice(0, 50)}"`);
+    if (!/^\d+$/.test(str)) {
+        throw new Error(`Invalid unsigned numeric value from ${context}: "${str.slice(0, 50)}"`);
     }
 
     return BigInt(str);
@@ -131,15 +138,15 @@ export function validateApiUrl(url: string): string {
 
 // ── Slippage validation ─────────────────────────────────────────────
 
-const MAX_SLIPPAGE_BPS = 10000n; // 100%
+const MAX_SLIPPAGE_BPS = 9999n; // SwapperLib rejects action.slippage >= 100%.
 
 /**
- * Validate that slippage is within valid BPS range [0, 10000].
+ * Validate that slippage is within valid BPS range [0, 9999].
  * Prevents negative min_out calculations when slippage > 100%.
  */
 export function validateSlippageBps(slippage: bigint, context: string): bigint {
     if (slippage < 0n || slippage > MAX_SLIPPAGE_BPS) {
-        throw new Error(`Slippage out of range (0-10000 BPS) in ${context}: ${slippage}`);
+        throw new Error(`Slippage out of range (0-9999 BPS) in ${context}: ${slippage}`);
     }
     return slippage;
 }

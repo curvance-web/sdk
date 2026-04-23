@@ -77,21 +77,25 @@ function validateSetupConfig(config: SetupConfigSnapshot) {
     }
 }
 
+async function validateProviderChain(chain: ChainRpcPrefix, provider: curvance_read_provider, label: string) {
+    const expectedChainId = BigInt(chain_config[chain].chainId);
+    const providerTarget = getRetryableProviderTarget(provider);
+    const network = await providerTarget.getNetwork();
+    const actualChainId = BigInt(network.chainId);
+
+    if (actualChainId !== expectedChainId) {
+        throw new Error(
+            `${label} is connected to chainId ${actualChainId} but setupChain('${chain}') expects ${expectedChainId}.`,
+        );
+    }
+}
+
 async function validateSignerProviderChain(chain: ChainRpcPrefix, signer: curvance_signer | null) {
     if (signer?.provider == null) {
         return;
     }
 
-    const expectedChainId = BigInt(chain_config[chain].chainId);
-    const signerProvider = getRetryableProviderTarget(signer.provider as curvance_read_provider);
-    const network = await signerProvider.getNetwork();
-    const actualChainId = BigInt(network.chainId);
-
-    if (actualChainId !== expectedChainId) {
-        throw new Error(
-            `Signer provider is connected to chainId ${actualChainId} but setupChain('${chain}') expects ${expectedChainId}.`,
-        );
-    }
+    await validateProviderChain(chain, signer.provider as curvance_read_provider, "Signer provider");
 }
 
 function getHighestPendingSetupInvocation() {
@@ -163,6 +167,7 @@ export async function setupChain(
     const readFallbacks = chain_config[chain].fallbackProviders;
     let signer: curvance_signer | null = null;
     let readProviderOverride = options.readProvider ?? null;
+    let readProviderOverrideValidated = false;
 
     if(provider != null) {
         if("address" in provider) {
@@ -178,10 +183,15 @@ export async function setupChain(
             // Explicit `options.readProvider` wins if set.
             if(!readProviderOverride && signer.provider) {
                 readProviderOverride = signer.provider as curvance_read_provider;
+                readProviderOverrideValidated = true;
             }
         } else {
             readProviderOverride = provider as curvance_read_provider;
         }
+    }
+
+    if (readProviderOverride && !readProviderOverrideValidated) {
+        await validateProviderChain(chain, readProviderOverride, "Read provider");
     }
 
     const readProvider = wrapProviderWithRetries(

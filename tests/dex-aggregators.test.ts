@@ -6,8 +6,11 @@ import "../src/setup";
 import { KyberSwap } from "../src/classes/DexAggregators/KyberSwap";
 import { Kuru } from "../src/classes/DexAggregators/Kuru";
 import { MultiDexAgg } from "../src/classes/DexAggregators/MultiDexAgg";
+import { UnsupportedDexAgg } from "../src/classes/DexAggregators/UnsupportedDexAgg";
 import { buildLocalSimpleZapTokens } from "../src/classes/DexAggregators/helpers";
 import FormatConverter from "../src/classes/FormatConverter";
+import { chain_config } from "../src/chains";
+import { safeBigInt, validateSlippageBps } from "../src/validation";
 import type { address, bytes } from "../src/types";
 
 // ─── Fee-aware slippage expansion ───────────────────────────────────────────
@@ -244,6 +247,41 @@ test("KyberSwap.quoteAction keeps action.slippage unchanged when feeBps is omitt
     );
 });
 
+test("chain configs keep Monad on KyberSwap and fail closed on Arbitrum Sepolia DEX quotes", async () => {
+    const monadDex = chain_config["monad-mainnet"].dexAgg;
+    const arbDex = chain_config["arb-sepolia"].dexAgg;
+
+    assert.ok(monadDex instanceof KyberSwap);
+    assert.ok(arbDex instanceof UnsupportedDexAgg);
+    assert.equal(arbDex instanceof KyberSwap, false);
+    assert.deepEqual(await arbDex.getAvailableTokens({} as any, null, WALLET), []);
+
+    await assert.rejects(
+        () => arbDex.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+        /DEX aggregation is not configured for arb-sepolia/i,
+    );
+});
+
+test("KyberSwap.quoteAction rejects effective swap slippage at the contract ceiling before quote", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+    (kyber as any).quote = async () => {
+        throw new Error("quote should not run");
+    };
+
+    await assert.rejects(
+        () => kyber.quoteAction(
+            WALLET,
+            TOKEN_IN,
+            TOKEN_OUT,
+            1_000n,
+            9_996n,
+            4n,
+            FEE_RECEIVER,
+        ),
+        /Swap slippage out of range \(0-9999 BPS\): 10000/,
+    );
+});
+
 test("Kuru.quoteAction keeps action.slippage raw even when feeBps is active (regression guard)", async () => {
     // Kuru's referrer-fee model takes fee via API parameter, not by pre-swap
     // deduction. The on-chain swap path does not double-count the fee as
@@ -331,6 +369,38 @@ test("KyberSwap.quote validates current router fee calldata without warning", as
     }
 });
 
+test("KyberSwap.quote rejects checker-incompatible missing or custom fee policy before fetch", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    (globalThis as any).fetch = async () => {
+        fetchCalls += 1;
+        throw new Error("fetch should not run");
+    };
+
+    try {
+        await assert.rejects(
+            () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n),
+            /KyberSwap checker requires feeBps=4/,
+        );
+        await assert.rejects(
+            () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 0n, undefined),
+            /KyberSwap checker requires feeBps=4/,
+        );
+        await assert.rejects(
+            () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 5n, FEE_RECEIVER),
+            /got feeBps=5/,
+        );
+        await assert.rejects(
+            () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, TOKEN_IN),
+            /feeReceiver=0x0000000000000000000000000000000000000001/,
+        );
+        assert.equal(fetchCalls, 0);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
 test("KyberSwap.quote rejects current router calldata with the wrong fee amount", async () => {
     const kyber = new KyberSwap(FEE_RECEIVER);
 
@@ -341,6 +411,19 @@ test("KyberSwap.quote rejects current router calldata with the wrong fee amount"
             () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
         ),
         /KyberSwap calldata feeAmount=5, expected 4/,
+    );
+});
+
+test("validation rejects negative unsigned API integers and 10000 BPS swap slippage", () => {
+    assert.equal(safeBigInt("42", "test amount"), 42n);
+    assert.throws(
+        () => safeBigInt("-1", "test amount"),
+        /Invalid unsigned numeric value from test amount/,
+    );
+    assert.equal(validateSlippageBps(9_999n, "test swap"), 9_999n);
+    assert.throws(
+        () => validateSlippageBps(10_000n, "test swap"),
+        /Slippage out of range \(0-9999 BPS\) in test swap: 10000/,
     );
 });
 

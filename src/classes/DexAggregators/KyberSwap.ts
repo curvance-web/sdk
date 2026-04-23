@@ -19,6 +19,7 @@ import { buildLocalSimpleZapTokens } from "./helpers";
  *  API always sets on Monad. Router-inert (consumed by executor only).
  *  Must match KyberSwapChecker.REQUIRED_FLAGS on-chain. */
 const REQUIRED_FLAGS = 0x280n;
+const CHECKER_FEE_BPS = 4n;
 
 /** ABI type string for KyberSwap MetaAggregationRouterV2's SwapExecutionParams struct. */
 const SWAP_PARAMS_TYPE =
@@ -89,6 +90,20 @@ function validateSwapCalldata(
         // ABI decode failure — calldata structure doesn't match expected format.
         // Log but don't block — the on-chain checker will catch structural issues.
         console.warn('Failed to validate KyberSwap calldata structure:', e.message);
+    }
+}
+
+function validateCheckerFeePolicy(
+    dao: address,
+    feeBps: bigint | undefined,
+    feeReceiver: address | undefined,
+): void {
+    if (feeBps !== CHECKER_FEE_BPS || !feeReceiver || feeReceiver.toLowerCase() !== dao.toLowerCase()) {
+        throw new Error(
+            `KyberSwap checker requires feeBps=${CHECKER_FEE_BPS} and feeReceiver=${dao}; ` +
+            `got feeBps=${feeBps?.toString() ?? "undefined"} ` +
+            `feeReceiver=${feeReceiver ?? "undefined"}`,
+        );
     }
 }
 
@@ -229,6 +244,7 @@ export class KyberSwap implements IDexAgg {
     }
 
     async quoteAction(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
+        const actionSlippage = toContractSwapSlippage(slippage, feeBps);
         const quote = await this.quote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
 
         // Fee-aware slippage expansion: KyberSwap deducts its `currency_in`
@@ -243,7 +259,7 @@ export class KyberSwap implements IDexAgg {
             inputAmount: BigInt(amount),
             outputToken: tokenOut,
             target: quote.to,
-            slippage: toContractSwapSlippage(slippage, feeBps),
+            slippage: actionSlippage,
             call: quote.calldata
         } as Swap;
 
@@ -257,6 +273,7 @@ export class KyberSwap implements IDexAgg {
 
     async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
         validateSlippageBps(slippage, 'KyberSwap quote');
+        validateCheckerFeePolicy(this.dao, feeBps, feeReceiver);
 
         const params = new URLSearchParams({
             tokenIn,

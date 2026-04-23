@@ -14,6 +14,7 @@ export interface IBorrowableCToken extends ICToken {
     repay(amount: bigint): Promise<TransactionResponse>;
     interestFee(): Promise<bigint>;
     marketOutstandingDebt(): Promise<bigint>;
+    assetsHeld(): Promise<bigint>;
     debtBalance(account: address): Promise<bigint>;
     IRM(): Promise<address>;
     // More functions available
@@ -164,7 +165,7 @@ export class BorrowableCToken extends CToken {
 
     async fetchBorrowRate() {
         const irm = await this.dynamicIRM();
-        const assetsHeld = this.totalAssets
+        const assetsHeld = await this.contract.assetsHeld();
         const debt = await this.contract.marketOutstandingDebt();
         const borrowRate = (await irm.borrowRate(assetsHeld, debt));
         this.cache.borrowRate = borrowRate;
@@ -173,7 +174,7 @@ export class BorrowableCToken extends CToken {
 
     async fetchPredictedBorrowRate() {
         const irm = await this.dynamicIRM();
-        const assetsHeld = this.totalAssets
+        const assetsHeld = await this.contract.assetsHeld();
         const debt = await this.contract.marketOutstandingDebt();
         const predictedBorrowRate = (await irm.predictedBorrowRate(assetsHeld, debt));
         this.cache.predictedBorrowRate = predictedBorrowRate;
@@ -182,7 +183,7 @@ export class BorrowableCToken extends CToken {
 
     async fetchUtilizationRate() {
         const irm = await this.dynamicIRM();
-        const assetsHeld = this.totalAssets
+        const assetsHeld = await this.contract.assetsHeld();
         const debt = await this.contract.marketOutstandingDebt();
         const utilizationRate = (await irm.utilizationRate(assetsHeld, debt));
         this.cache.utilizationRate = utilizationRate;
@@ -191,7 +192,7 @@ export class BorrowableCToken extends CToken {
 
     async fetchSupplyRate() {
         const irm = await this.dynamicIRM();
-        const assetsHeld = this.totalAssets
+        const assetsHeld = await this.contract.assetsHeld();
         const debt = await this.contract.marketOutstandingDebt();
         const fee = await this.fetchInterestFee();
         const supplyRate = (await irm.supplyRate(assetsHeld, debt, fee));
@@ -200,15 +201,37 @@ export class BorrowableCToken extends CToken {
     }
 
     async fetchLiquidity() {
-        const assetsHeld = this.totalAssets;
-        const debt = await this.contract.marketOutstandingDebt();
-        const liquidity = assetsHeld - debt;
+        const liquidity = await this.contract.assetsHeld();
         this.cache.liquidity = liquidity;
         return liquidity;
     }
 
+    private async checkRepayApproval(assets: bigint) {
+        const asset = this.getAsset(true);
+        const owner = this.getAccountOrThrow();
+        const allowance = await asset.allowance(owner, this.address);
+        if (allowance >= assets) {
+            return;
+        }
+
+        let tokenLabel = asset.symbol ?? asset.address;
+        if(asset.symbol == undefined) {
+            try {
+                tokenLabel = await asset.fetchSymbol();
+            } catch {
+                tokenLabel = asset.address;
+            }
+        }
+
+        throw new Error(`Please approve the ${tokenLabel} token for ${this.symbol} repay`);
+    }
+
     async repay(amount: TokenInput) {
         const assets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
+        const repayAssets = assets === 0n
+            ? await this.fetchDebtBalanceAtTimestamp(100n, false)
+            : assets;
+        await this.checkRepayApproval(repayAssets);
         const calldata = this.getCallData("repay", [ assets ]);
         return this.oracleRoute(calldata);
     }

@@ -1,11 +1,11 @@
 import { address } from "../types";
-import { KyberSwap } from "../classes/DexAggregators/KyberSwap";
+import { UnsupportedDexAgg } from "../classes/DexAggregators/UnsupportedDexAgg";
 import { ChainConfig } from ".";
 import { createChainFallbackProviders, createChainPrimaryProvider, getChainRpcConfig } from "./rpc";
 
 export const testnet: ChainConfig = {
     chainId: 421614,
-    dexAgg: new KyberSwap(),
+    dexAgg: new UnsupportedDexAgg("arb-sepolia"),
     rpc: getChainRpcConfig("arb-sepolia"),
     provider: createChainPrimaryProvider("arb-sepolia"),
     fallbackProviders: createChainFallbackProviders("arb-sepolia"),

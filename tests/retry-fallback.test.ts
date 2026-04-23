@@ -334,6 +334,58 @@ test("read timeouts fall through to fallback", async (t) => {
     assert.equal(harness.getCalls("fallback", "eth_call").length, 1, "fallback handles the timed out read");
 });
 
+test("read timeouts reject without a fallback instead of hanging", async (t) => {
+    const harness = new TransportHarness(t);
+    harness.enableMockTime();
+
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            send: {
+                eth_call: hang(),
+            },
+        },
+        {
+            config: { timeoutMs: 5 },
+        },
+    );
+
+    const resultPromise = wrapped.send("eth_call", []);
+    const rejection = assert.rejects(resultPromise, /timeout after 5ms/);
+    await harness.flush();
+    await harness.tick(5);
+
+    await rejection;
+    assert.equal(harness.getCalls("primary", "eth_call").length, 1, "timed out primary is attempted once");
+});
+
+test("provider method timeouts reject without a fallback instead of hanging", async (t) => {
+    const harness = new TransportHarness(t);
+    harness.enableMockTime();
+
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            methods: {
+                getBlockNumber: hang(),
+            },
+        },
+        {
+            config: { timeoutMs: 5 },
+        },
+    );
+
+    const resultPromise = wrapped.getBlockNumber();
+    const rejection = assert.rejects(resultPromise, /timeout after 5ms/);
+    await harness.flush();
+    await harness.tick(5);
+
+    await rejection;
+    assert.equal(harness.getCalls("primary", "getBlockNumber").length, 1, "timed out primary is attempted once");
+});
+
 test("fallback remains sticky during cooldown, then returns to primary", async (t) => {
     const harness = new TransportHarness(t);
     harness.enableMockTime();

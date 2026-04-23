@@ -132,6 +132,13 @@ describe('toContractSwapSlippage', () => {
         test('returns 0n when userSlippage is 0n and feeBps is negative', () => {
             assert.strictEqual(toContractSwapSlippage(0n, -5n), 0n);
         });
+
+        test('rejects negative effective slippage', () => {
+            assert.throws(
+                () => toContractSwapSlippage(-1n),
+                /Swap slippage out of range \(0-9999 BPS\): -1/,
+            );
+        });
     });
 
     describe('user slippage only (no fee)', () => {

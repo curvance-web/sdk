@@ -34,12 +34,14 @@ function createSimpleExecutionHarness({
     marketCollateralUsd = Decimal(100),
     tokenCollateralUsd = Decimal(100),
     userDebtUsd = Decimal(40),
+    borrowAsset = DEBT,
 }: {
-    feeByOperation?: Partial<Record<'leverage-up' | 'deposit-and-leverage', bigint>>;
+    feeByOperation?: Partial<Record<'leverage-up' | 'deposit-and-leverage' | 'leverage-down', bigint>>;
     maxLeverage?: Decimal;
     marketCollateralUsd?: Decimal;
     tokenCollateralUsd?: Decimal;
     userDebtUsd?: Decimal;
+    borrowAsset?: string;
 } = {}) {
     const feeCalls: FeePolicyContext[] = [];
     const quoteCalls: Array<{
@@ -78,7 +80,7 @@ function createSimpleExecutionHarness({
                 feeReceiver: ACCOUNT,
                 getFeeBps(ctx: FeePolicyContext) {
                     feeCalls.push(ctx);
-                    return feeByOperation[ctx.operation as 'leverage-up' | 'deposit-and-leverage'] ?? 0n;
+                    return feeByOperation[ctx.operation as 'leverage-up' | 'deposit-and-leverage' | 'leverage-down'] ?? 0n;
                 },
             },
         },
@@ -152,7 +154,11 @@ function createSimpleExecutionHarness({
         spender: manager.address,
         spenderLabel: 'simple PositionManager',
     });
-    (token as any)._getLeverageSnapshot = async () => ({});
+    (token as any)._getLeverageSnapshot = async () => ({
+        debtTokenBalance: toWad(userDebtUsd.toString()),
+        debtAssetPrice: WAD,
+        collateralAssetPrice: WAD,
+    });
     (token as any)._checkPositionManagerApproval = async () => {};
     (token as any)._checkTokenApproval = async () => {};
     (token as any).oracleRoute = async (calldata: string) => ({ hash: calldata });
@@ -166,7 +172,7 @@ function createSimpleExecutionHarness({
     (borrow as any).address = DEBT;
     (borrow as any).cache = {
         decimals: 18n,
-        asset: { address: DEBT, decimals: 18n },
+        asset: { address: borrowAsset, decimals: 18n },
         assetPrice: WAD,
         assetPriceLower: WAD,
         sharePrice: WAD,
@@ -307,6 +313,71 @@ describe('CToken simple leverage execution', () => {
         assert.deepEqual(quoteCalls, []);
     });
 
+    test('simple leverageUp fails closed for same-asset debt and collateral before quoting', async () => {
+        const { token, borrow, quoteCalls, leverageCalls } = createSimpleExecutionHarness({
+            borrowAsset: COLLATERAL,
+        });
+
+        const result = await token.leverageUp(
+            borrow,
+            Decimal(2),
+            'simple',
+            Decimal(0.01),
+            true,
+        );
+
+        assert.deepEqual(result, {
+            success: false,
+            error: 'Simple leverage requires distinct collateral and borrow assets.',
+        });
+        assert.deepEqual(quoteCalls, []);
+        assert.deepEqual(leverageCalls, []);
+    });
+
+    test('simple depositAndLeverage fails closed for same-asset debt and collateral before quoting', async () => {
+        const { token, borrow, quoteCalls, depositCalls } = createSimpleExecutionHarness({
+            borrowAsset: COLLATERAL,
+        });
+
+        const result = await token.depositAndLeverage(
+            Decimal(10),
+            borrow,
+            Decimal('1.60'),
+            'simple',
+            Decimal(0.01),
+            true,
+        );
+
+        assert.deepEqual(result, {
+            success: false,
+            error: 'Simple leverage requires distinct collateral and borrow assets.',
+        });
+        assert.deepEqual(quoteCalls, []);
+        assert.deepEqual(depositCalls, []);
+    });
+
+    test('simple leverageDown fails closed for same-asset debt and collateral before quoting', async () => {
+        const { token, borrow, quoteCalls, leverageCalls } = createSimpleExecutionHarness({
+            borrowAsset: COLLATERAL,
+        });
+
+        const result = await token.leverageDown(
+            borrow,
+            Decimal(2),
+            Decimal('1.5'),
+            'simple',
+            Decimal(0.01),
+            true,
+        );
+
+        assert.deepEqual(result, {
+            success: false,
+            error: 'Simple leverage requires distinct collateral and borrow assets.',
+        });
+        assert.deepEqual(quoteCalls, []);
+        assert.deepEqual(leverageCalls, []);
+    });
+
     test('leverageDown fails closed when the selected token lacks enough collateral for the requested mixed-collateral deleverage', async () => {
         const { token, borrow, quoteCalls, leverageCalls } = createSimpleExecutionHarness({
             marketCollateralUsd: Decimal(100),
@@ -326,6 +397,30 @@ describe('CToken simple leverage execution', () => {
         assert.deepEqual(result, {
             success: false,
             error: 'Selected collateral token does not have enough posted collateral to reach the requested leverage target.',
+        });
+        assert.deepEqual(quoteCalls, []);
+        assert.deepEqual(leverageCalls, []);
+    });
+
+    test('full leverageDown fails closed when selected collateral cannot repay all debt', async () => {
+        const { token, borrow, quoteCalls, leverageCalls } = createSimpleExecutionHarness({
+            marketCollateralUsd: Decimal(100),
+            tokenCollateralUsd: Decimal(20),
+            userDebtUsd: Decimal(80),
+        });
+
+        const result = await token.leverageDown(
+            borrow,
+            token.getLeverage() ?? Decimal(1),
+            Decimal(1),
+            'simple',
+            Decimal(0.01),
+            true,
+        );
+
+        assert.deepEqual(result, {
+            success: false,
+            error: 'Selected collateral token does not have enough posted collateral to fully deleverage.',
         });
         assert.deepEqual(quoteCalls, []);
         assert.deepEqual(leverageCalls, []);

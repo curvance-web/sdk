@@ -497,7 +497,7 @@ export class CToken extends Calldata<ICToken> {
     getRemainingCollateral(formatted: false): bigint;
     getRemainingCollateral(formatted: boolean = true): USD | bigint {
         const diff = this.cache.collateralCap - this.cache.collateral;
-        return formatted ? this.convertTokensToUsd(diff) : diff;
+        return formatted ? this.convertSharesToUsdSync(diff) : diff;
     }
 
     /** @returns Remaining Debt cap */
@@ -613,7 +613,7 @@ export class CToken extends Calldata<ICToken> {
     getCollateralCap(inUSD: true): USD;
     getCollateralCap(inUSD: false): USD_WAD;
     getCollateralCap(inUSD: boolean): USD | USD_WAD {
-        return inUSD ? this.convertTokensToUsd(this.cache.collateralCap) : this.cache.collateralCap;
+        return inUSD ? this.convertSharesToUsdSync(this.cache.collateralCap) : this.cache.collateralCap;
     }
 
     /** @returns Token Debt Cap in USD or USD WAD */
@@ -627,7 +627,7 @@ export class CToken extends Calldata<ICToken> {
     getCollateral(inUSD: true): USD;
     getCollateral(inUSD: false): USD_WAD;
     getCollateral(inUSD: boolean): USD | USD_WAD {
-        return inUSD ? this.convertTokensToUsd(this.cache.collateral) : this.cache.collateral;
+        return inUSD ? this.convertSharesToUsdSync(this.cache.collateral) : this.cache.collateral;
     }
 
     /** @returns Token Debt in USD or USD WAD */
@@ -796,14 +796,14 @@ export class CToken extends Calldata<ICToken> {
     getTotalCollateral(inUSD: false): bigint;
     getTotalCollateral(inUSD = true): USD | bigint {
         const totalCollateral = this.cache.collateral;
-        return inUSD ? this.convertTokensToUsd(totalCollateral) : totalCollateral;
+        return inUSD ? this.convertSharesToUsdSync(totalCollateral) : totalCollateral;
     }
 
     async fetchTotalCollateral(inUSD: true): Promise<USD>;
     async fetchTotalCollateral(inUSD: false): Promise<bigint>;
     async fetchTotalCollateral(inUSD = true): Promise<USD | bigint> {
         const totalCollateral = await this.contract.marketCollateralPosted();
-        return inUSD ? this.fetchConvertTokensToUsd(totalCollateral) : totalCollateral;
+        return inUSD ? this.fetchConvertSharesToUsd(totalCollateral) : totalCollateral;
     }
 
     getPositionManager(type: PositionManagerTypes) {
@@ -1277,7 +1277,7 @@ export class CToken extends Calldata<ICToken> {
             tokens_exclude.push(vault_asset.address.toLocaleLowerCase());
         }
 
-        if(this.zapTypes.includes('simple')) {
+        if(this.zapTypes.includes('simple') && this.currentChainConfig.dexAgg.router !== EMPTY_ADDRESS) {
             let dexAggSearch = await this.currentChainConfig.dexAgg.getAvailableTokens(this.provider, search, this.account);
             tokens = tokens.concat(dexAggSearch.filter(token => !tokens_exclude.includes(token.interface.address.toLocaleLowerCase())));
 
@@ -1374,6 +1374,12 @@ export class CToken extends Calldata<ICToken> {
     private _leverageUpSlippage(slippage: bigint, leverage: Decimal): bigint {
         if (leverage.lte(1)) return slippage;
         return slippage + LEVERAGE.LEVERAGE_UP_BUFFER_BPS;
+    }
+
+    private assertSimpleLeverageSwapAssetsDiffer(borrow: BorrowableCToken) {
+        if (borrow.asset.address.toLowerCase() === this.asset.address.toLowerCase()) {
+            throw new Error("Simple leverage requires distinct collateral and borrow assets.");
+        }
     }
 
     private computePostDepositNaturalLeverage(
@@ -1566,6 +1572,8 @@ export class CToken extends Calldata<ICToken> {
             const manager = this.getPositionManager(type);
             if (type === 'vault' || type === 'native-vault') {
                 await this.assertVaultLeverageBorrowAssetSupported(borrow, type);
+            } else if (type === 'simple') {
+                this.assertSimpleLeverageSwapAssetsDiffer(borrow);
             }
 
             let calldata: bytes;
@@ -1683,6 +1691,9 @@ export class CToken extends Calldata<ICToken> {
             const config = this.currentChainConfig;
             const slippage = toBps(slippage_);
             const manager = this.getPositionManager(type);
+            if (type === 'simple') {
+                this.assertSimpleLeverageSwapAssetsDiffer(borrowToken);
+            }
             let calldata: bytes;
 
             const snapshot = await this._getLeverageSnapshot(borrowToken);
@@ -1741,7 +1752,11 @@ export class CToken extends Calldata<ICToken> {
                         swapCollateral = debtInCollateral * (10000n + overheadBps) / 10000n;
 
                         if (swapCollateral > maxTokenCollateral) {
-                            swapCollateral = maxTokenCollateral;
+                            const error = "Selected collateral token does not have enough posted collateral to fully deleverage.";
+                            if (simulate) {
+                                return { success: false, error };
+                            }
+                            throw new Error(error);
                         }
                     } else if (feeBps > 0n) {
                         // Partial deleverage: inflate swap size to compensate
@@ -1844,6 +1859,8 @@ export class CToken extends Calldata<ICToken> {
             const manager = this.getPositionManager(type);
             if (type === 'vault' || type === 'native-vault') {
                 await this.assertVaultLeverageBorrowAssetSupported(borrow, type);
+            } else if (type === 'simple') {
+                this.assertSimpleLeverageSwapAssetsDiffer(borrow);
             }
 
             let calldata: bytes;
@@ -1965,7 +1982,7 @@ export class CToken extends Calldata<ICToken> {
             const zapAssets = await this.getZapAssetAmount(amount, zap);
 
             const default_calldata = this.getCallData("deposit", [depositAssets, receiver]);
-            const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, false, default_calldata);
+            const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, false, default_calldata, receiver);
 
             return this.simulateOracleRoute(calldata, calldata_overrides);
         } catch (error: any) {
@@ -1986,8 +2003,11 @@ export class CToken extends Calldata<ICToken> {
             const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
             const zapAssets = await this.getZapAssetAmount(amount, zap);
 
-            const default_calldata = this.getCallData("depositAsCollateral", [depositAssets, receiver]);
-            const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, true, default_calldata);
+            const collateralMethod = receiver.toLowerCase() === signer.address.toLowerCase()
+                ? "depositAsCollateral"
+                : "depositAsCollateralFor";
+            const default_calldata = this.getCallData(collateralMethod, [depositAssets, receiver]);
+            const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, true, default_calldata, receiver);
 
             return this.simulateOracleRoute(calldata, calldata_overrides);
         } catch (error: any) {
@@ -1995,7 +2015,7 @@ export class CToken extends Calldata<ICToken> {
         }
     }
 
-    async zap(assets: bigint, zap: ZapperInstructions, collateralize = false, default_calldata : bytes) {
+    async zap(assets: bigint, zap: ZapperInstructions, collateralize = false, default_calldata : bytes, receiver: address = this.requireSigner().address as address) {
         let calldata: bytes;
         let calldata_overrides = {};
         let slippage: bigint = 0n;
@@ -2023,20 +2043,20 @@ export class CToken extends Calldata<ICToken> {
         switch(type_of_zap) {
             case 'simple':
                 if(inputToken == null) throw new Error("Input token must be provided for simple zap");
-                calldata = await zapper.getSimpleZapCalldata(this, inputToken, this.asset.address, assets, collateralize, slippage);
+                calldata = await zapper.getSimpleZapCalldata(this, inputToken, this.asset.address, assets, collateralize, slippage, receiver);
                 const isNativeSimpleZap = inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
                 calldata_overrides = isNativeSimpleZap ? { value: assets, to: zapper.address } : { to: zapper.address };
                 break;
             case 'vault':
-                calldata = await zapper.getVaultZapCalldata(this, assets, collateralize);
+                calldata = await zapper.getVaultZapCalldata(this, assets, collateralize, false, receiver);
                 calldata_overrides = { to: zapper.address };
                 break;
             case 'native-vault':
-                calldata = await zapper.getNativeZapCalldata(this, assets, collateralize);
+                calldata = await zapper.getNativeZapCalldata(this, assets, collateralize, false, receiver);
                 calldata_overrides = { value: assets, to: zapper.address };
                 break;
             case 'native-simple':
-                calldata = await zapper.getNativeZapCalldata(this, assets, collateralize, true);
+                calldata = await zapper.getNativeZapCalldata(this, assets, collateralize, true, receiver);
                 calldata_overrides = { value: assets, to: zapper.address };
                 break;
             default:
@@ -2055,7 +2075,7 @@ export class CToken extends Calldata<ICToken> {
         await this._checkDepositApprovals(zap, depositAssets, zapAssets);
 
         const default_calldata = this.getCallData("deposit", [depositAssets, receiver]);
-        const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, false, default_calldata);
+        const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, false, default_calldata, receiver);
 
         return this.oracleRoute(calldata, calldata_overrides);
     }
@@ -2070,7 +2090,7 @@ export class CToken extends Calldata<ICToken> {
         if (!this.isZapInstruction(zap)) {
             const collateralCapError = "There is not enough collateral left in this tokens collateral cap for this deposit.";
             const remainingCollateral = this.getRemainingCollateral(false);
-            if(remainingCollateral == 0n) throw new Error(collateralCapError);
+            if(remainingCollateral <= 0n) throw new Error(collateralCapError);
             if(remainingCollateral > 0n) {
                 const shares = this.virtualConvertToShares(depositAssets, LEVERAGE.SHARES_BUFFER_BPS);
                 if(shares > remainingCollateral) {
@@ -2079,10 +2099,13 @@ export class CToken extends Calldata<ICToken> {
             }
         }
 
-        await this._checkDepositApprovals(zap, depositAssets, zapAssets);
+        await this._checkDepositApprovals(zap, depositAssets, zapAssets, true, receiver);
 
-        const default_calldata = this.getCallData("depositAsCollateral", [depositAssets, receiver]);
-        const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, true, default_calldata);
+        const collateralMethod = receiver.toLowerCase() === signer.address.toLowerCase()
+            ? "depositAsCollateral"
+            : "depositAsCollateralFor";
+        const default_calldata = this.getCallData(collateralMethod, [depositAssets, receiver]);
+        const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, true, default_calldata, receiver);
         return this.oracleRoute(calldata, calldata_overrides);
     }
 
@@ -2167,12 +2190,22 @@ export class CToken extends Calldata<ICToken> {
         return FormatConverter.bigIntTokensToUsd(tokenAmount, price, decimals);
     }
 
-    async convertSharesToUsd(tokenAmount: bigint): Promise<USD> {
-        tokenAmount = this.virtualConvertToShares(tokenAmount);
+    convertSharesToUsdSync(tokenAmount: bigint): USD {
         const price = this.getPrice(false, false, false);
         const decimals = this.decimals;
 
         return FormatConverter.bigIntTokensToUsd(tokenAmount, price, decimals);
+    }
+
+    async fetchConvertSharesToUsd(tokenAmount: bigint): Promise<USD> {
+        await this.fetchPrice(false);
+        await this.fetchDecimals();
+
+        return this.convertSharesToUsdSync(tokenAmount);
+    }
+
+    async convertSharesToUsd(tokenAmount: bigint): Promise<USD> {
+        return this.convertSharesToUsdSync(tokenAmount);
     }
 
     buildMultiCallAction(calldata: bytes, target: address = this.address) {
@@ -2194,6 +2227,13 @@ export class CToken extends Calldata<ICToken> {
         const plugin_allowed = await this.isPluginApproved(zapper.type, 'zapper');
         if (!plugin_allowed) {
             throw new Error(`Please approve the ${zapper.type} Zapper to be able to move ${this.symbol} on your behalf.`);
+        }
+    }
+
+    private async _checkDelegateApproval(owner: address, delegate: address, delegateLabel: string) {
+        const pluginAllowed = await this.contract.isDelegate(owner, delegate);
+        if (!pluginAllowed) {
+            throw new Error(`Please approve ${delegateLabel} as a delegate for ${this.symbol} on behalf of ${owner}.`);
         }
     }
 
@@ -2277,8 +2317,15 @@ export class CToken extends Calldata<ICToken> {
         throw new Error(`Please approve the ${tokenLabel} token for ${target.spenderLabel}`);
     }
 
-    private async _checkDepositApprovals(zap: ZapperInstructions, depositAssets: bigint, zapAssets: bigint) {
+    private async _checkDepositApprovals(
+        zap: ZapperInstructions,
+        depositAssets: bigint,
+        zapAssets: bigint,
+        collateralize: boolean = false,
+        receiver: address | null = null,
+    ) {
         const zapType = typeof zap == 'object' ? zap.type : zap;
+        const signer = this.requireSigner();
 
         if(zapType != 'none') {
             const zapper = this.getZapper(zapType);
@@ -2286,6 +2333,11 @@ export class CToken extends Calldata<ICToken> {
                 throw new Error(`No zapper contract found for type '${zapType}' on ${this.symbol}`);
             }
             await this._checkZapperApproval(zapper);
+            if (collateralize && receiver && receiver.toLowerCase() !== signer.address.toLowerCase()) {
+                await this._checkDelegateApproval(receiver, zapper.address, `${zapper.type} Zapper`);
+            }
+        } else if (collateralize && receiver && receiver.toLowerCase() !== signer.address.toLowerCase()) {
+            await this._checkDelegateApproval(receiver, signer.address as address, "the connected signer");
         }
 
         const approvalTarget = zapType == 'none'

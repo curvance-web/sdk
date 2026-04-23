@@ -25,6 +25,7 @@ export const SECONDS_PER_WEEK = 604_800n; // 7 days
 export const SECONDS_PER_DAY = 86_400n // 1 day
 
 export const DEFAULT_SLIPPAGE_BPS = 100n; // 1%
+const MAX_SWAP_SLIPPAGE_BPS = 9999n;
 
 export const UINT256_MAX = 115792089237316195423570985008687907853269984665640564039457584007913129639935n;
 export const UINT256_MAX_DECIMAL = Decimal(UINT256_MAX);
@@ -165,6 +166,9 @@ export function amplifyContractSlippage(
  */
 export function toContractSwapSlippage(userSlippage: bigint, feeBps?: bigint): bigint {
     const effective = feeBps && feeBps > 0n ? userSlippage + feeBps : userSlippage;
+    if (effective < 0n || effective > MAX_SWAP_SLIPPAGE_BPS) {
+        throw new Error(`Swap slippage out of range (0-9999 BPS): ${effective}`);
+    }
     return effective ? FormatConverter.bpsToBpsWad(effective) : 0n;
 }
 
