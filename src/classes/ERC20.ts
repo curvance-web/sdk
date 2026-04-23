@@ -33,6 +33,7 @@ const ERC20_ABI = [
     "function name() view returns (string)",
     "function symbol() view returns (string)",
     "function decimals() view returns (uint8)",
+    "function totalSupply() view returns (uint256)",
     "function allowance(address owner, address spender) view returns (uint256)",
 ] as const;
 
@@ -70,7 +71,7 @@ export class ERC20 {
     get decimals() { return this.cache?.decimals; }
     get totalSupply() { return this.cache?.totalSupply; }
     get image() { return this.cache?.image; }
-    get balance() { return this.cache?.balance ? toDecimal(this.cache.balance, this.cache.decimals) : undefined; }
+    get balance() { return this.cache?.balance != undefined ? toDecimal(this.cache.balance, this.cache.decimals) : undefined; }
     get price() { return this.cache?.price; }
 
     async balanceOf(account: address): Promise<bigint>

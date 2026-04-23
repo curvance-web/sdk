@@ -99,7 +99,8 @@ test("setupChain publishes the newest successful invocation after newer pending 
     rewardsA.resolve({ milestones: {}, incentives: {} });
     const olderResult = await olderSetup;
 
-    assert.notDeepEqual(all_markets, olderResult.markets);
+    assert.equal(setup_config.api_url, "https://api.recover.example");
+    assert.deepEqual(all_markets, olderResult.markets);
 
     rewardsB.promise.catch(() => undefined);
     rewardsB.reject(new Error("newer setup failed"));
@@ -107,6 +108,46 @@ test("setupChain publishes the newest successful invocation after newer pending 
 
     assert.equal(setup_config.api_url, "https://api.recover.example");
     assert.deepEqual(all_markets, olderResult.markets);
+});
+
+test("setupChain lets a newer success supersede an older success that published while it was pending", async (t) => {
+    const rewardsA = defer<{ milestones: Record<string, any>; incentives: Record<string, any> }>();
+    const rewardsB = defer<{ milestones: Record<string, any>; incentives: Record<string, any> }>();
+
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+
+    let rewardsCall = 0;
+
+    Api.getRewards = (async () => {
+        rewardsCall += 1;
+        return rewardsCall === 1 ? rewardsA.promise : rewardsB.promise;
+    }) as typeof Api.getRewards;
+
+    Market.getAll = (async (_reader, _oracleManager, _provider, _signer, _account, _milestones, _incentives, setup) => {
+        const activeSetup = setup!;
+        return [{ marker: activeSetup.api_url }] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    const olderSetup = setupChain("monad-mainnet", null, "https://api.temporary.example");
+    const newerSetup = setupChain("monad-mainnet", null, "https://api.final.example");
+
+    rewardsA.resolve({ milestones: {}, incentives: {} });
+    const olderResult = await olderSetup;
+
+    assert.equal(setup_config.api_url, "https://api.temporary.example");
+    assert.deepEqual(all_markets, olderResult.markets);
+
+    rewardsB.resolve({ milestones: {}, incentives: {} });
+    const newerResult = await newerSetup;
+
+    assert.equal(setup_config.api_url, "https://api.final.example");
+    assert.deepEqual(all_markets, newerResult.markets);
 });
 
 test("setupChain keeps signer writes separate from dedicated read transport", async (t) => {
@@ -642,6 +683,47 @@ test("setupChain times out a hanging explicit readProvider during chain validati
     assert.ok(Date.now() - startedAt < 500, "chain validation should use the configured read timeout");
     assert.equal(rewardsCalls, 0);
     assert.equal(marketCalls, 0);
+});
+
+test("setupChain treats timeoutMs=0 as timeout disabled during chain validation", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const slowReadProvider = new JsonRpcProvider("https://slow-rpc.example");
+    slowReadProvider.getNetwork = async () => new Promise((resolve) => {
+        setTimeout(() => resolve({ chainId: 143n, name: "monad-mainnet" } as any), 10);
+    });
+
+    let rewardsCalls = 0;
+    let marketCalls = 0;
+    configureRetries({
+        ...DEFAULT_RETRY_CONFIG,
+        maxRetries: 0,
+        baseDelay: 0,
+        maxDelay: 0,
+        timeoutMs: 0,
+    });
+    Api.getRewards = (async () => {
+        rewardsCalls += 1;
+        return { milestones: {}, incentives: {} };
+    }) as typeof Api.getRewards;
+    Market.getAll = (async () => {
+        marketCalls += 1;
+        return [] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+        configureRetries(DEFAULT_RETRY_CONFIG);
+        resetRpcDebugState();
+    });
+
+    await setupChain("monad-mainnet", null, "https://api.example", {
+        readProvider: slowReadProvider,
+    });
+
+    assert.equal(rewardsCalls, 1);
+    assert.equal(marketCalls, 1);
 });
 
 test("setupChain fails fast when the signer provider is connected to a different chain", async (t) => {

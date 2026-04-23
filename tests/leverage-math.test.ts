@@ -2,6 +2,8 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert';
 import Decimal from 'decimal.js';
 import { CToken } from '../src';
+import FormatConverter from '../src/classes/FormatConverter';
+import { calculateDebtPreview, convertAmountByCurrencyView } from '../src/format/borrow';
 import { amplifyContractSlippage, toContractSwapSlippage } from '../src/helpers';
 import { calculateDeleverageAmount } from '../src/format/leverage';
 import {
@@ -204,6 +206,29 @@ describe('toContractSwapSlippage', () => {
             assert.strictEqual(toContractSwapSlippage(0n, 0n), 0n);
             assert.strictEqual(toContractSwapSlippage(0n), 0n);
         });
+    });
+});
+
+describe('format borrow helpers', () => {
+    test('percentageToBps floors fractional bps instead of granting extra tolerance', () => {
+        assert.strictEqual(FormatConverter.percentageToBps(Decimal('0.9999999')), 9999n);
+        assert.strictEqual(FormatConverter.percentageToBps(Decimal('0.00019')), 1n);
+    });
+
+    test('calculateDebtPreview clamps over-repay previews to zero debt', () => {
+        assert.equal(calculateDebtPreview(Decimal(5), Decimal(7), true).toString(), '0');
+        assert.equal(calculateDebtPreview(Decimal(5), Decimal(7), false).toString(), '12');
+    });
+
+    test('convertAmountByCurrencyView avoids Infinity when price is zero', () => {
+        assert.deepEqual(
+            convertAmountByCurrencyView('10', Decimal(0), 'dollar'),
+            { usdAmount: '10', tokenAmount: '0' },
+        );
+        assert.deepEqual(
+            convertAmountByCurrencyView('10', Decimal(0), 'token'),
+            { usdAmount: '0', tokenAmount: '10' },
+        );
     });
 });
 

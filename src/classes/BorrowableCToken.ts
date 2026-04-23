@@ -28,7 +28,10 @@ export interface IDynamicIRM {
     borrowRate(assetsHeld: bigint, debt: bigint): Promise<bigint>;
     predictedBorrowRate(assetsHeld: bigint, debt: bigint): Promise<bigint>;
     supplyRate(assetsHeld: bigint, debt: bigint, interestFee: bigint): Promise<bigint>;
-    adjustedBorrowRate(assetsHeld: bigint, debt: bigint): Promise<bigint>;
+    adjustedBorrowRate(assetsHeld: bigint, debt: bigint): Promise<[
+        ratePerSecond: bigint,
+        adjustmentRate: bigint,
+    ]>;
     utilizationRate(assetsHeld: bigint, debt: bigint): Promise<bigint>;
 }
 
@@ -85,23 +88,39 @@ export class BorrowableCToken extends CToken {
             credit_usd.isFinite() && credit_usd.greaterThan(0)
                 ? credit_usd
                 : new Decimal(0);
+        const remainingDebtCap = this.cache.debtCap > this.cache.debt
+            ? this.cache.debtCap - this.cache.debt
+            : 0n;
+        const availableLiquidity = this.cache.liquidity > 0n ? this.cache.liquidity : 0n;
+        const tokenCapacity = remainingDebtCap < availableLiquidity
+            ? remainingDebtCap
+            : availableLiquidity;
+        const tokenCapacityUsd = this.convertTokensToUsd(tokenCapacity);
+        const cappedCreditUsd = Decimal.min(safeCreditUsd, tokenCapacityUsd);
 
         if (inUSD) {
-            return safeCreditUsd;
+            return cappedCreditUsd.isFinite() && cappedCreditUsd.greaterThan(0)
+                ? cappedCreditUsd
+                : new Decimal(0);
         }
 
-        if (safeCreditUsd.eq(0)) {
+        if (cappedCreditUsd.eq(0)) {
             return new Decimal(0);
         }
 
-        const maxBorrowable = this.convertUsdToTokens(safeCreditUsd, true);
+        const maxBorrowable = this.convertUsdToTokens(cappedCreditUsd, true);
         return maxBorrowable.isFinite() && maxBorrowable.greaterThan(0)
             ? maxBorrowable
             : new Decimal(0);
     };
 
     override async depositAsCollateral(amount: TokenInput, zap: ZapperInstructions = 'none',  receiver: address | null = null) {
-        if(this.readFreshUserCache("userDebt", "depositing as collateral") > 0n) {
+        const signer = this.requireSigner();
+        const collateralReceiver = receiver ?? signer.address as address;
+        if(
+            collateralReceiver.toLowerCase() === (signer.address as string).toLowerCase() &&
+            this.readFreshUserCache("userDebt", "depositing as collateral") > 0n
+        ) {
             throw new Error("Cannot deposit as collateral when there is outstanding debt");
         }
         return super.depositAsCollateral(amount, zap, receiver);
@@ -150,7 +169,9 @@ export class BorrowableCToken extends CToken {
     async fetchUtilizationRateChange(assets: TokenInput, direction: 'add' | 'remove', inPercentage = true ): Promise<Percentage | bigint> {
         const assets_as_bn = FormatConverter.decimalToBigInt(assets, this.asset.decimals);
         const irm = await this.dynamicIRM();
-        const assets_held = direction == 'add' ? this.cache.liquidity + assets_as_bn : this.cache.liquidity - assets_as_bn;
+        const assets_held = direction == 'add'
+            ? this.cache.liquidity + assets_as_bn
+            : assets_as_bn >= this.cache.liquidity ? 0n : this.cache.liquidity - assets_as_bn;
         const newRate = await irm.utilizationRate(assets_held, this.cache.debt);
 
         return inPercentage ? Decimal(newRate).div(WAD) : newRate;

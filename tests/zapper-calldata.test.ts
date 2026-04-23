@@ -3,6 +3,7 @@ import test from "node:test";
 import { CToken, LEVERAGE, NATIVE_ADDRESS } from "../src";
 import { Zapper } from "../src/classes/Zapper";
 import type { address } from "../src/types";
+import Decimal from "decimal.js";
 
 const CTOKEN = "0x00000000000000000000000000000000000000c1" as address;
 const ZAPPER = "0x00000000000000000000000000000000000000b1" as address;
@@ -109,4 +110,73 @@ test("Zapper.nativeZap wraps native input for native-simple wrapped-native depos
     assert.equal(args[1], true);
     assert.equal(args[2].inputToken, NATIVE_ADDRESS);
     assert.notEqual(args[2].outputToken.toLowerCase(), NATIVE_ADDRESS.toLowerCase());
+});
+
+test("Zapper.simpleZap forwards native input value to the zapper call", async () => {
+    const { token } = createBufferedToken();
+    const { zapper } = createZapper();
+    const executeCalls: Array<{ calldata: unknown; overrides: Record<string, unknown> }> = [];
+
+    (zapper as any).getSimpleZapCalldata = async (
+        _ctoken: unknown,
+        inputToken: address,
+        _outputToken: address,
+        amount: bigint,
+        _collateralize: boolean,
+        _slippage: bigint,
+        receiver: address,
+    ) => {
+        assert.equal(inputToken, NATIVE_ADDRESS);
+        assert.equal(amount, 20_000n);
+        assert.equal(receiver, RECEIVER);
+        return "0xencoded";
+    };
+    (zapper as any).executeCallData = async (calldata: unknown, overrides: Record<string, unknown>) => {
+        executeCalls.push({ calldata, overrides });
+        return { hash: "0xsimple-native" };
+    };
+
+    const tx = await zapper.simpleZap(token, NATIVE_ADDRESS, TOKEN, 20_000n, false, 50n, RECEIVER);
+
+    assert.deepEqual(tx, { hash: "0xsimple-native" });
+    assert.deepEqual(executeCalls, [{
+        calldata: "0xencoded",
+        overrides: { value: 20_000n },
+    }]);
+});
+
+test("object zap slippage floors fractional BPS through the shared converter", async () => {
+    const token = Object.create(CToken.prototype) as CToken;
+    const calls: Array<{ slippage: bigint }> = [];
+
+    (token as any).cache = { asset: { address: TOKEN } };
+    (token as any).getZapper = () => ({
+        address: ZAPPER,
+        getSimpleZapCalldata: async (
+            _ctoken: CToken,
+            _inputToken: address,
+            _outputToken: address,
+            _assets: bigint,
+            _collateralize: boolean,
+            slippage: bigint,
+        ) => {
+            calls.push({ slippage });
+            return "0xencoded";
+        },
+    });
+
+    const result = await token.zap(
+        100n,
+        {
+            type: "simple",
+            inputToken: TOKEN,
+            slippage: new Decimal("0.000151"),
+        },
+        false,
+        "0xdefault",
+        RECEIVER,
+    );
+
+    assert.equal(result.calldata, "0xencoded");
+    assert.deepEqual(calls, [{ slippage: 1n }]);
 });

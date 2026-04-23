@@ -70,3 +70,52 @@ test("contractWithGasBuffer preserves gas estimation for write methods", async (
         { gasLimit: 110n },
     ]]);
 });
+
+test("contractWithGasBuffer merges gas limit into existing transaction overrides", async () => {
+    let estimateGasCalls = 0;
+    const estimateArgs: any[] = [];
+    const sendArgs: any[] = [];
+    const contract = {
+        interface: {
+            getFunction(name: string) {
+                if (name !== "deposit") {
+                    throw new Error(`unexpected function lookup: ${name}`);
+                }
+
+                return {
+                    stateMutability: "payable",
+                    inputs: [{ name: "receiver" }, { name: "amount" }],
+                };
+            },
+        },
+        deposit: Object.assign(
+            async (...args: any[]) => {
+                sendArgs.push(args);
+                return "ok";
+            },
+            {
+                estimateGas: async (...args: any[]) => {
+                    estimateGasCalls += 1;
+                    estimateArgs.push(args);
+                    return 100n;
+                },
+            },
+        ),
+    };
+
+    const wrapped = contractWithGasBuffer(contract);
+    const result = await wrapped.deposit("0xreceiver", 10n, { value: 5n });
+
+    assert.equal(result, "ok");
+    assert.equal(estimateGasCalls, 1);
+    assert.deepEqual(estimateArgs, [[
+        "0xreceiver",
+        10n,
+        { value: 5n },
+    ]]);
+    assert.deepEqual(sendArgs, [[
+        "0xreceiver",
+        10n,
+        { value: 5n, gasLimit: 110n },
+    ]]);
+});

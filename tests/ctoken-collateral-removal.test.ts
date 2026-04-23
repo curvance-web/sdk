@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
 import { CToken } from '../src';
 
+const SIGNER = '0x00000000000000000000000000000000000000aa';
+const OWNER = '0x00000000000000000000000000000000000000bb';
+const RECEIVER = '0x00000000000000000000000000000000000000cc';
+
 type RemovalHarness = {
     token: CToken;
     getCallDataCalls: Array<{ method: string; shares: bigint }>;
@@ -261,5 +265,110 @@ describe('CToken collateral removal APIs', () => {
             { method: 'redeem', shares: 1_000n },
         ]);
         assert.deepEqual(tx, { hash: '0xredeem1000' });
+    });
+
+    test('redeemCollateral uses delegated redeemCollateralFor when owner delegated the signer', async () => {
+        const token = Object.create(CToken.prototype) as CToken;
+        const getCallDataCalls: Array<{ method: string; args: unknown[] }> = [];
+        const oracleRouteCalls: Array<{ calldata: string; reloadAccount: string | null }> = [];
+        const delegateChecks: Array<{ owner: string; delegate: string }> = [];
+
+        (token as any).cache = { symbol: 'cTEST' };
+        (token as any).requireSigner = () => ({ address: SIGNER });
+        (token as any).convertTokenInputToShares = () => 123n;
+        (token as any).contract = {
+            isDelegate: async (owner: string, delegate: string) => {
+                delegateChecks.push({ owner, delegate });
+                return true;
+            },
+            allowance: async () => {
+                throw new Error('allowance should not be checked for delegated redeem');
+            },
+        };
+        (token as any).getCallData = (method: string, args: unknown[]) => {
+            getCallDataCalls.push({ method, args });
+            return '0xdelegatedredeem';
+        };
+        (token as any).oracleRoute = async (calldata: string, _overrides: unknown, reloadAccount: string | null) => {
+            oracleRouteCalls.push({ calldata, reloadAccount });
+            return { hash: calldata };
+        };
+
+        const tx = await token.redeemCollateral(Decimal(1), RECEIVER as any, OWNER as any);
+
+        assert.deepEqual(delegateChecks, [{ owner: OWNER, delegate: SIGNER }]);
+        assert.deepEqual(getCallDataCalls, [{
+            method: 'redeemCollateralFor',
+            args: [123n, RECEIVER, OWNER],
+        }]);
+        assert.deepEqual(oracleRouteCalls, [{
+            calldata: '0xdelegatedredeem',
+            reloadAccount: OWNER,
+        }]);
+        assert.deepEqual(tx, { hash: '0xdelegatedredeem' });
+    });
+
+    test('redeemCollateral uses share allowance path when owner did not delegate signer', async () => {
+        const token = Object.create(CToken.prototype) as CToken;
+        const getCallDataCalls: Array<{ method: string; args: unknown[] }> = [];
+        const allowanceChecks: Array<{ owner: string; spender: string }> = [];
+        const oracleRouteCalls: Array<{ calldata: string; reloadAccount: string | null }> = [];
+
+        (token as any).cache = { symbol: 'cTEST' };
+        (token as any).requireSigner = () => ({ address: SIGNER });
+        (token as any).convertTokenInputToShares = () => 123n;
+        (token as any).contract = {
+            isDelegate: async () => false,
+            allowance: async (owner: string, spender: string) => {
+                allowanceChecks.push({ owner, spender });
+                return 123n;
+            },
+        };
+        (token as any).getCallData = (method: string, args: unknown[]) => {
+            getCallDataCalls.push({ method, args });
+            return '0xallowanceredeem';
+        };
+        (token as any).oracleRoute = async (calldata: string, _overrides: unknown, reloadAccount: string | null) => {
+            oracleRouteCalls.push({ calldata, reloadAccount });
+            return { hash: calldata };
+        };
+
+        await token.redeemCollateral(Decimal(1), RECEIVER as any, OWNER as any);
+
+        assert.deepEqual(allowanceChecks, [{ owner: OWNER, spender: SIGNER }]);
+        assert.deepEqual(getCallDataCalls, [{
+            method: 'redeemCollateral',
+            args: [123n, RECEIVER, OWNER],
+        }]);
+        assert.deepEqual(oracleRouteCalls, [{
+            calldata: '0xallowanceredeem',
+            reloadAccount: OWNER,
+        }]);
+    });
+
+    test('redeemCollateral fails before submit when owner has neither delegation nor share allowance', async () => {
+        const token = Object.create(CToken.prototype) as CToken;
+        const getCallDataCalls: Array<{ method: string; args: unknown[] }> = [];
+
+        (token as any).cache = { symbol: 'cTEST' };
+        (token as any).requireSigner = () => ({ address: SIGNER });
+        (token as any).convertTokenInputToShares = () => 123n;
+        (token as any).contract = {
+            isDelegate: async () => false,
+            allowance: async () => 122n,
+        };
+        (token as any).getCallData = (method: string, args: unknown[]) => {
+            getCallDataCalls.push({ method, args });
+            return '0xshouldnotencode';
+        };
+        (token as any).oracleRoute = async () => {
+            throw new Error('oracleRoute should not run');
+        };
+
+        await assert.rejects(
+            () => token.redeemCollateral(Decimal(1), RECEIVER as any, OWNER as any),
+            /Please approve cTEST shares for 0x00000000000000000000000000000000000000aa or delegate/i,
+        );
+        assert.deepEqual(getCallDataCalls, []);
     });
 });

@@ -55,6 +55,7 @@ function createSimpleExecutionHarness({
         feeReceiver: string | undefined;
     }> = [];
     const leverageCalls: Array<{ action: unknown; slippage: bigint }> = [];
+    const deleverageCalls: Array<{ action: unknown; slippage: bigint }> = [];
     const depositCalls: Array<{ assets: bigint; action: unknown; slippage: bigint }> = [];
 
     const token = Object.create(CToken.prototype) as CToken;
@@ -93,6 +94,10 @@ function createSimpleExecutionHarness({
         getLeverageCalldata(action: unknown, slippage: bigint) {
             leverageCalls.push({ action, slippage });
             return '0xleverage';
+        },
+        getDeleverageCalldata(action: unknown, slippage: bigint) {
+            deleverageCalls.push({ action, slippage });
+            return '0xdeleverage';
         },
         getDepositAndLeverageCalldata(assets: bigint, action: unknown, slippage: bigint) {
             depositCalls.push({ assets, action, slippage });
@@ -182,7 +187,7 @@ function createSimpleExecutionHarness({
         totalSupply: WAD,
     };
 
-    return { token, borrow, feeCalls, quoteCalls, leverageCalls, depositCalls };
+    return { token, borrow, feeCalls, quoteCalls, leverageCalls, deleverageCalls, depositCalls };
 }
 
 describe('CToken simple leverage execution', () => {
@@ -536,6 +541,18 @@ describe('CToken simple leverage execution', () => {
         );
     });
 
+    test('direct leverageUp does not require cToken delegate approval to the position manager', async () => {
+        const { token, borrow } = createSimpleExecutionHarness();
+
+        (token as any)._checkPositionManagerApproval = async () => {
+            throw new Error('direct leverageUp should not require cToken delegation');
+        };
+
+        const tx = await token.leverageUp(borrow, Decimal(2), 'simple', Decimal(0.01));
+
+        assert.deepEqual(tx, { hash: '0xleverage' });
+    });
+
     test('depositAndLeverage blocks submission when the underlying asset is not approved to the selected position manager', async () => {
         const { token, borrow, quoteCalls, depositCalls } = createSimpleExecutionHarness();
         const allowanceChecks: Array<{ owner: string; spender: string }> = [];
@@ -613,6 +630,18 @@ describe('CToken simple leverage execution', () => {
                 amplifyContractSlippage(110n, Decimal('0.6'), 37n),
             ),
         );
+    });
+
+    test('direct depositAndLeverage does not require cToken delegate approval to the position manager', async () => {
+        const { token, borrow } = createSimpleExecutionHarness();
+
+        (token as any)._checkPositionManagerApproval = async () => {
+            throw new Error('direct depositAndLeverage should not require cToken delegation');
+        };
+
+        const tx = await token.depositAndLeverage(Decimal(10), borrow, Decimal('1.60'), 'simple', Decimal(0.01));
+
+        assert.deepEqual(tx, { hash: '0xdeposit' });
     });
 
     test('depositAndLeverage fails closed below the post-deposit baseline before quoting', async () => {
@@ -730,5 +759,24 @@ describe('CToken simple leverage execution', () => {
             swapAction: { route: 'simple', inputAmount: toWad(20) },
             auxData: '0x',
         });
+    });
+
+    test('direct leverageDown does not require cToken delegate approval to the position manager', async () => {
+        const { token, borrow, deleverageCalls } = createSimpleExecutionHarness();
+
+        (token as any)._checkPositionManagerApproval = async () => {
+            throw new Error('direct leverageDown should not require cToken delegation');
+        };
+
+        const tx = await token.leverageDown(
+            borrow,
+            Decimal('1.6666666667'),
+            Decimal('1.5'),
+            'simple',
+            Decimal(0.01),
+        );
+
+        assert.deepEqual(tx, { hash: '0xdeleverage' });
+        assert.equal(deleverageCalls.length, 1);
     });
 });

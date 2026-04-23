@@ -291,6 +291,20 @@ function supportsGasOverrides(contract: any, methodName: string | symbol): boole
     }
 }
 
+function getContractMethodInputCount(contract: any, methodName: string | symbol): number | null {
+    if (typeof methodName !== "string") {
+        return null;
+    }
+
+    try {
+        const fragment = contract?.interface?.getFunction(methodName);
+        const inputs = fragment?.inputs;
+        return Array.isArray(inputs) ? inputs.length : null;
+    } catch {
+        return null;
+    }
+}
+
 /**
  * Attempts to estimate gas and add buffer to transaction arguments
  * @param method The contract method to estimate gas for
@@ -298,7 +312,7 @@ function supportsGasOverrides(contract: any, methodName: string | symbol): boole
  * @param bufferPercent The gas buffer percentage
  * @returns true if gas estimation was successful and added to args
  */
-async function tryAddGasBuffer(method: any, args: any[], bufferPercent: number): Promise<boolean> {
+async function tryAddGasBuffer(method: any, args: any[], bufferPercent: number, inputCount: number | null): Promise<boolean> {
     if (!canEstimateGas(method)) {
         return false;
     }
@@ -306,7 +320,14 @@ async function tryAddGasBuffer(method: any, args: any[], bufferPercent: number):
     const estimatedGas = await method.estimateGas(...args);
     const gasLimit = calculateGasWithBuffer(estimatedGas, bufferPercent);
 
-    // Add the gas limit as transaction overrides
+    if (inputCount != null && args.length > inputCount) {
+        args[args.length - 1] = {
+            ...args[args.length - 1],
+            gasLimit,
+        };
+        return true;
+    }
+
     args.push({ gasLimit });
     return true;
 }
@@ -544,7 +565,12 @@ export function contractWithGasBuffer<T extends object>(contract: T, bufferPerce
                     // Estimating read-only functions adds an unnecessary RPC round-trip
                     // and breaks fork tests when estimateGas is restricted or slow.
                     if (supportsGasOverrides(target, methodName)) {
-                        await tryAddGasBuffer(originalMethod, args, bufferPercent);
+                        await tryAddGasBuffer(
+                            originalMethod,
+                            args,
+                            bufferPercent,
+                            getContractMethodInputCount(target, methodName),
+                        );
                     }
 
                     // Call the original method with potentially modified args

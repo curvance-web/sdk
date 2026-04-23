@@ -3,8 +3,8 @@ import { ZapToken } from "../CToken";
 import IDexAgg from "./IDexAgg";
 import { Swap } from "../Zapper";
 import { all_markets, setup_config } from "../../setup";
-import { toContractSwapSlippage } from "../../helpers";
-import { safeBigInt, fetchWithTimeout, validateRouterAddress, validateSlippageBps } from "../../validation";
+import { EMPTY_ADDRESS, toContractSwapSlippage } from "../../helpers";
+import { safeBigInt, fetchWithTimeout, validateAddress, validateRouterAddress, validateSlippageBps } from "../../validation";
 import { AbiCoder } from "ethers";
 import { buildLocalSimpleZapTokens } from "./helpers";
 
@@ -32,22 +32,48 @@ const SWAP_PARAMS_TYPE =
     'uint256 flags, bytes permit) desc, ' +
     'bytes clientData)';
 
+type KyberSwapValidationRequest = {
+    tokenIn: string;
+    tokenOut: string;
+    amount: bigint;
+    recipient: string;
+    minReturnAmount: bigint;
+    feeBps: bigint;
+    feeReceiver?: string | undefined;
+};
+
+function normalizeCalldataAddress(value: string, context: string): string {
+    return validateAddress(value, context).toLowerCase();
+}
+
+function validateEqualAddress(actual: string, expected: string, context: string): void {
+    if (normalizeCalldataAddress(actual, context) !== normalizeCalldataAddress(expected, `${context} expected`)) {
+        throw new Error(`KyberSwap calldata ${context}=${actual}, expected ${expected}`);
+    }
+}
+
+function validateRecipientAddress(actual: string, expected: string): void {
+    const normalizedActual = normalizeCalldataAddress(actual, 'dstReceiver');
+    if (normalizedActual === EMPTY_ADDRESS.toLowerCase()) {
+        return;
+    }
+
+    if (normalizedActual !== normalizeCalldataAddress(expected, 'dstReceiver expected')) {
+        throw new Error(`KyberSwap calldata dstReceiver=${actual}, expected ${expected}`);
+    }
+}
+
 /**
- * Decode and validate fee-related fields in KyberSwap swap calldata.
+ * Decode and validate checker-bound fields in KyberSwap swap calldata.
  * Catches API misconfigurations before the tx hits the on-chain checker.
  *
  * @param calldata - Raw calldata from KyberSwap build API
- * @param feeBps - Expected fee BPS (0n to skip fee validation)
- * @param feeReceiver - Expected fee receiver address (undefined to skip)
+ * @param expected - Swap parameters the build calldata must preserve
  */
 function validateSwapCalldata(
     calldata: string,
-    feeBps: bigint,
-    feeReceiver: string | undefined
+    expected: KyberSwapValidationRequest,
 ): void {
-    // No fee configured — nothing to validate in the calldata
-    if (!feeBps || feeBps === 0n || !feeReceiver) return;
-
     try {
         const selector = calldata.slice(0, 10).toLowerCase();
         if (selector !== KYBER_SWAP_SELECTOR) {
@@ -62,6 +88,22 @@ function validateSwapCalldata(
         const [execution] = coder.decode([SWAP_PARAMS_TYPE], encoded);
         const desc = execution.desc;
 
+        validateEqualAddress(desc.srcToken, expected.tokenIn, 'srcToken');
+        validateEqualAddress(desc.dstToken, expected.tokenOut, 'dstToken');
+        validateRecipientAddress(desc.dstReceiver, expected.recipient);
+
+        if (BigInt(desc.amount) !== expected.amount) {
+            throw new Error(
+                `KyberSwap calldata amount=${desc.amount}, expected ${expected.amount}`
+            );
+        }
+
+        if (BigInt(desc.minReturnAmount) < expected.minReturnAmount) {
+            throw new Error(
+                `KyberSwap calldata minReturnAmount=${desc.minReturnAmount}, expected at least ${expected.minReturnAmount}`
+            );
+        }
+
         // Validate _FEE_IN_BPS flag — without it, feeAmounts[0]=4 means
         // 4 wei instead of 4 BPS
         const flags = BigInt(desc.flags);
@@ -73,23 +115,66 @@ function validateSwapCalldata(
             );
         }
 
+        if (normalizeCalldataAddress(execution.approveTarget, 'approveTarget') !== EMPTY_ADDRESS.toLowerCase()) {
+            throw new Error(
+                `KyberSwap calldata approveTarget=${execution.approveTarget}, expected ${EMPTY_ADDRESS}`
+            );
+        }
+
+        if (normalizeCalldataAddress(execution.callTarget, 'callTarget') === EMPTY_ADDRESS.toLowerCase()) {
+            throw new Error(`KyberSwap calldata callTarget cannot be ${EMPTY_ADDRESS}`);
+        }
+
+        if (execution.targetData.length === 0 || execution.targetData === '0x') {
+            throw new Error('KyberSwap calldata targetData cannot be empty');
+        }
+
+        if (desc.permit.length !== 0 && desc.permit !== '0x') {
+            throw new Error('KyberSwap calldata permit must be empty');
+        }
+
+        if (desc.srcReceivers.length === 0 || desc.srcReceivers.length !== desc.srcAmounts.length) {
+            throw new Error(
+                `KyberSwap calldata srcReceivers/srcAmounts length mismatch: ${desc.srcReceivers.length}/${desc.srcAmounts.length}`
+            );
+        }
+
+        for (const receiver of desc.srcReceivers) {
+            if (normalizeCalldataAddress(receiver, 'srcReceiver') === EMPTY_ADDRESS.toLowerCase()) {
+                throw new Error(`KyberSwap calldata srcReceiver cannot be ${EMPTY_ADDRESS}`);
+            }
+        }
+
+        const totalSourceAmount = desc.srcAmounts.reduce(
+            (total: bigint, amount: bigint | string | number) => total + BigInt(amount),
+            0n,
+        );
+        if (totalSourceAmount !== expected.amount) {
+            throw new Error(
+                `KyberSwap calldata srcAmounts total=${totalSourceAmount}, expected ${expected.amount}`
+            );
+        }
+
         // Validate fee receiver
         if (desc.feeReceivers.length !== 1) {
             throw new Error(
                 `KyberSwap calldata has ${desc.feeReceivers.length} fee receivers, expected 1`
             );
         }
-        if (desc.feeReceivers[0].toLowerCase() !== feeReceiver.toLowerCase()) {
+        if (!expected.feeReceiver) {
+            throw new Error('KyberSwap calldata feeReceiver expected but no fee receiver was configured');
+        }
+        if (desc.feeReceivers[0].toLowerCase() !== expected.feeReceiver.toLowerCase()) {
             throw new Error(
                 `KyberSwap calldata feeReceiver=${desc.feeReceivers[0]}, ` +
-                `expected ${feeReceiver}`
+                `expected ${expected.feeReceiver}`
             );
         }
 
         // Validate fee amount
-        if (desc.feeAmounts.length !== 1 || BigInt(desc.feeAmounts[0]) !== feeBps) {
+        if (desc.feeAmounts.length !== 1 || BigInt(desc.feeAmounts[0]) !== expected.feeBps) {
             throw new Error(
-                `KyberSwap calldata feeAmount=${desc.feeAmounts[0]}, expected ${feeBps}`
+                `KyberSwap calldata feeAmount=${desc.feeAmounts[0]}, expected ${expected.feeBps}`
             );
         }
     } catch (e: any) {
@@ -352,7 +437,15 @@ export class KyberSwap implements IDexAgg {
 
         // Validate that the API actually embedded the fee params we requested.
         // Without this, a misconfigured API response silently reverts on-chain.
-        validateSwapCalldata(build_data.data.data, feeBps ?? 0n, feeReceiver);
+        validateSwapCalldata(build_data.data.data, {
+            tokenIn,
+            tokenOut,
+            amount,
+            recipient: wallet,
+            minReturnAmount: min_out,
+            feeBps: feeBps ?? 0n,
+            feeReceiver,
+        });
 
         return {
             to: validatedRouter,

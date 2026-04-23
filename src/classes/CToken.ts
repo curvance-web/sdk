@@ -114,7 +114,7 @@ export const LEVERAGE = {
      *  for that amplification (see leverageDown). Bump when aggregator fees
      *  are enabled to keep dust prevention reliable. */
     DELEVERAGE_OVERHEAD_BPS: 20n,
-    /** BPS buffer on virtualConvertToShares for leverage + collateral cap.
+    /** BPS buffer on expected-share calculations for zap/leverage paths.
      *  Covers exchange rate drift from interest accrual since cache load. */
     SHARES_BUFFER_BPS: 2n,
     /** Per-leverage-unit BPS buffer for `checkSlippage` on vault + native-vault
@@ -222,6 +222,7 @@ export interface ICToken {
     marketCollateralPosted(): Promise<bigint>;
     collateralPosted(account: address): Promise<bigint>;
     redeemCollateral(shares: bigint, receiver: address, owner: address): Promise<TransactionResponse>;
+    redeemCollateralFor(shares: bigint, receiver: address, owner: address): Promise<TransactionResponse>;
     postCollateral(shares: bigint): Promise<TransactionResponse>;
     removeCollateral(shares: bigint): Promise<TransactionResponse>;
     symbol(): Promise<string>;
@@ -454,6 +455,10 @@ export class CToken extends Calldata<ICToken> {
     get interestFee() { return Decimal(this.cache.interestFee).div(BPS); }
 
     virtualConvertToAssets(shares: bigint): bigint {
+        if (this.totalSupply === 0n || this.totalAssets === 0n) {
+            return shares;
+        }
+
         return (shares * this.totalAssets) / this.totalSupply;
     }
 
@@ -476,7 +481,9 @@ export class CToken extends Calldata<ICToken> {
      *                  Matches the buffer pattern in async convertToShares().
      */
     virtualConvertToShares(assets: bigint, bufferBps: bigint = 0n): bigint {
-        const shares = (assets * this.totalSupply) / this.totalAssets;
+        const shares = this.totalSupply === 0n || this.totalAssets === 0n
+            ? assets
+            : (assets * this.totalSupply) / this.totalAssets;
         return bufferBps > 0n ? shares * (10000n - bufferBps) / 10000n : shares;
     }
 
@@ -1044,8 +1051,25 @@ export class CToken extends Calldata<ICToken> {
         owner ??= signer.address as address;
 
         const shares = this.convertTokenInputToShares(amount);
-        const calldata = this.getCallData("redeemCollateral", [shares, receiver, owner]);
-        return this.oracleRoute(calldata);
+        const signerAddress = signer.address as address;
+        let method = "redeemCollateral";
+
+        if (owner.toLowerCase() !== signerAddress.toLowerCase()) {
+            const isDelegated = await this.contract.isDelegate(owner, signerAddress);
+            if (isDelegated) {
+                method = "redeemCollateralFor";
+            } else {
+                const allowance = await this.contract.allowance(owner, signerAddress);
+                if (allowance < shares) {
+                    throw new Error(
+                        `Please approve ${this.symbol} shares for ${signerAddress} or delegate ${signerAddress} before redeeming collateral for ${owner}.`
+                    );
+                }
+            }
+        }
+
+        const calldata = this.getCallData(method, [shares, receiver, owner]);
+        return this.oracleRoute(calldata, {}, owner);
     }
 
     async postCollateral(amount: TokenInput) {
@@ -1707,7 +1731,6 @@ export class CToken extends Calldata<ICToken> {
 
             if (simulate) return this.simulateOracleRoute(calldata, { to: manager.address });
 
-            await this._checkPositionManagerApproval(manager);
             return this.oracleRoute(calldata, { to: manager.address });
         } catch (error: any) {
             if (simulate) return { success: false, error: error?.reason || error?.message || String(error) };
@@ -1876,7 +1899,6 @@ export class CToken extends Calldata<ICToken> {
 
             if (simulate) return this.simulateOracleRoute(calldata, { to: manager.address });
 
-            await this._checkPositionManagerApproval(manager);
             return this.oracleRoute(calldata, { to: manager.address });
         } catch (error: any) {
             if (simulate) return { success: false, error: error?.reason || error?.message || String(error) };
@@ -2002,7 +2024,6 @@ export class CToken extends Calldata<ICToken> {
 
             if (simulate) return this.simulateOracleRoute(calldata, { to: manager.address });
 
-            await this._checkPositionManagerApproval(manager);
             return this.oracleRoute(calldata, { to: manager.address });
         } catch (error: any) {
             if (simulate) return { success: false, error: error?.reason || error?.message || String(error) };
@@ -2066,7 +2087,7 @@ export class CToken extends Calldata<ICToken> {
         let type_of_zap: ZapperTypes;
 
         if(typeof zap == 'object') {
-            slippage = BigInt(zap.slippage.mul(BPS).toString());
+            slippage = FormatConverter.percentageToBps(zap.slippage);
             inputToken = zap.inputToken;
             type_of_zap = zap.type;
         } else {

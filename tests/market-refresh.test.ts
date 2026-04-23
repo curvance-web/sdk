@@ -138,8 +138,8 @@ test("refreshActiveUserMarkets refreshes the requested account before filtering 
             calls.push({ addresses, account });
             return {
                 dynamicMarkets: [
-                    { address: MARKET_A, tokens: [] },
-                    { address: MARKET_B, tokens: [] },
+                    { address: MARKET_A, tokens: [{ address: TOKEN_A as any }] },
+                    { address: MARKET_B, tokens: [{ address: TOKEN_B as any }] },
                 ],
                 userMarkets: [
                     {
@@ -286,7 +286,7 @@ test("reloadUserData binds the refreshed account for downstream helpers", async 
     market.account = null;
     market.reader = {
         getMarketStates: async () => ({
-            dynamicMarkets: [{ address: MARKET_A, tokens: [] }],
+            dynamicMarkets: [{ address: MARKET_A, tokens: [{ address: TOKEN_A as any }] }],
             userMarkets: [{
                 address: MARKET_A,
                 collateral: 31n,
@@ -415,14 +415,7 @@ test("reloadUserMarkets keeps same-chain readers with different providers separa
     assert.deepEqual(calls, ["A", "B"]);
 });
 
-test("applyState preserves prior token cache when dynamic data omits a token", () => {
-    // Regression guard: applyState merges new cache fields via object spread,
-    // so a token absent from `dynamicData.tokens` (or `userData.tokens`) keeps
-    // its prior cache intact rather than being zeroed. Consumers rely on this
-    // for "partial refresh" scenarios.
-    const TOKEN_A = "0x000000000000000000000000000000000000000a";
-    const TOKEN_B = "0x000000000000000000000000000000000000000b";
-
+test("applyState fails closed when dynamic or user data omits a token", () => {
     const market = Object.create(Market.prototype) as Market;
     market.address = MARKET_A as any;
     market.cache = {
@@ -446,29 +439,57 @@ test("applyState preserves prior token cache when dynamic data omits a token", (
         { address: TOKEN_B, cache: { exchangeRate: 200n, userCollateral: 7n } },
     ] as any;
 
-    // Dynamic response only returns TOKEN_A. TOKEN_B must retain its prior cache.
-    market.applyState(
-        {
-            address: MARKET_A as any,
-            tokens: [{ address: TOKEN_A as any, exchangeRate: 999n } as any],
-        },
-        {
-            address: MARKET_A as any,
-            collateral: 0n,
-            maxDebt: 0n,
-            debt: 0n,
-            positionHealth: 0n,
-            cooldown: 0n,
-            errorCodeHit: false,
-            priceStale: false,
-            tokens: [{ address: TOKEN_A as any, userCollateral: 50n } as any],
-        },
+    assert.throws(
+        () => market.applyState(
+            {
+                address: MARKET_A as any,
+                tokens: [{ address: TOKEN_A as any, exchangeRate: 999n } as any],
+            },
+            {
+                address: MARKET_A as any,
+                collateral: 0n,
+                maxDebt: 0n,
+                debt: 0n,
+                positionHealth: 0n,
+                cooldown: 0n,
+                errorCodeHit: false,
+                priceStale: false,
+                tokens: [
+                    { address: TOKEN_A as any, userCollateral: 50n } as any,
+                    { address: TOKEN_B as any, userCollateral: 70n } as any,
+                ],
+            },
+        ),
+        /Token row count mismatch.*dynamic=1/i,
+    );
+    assert.throws(
+        () => market.applyState(
+            {
+                address: MARKET_A as any,
+                tokens: [
+                    { address: TOKEN_A as any, exchangeRate: 999n } as any,
+                    { address: TOKEN_B as any, exchangeRate: 888n } as any,
+                ],
+            },
+            {
+                address: MARKET_A as any,
+                collateral: 0n,
+                maxDebt: 0n,
+                debt: 0n,
+                positionHealth: 0n,
+                cooldown: 0n,
+                errorCodeHit: false,
+                priceStale: false,
+                tokens: [{ address: TOKEN_A as any, userCollateral: 50n } as any],
+            },
+        ),
+        /Token row count mismatch.*user=1/i,
     );
 
-    assert.equal((market.tokens[0] as any).cache.exchangeRate, 999n, "TOKEN_A dynamic overlay");
-    assert.equal((market.tokens[0] as any).cache.userCollateral, 50n, "TOKEN_A user overlay");
-    assert.equal((market.tokens[1] as any).cache.exchangeRate, 200n, "TOKEN_B dynamic preserved");
-    assert.equal((market.tokens[1] as any).cache.userCollateral, 7n, "TOKEN_B user preserved");
+    assert.equal((market.tokens[0] as any).cache.exchangeRate, 100n, "TOKEN_A cache must not be partially mutated");
+    assert.equal((market.tokens[0] as any).cache.userCollateral, 5n, "TOKEN_A user cache must not be partially mutated");
+    assert.equal((market.tokens[1] as any).cache.exchangeRate, 200n, "TOKEN_B cache must not be partially mutated");
+    assert.equal((market.tokens[1] as any).cache.userCollateral, 7n, "TOKEN_B user cache must not be partially mutated");
 });
 
 test("summary-only user refresh invalidates token user getters until a full user refresh arrives", () => {
@@ -498,7 +519,7 @@ test("summary-only user refresh invalidates token user getters until a full user
     market.applyState(
         {
             address: MARKET_A as any,
-            tokens: [],
+            tokens: [{ address: TOKEN_A as any } as any],
         },
         {
             address: MARKET_A as any,

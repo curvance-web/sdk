@@ -1,16 +1,41 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import Decimal from "decimal.js";
-import { BorrowableCToken } from "../src/classes/BorrowableCToken";
+import { BorrowableCToken, type IDynamicIRM } from "../src/classes/BorrowableCToken";
+import irmAbi from "../src/abis/IDynamicIRM.json";
 
 const WAD = 10n ** 18n;
 const OWNER = "0x00000000000000000000000000000000000000aa";
 const CTOKEN = "0x00000000000000000000000000000000000000c1";
 const ASSET = "0x00000000000000000000000000000000000000d1";
 
+test("IDynamicIRM adjustedBorrowRate wrapper matches the nonpayable tuple ABI", () => {
+    const adjustedBorrowRate = (irmAbi as any[]).find((entry) => entry.name === "adjustedBorrowRate");
+    assert.equal(adjustedBorrowRate?.stateMutability, "nonpayable");
+    assert.deepEqual(
+        adjustedBorrowRate?.outputs.map((output: { name: string; type: string }) => [output.name, output.type]),
+        [
+            ["ratePerSecond", "uint256"],
+            ["adjustmentRate", "uint256"],
+        ],
+    );
+
+    const compileTimeShape = (irm: IDynamicIRM): Promise<[
+        ratePerSecond: bigint,
+        adjustmentRate: bigint,
+    ]> => irm.adjustedBorrowRate(1n, 2n);
+    assert.equal(typeof compileTimeShape, "function");
+});
+
 test("BorrowableCToken.getMaxBorrowable clamps negative and non-finite outputs to zero", async () => {
     const token = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
 
+    (token as any).cache = {
+        debtCap: 100n,
+        debt: 0n,
+        liquidity: 100n,
+    };
+    (token as any).convertTokensToUsd = () => new Decimal(100);
     (token as any).market = {
         userRemainingCredit: new Decimal(-5),
     };
@@ -24,6 +49,7 @@ test("BorrowableCToken.getMaxBorrowable clamps negative and non-finite outputs t
     (token as any).market = {
         userRemainingCredit: new Decimal(5),
     };
+    (token as any).convertTokensToUsd = () => new Decimal(100);
     (token as any).convertUsdToTokens = () => new Decimal(Infinity);
 
     assert.ok((await token.getMaxBorrowable()).eq(0));
@@ -32,6 +58,35 @@ test("BorrowableCToken.getMaxBorrowable clamps negative and non-finite outputs t
 
     assert.ok((await token.getMaxBorrowable()).eq(2.5));
     assert.ok((await token.getMaxBorrowable(true)).eq(5));
+});
+
+test("BorrowableCToken.getMaxBorrowable is capped by token debt capacity and liquidity", async () => {
+    const token = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
+    const usdPerToken = new Decimal(2);
+
+    (token as any).market = {
+        userRemainingCredit: new Decimal(1_000),
+    };
+    (token as any).cache = {
+        debtCap: 120n * WAD,
+        debt: 100n * WAD,
+        liquidity: 30n * WAD,
+    };
+    (token as any).convertTokensToUsd = (assets: bigint) =>
+        new Decimal(assets.toString()).div(WAD.toString()).mul(usdPerToken);
+    (token as any).convertUsdToTokens = (usd: Decimal) => usd.div(usdPerToken);
+
+    assert.ok((await token.getMaxBorrowable(true)).eq(40));
+    assert.ok((await token.getMaxBorrowable()).eq(20));
+
+    (token as any).cache = {
+        debtCap: 200n * WAD,
+        debt: 100n * WAD,
+        liquidity: 7n * WAD,
+    };
+
+    assert.ok((await token.getMaxBorrowable(true)).eq(14));
+    assert.ok((await token.getMaxBorrowable()).eq(7));
 });
 
 function createRepayToken(allowance: bigint, projectedDebt: bigint = 0n) {
@@ -190,4 +245,65 @@ test("BorrowableCToken refresh helpers use assetsHeld as the IRM denominator", a
     assert.equal((token as any).cache.liquidity, 60n);
     assert.equal(assetsHeldCalls, 5);
     assert.equal(debtCalls, 4);
+});
+
+test("BorrowableCToken.fetchUtilizationRateChange clamps remove previews at zero liquidity", async () => {
+    const token = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
+    const calls: Array<{ assetsHeld: bigint; debt: bigint }> = [];
+
+    (token as any).cache = {
+        liquidity: 5n * WAD,
+        debt: 10n * WAD,
+        asset: { decimals: 18n },
+    };
+    (token as any).dynamicIRM = async () => ({
+        utilizationRate: async (assetsHeld: bigint, debt: bigint) => {
+            calls.push({ assetsHeld, debt });
+            return 1n;
+        },
+    });
+
+    await token.fetchUtilizationRateChange(Decimal(6), "remove", false);
+
+    assert.deepEqual(calls, [{
+        assetsHeld: 0n,
+        debt: 10n * WAD,
+    }]);
+});
+
+test("BorrowableCToken.depositAsCollateral does not apply signer debt guard to third-party receivers", async () => {
+    const token = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
+    const receiver = "0x00000000000000000000000000000000000000bb";
+    const calls: Array<{ method: string; reloadAccount: string }> = [];
+
+    (token as any).cache = { asset: { decimals: 18n } };
+    (token as any).requireSigner = () => ({ address: OWNER });
+    (token as any).readFreshUserCache = () => {
+        throw new Error("signer debt cache should not be read for third-party collateral");
+    };
+    (token as any).ensureUnderlyingAmount = async (amount: Decimal) => amount;
+    (token as any).getZapAssetAmount = async () => 1n * WAD;
+    (token as any).isZapInstruction = () => false;
+    (token as any).getRemainingCollateral = () => 100n * WAD;
+    (token as any).virtualConvertToShares = (assets: bigint) => assets;
+    (token as any)._checkDepositApprovals = async () => {};
+    (token as any).getCallData = (method: string) => {
+        calls.push({ method, reloadAccount: "" });
+        return "0xdeposit";
+    };
+    (token as any).zap = async (_assets: bigint, _zap: unknown, _collateralize: boolean, calldata: string) => ({
+        calldata,
+        calldata_overrides: {},
+    });
+    (token as any).oracleRoute = async (_calldata: string, _overrides: unknown, reloadAccount: string) => {
+        calls[calls.length - 1]!.reloadAccount = reloadAccount;
+        return {} as any;
+    };
+
+    await token.depositAsCollateral(Decimal(1), "none", receiver as any);
+
+    assert.deepEqual(calls, [{
+        method: "depositAsCollateralFor",
+        reloadAccount: receiver,
+    }]);
 });

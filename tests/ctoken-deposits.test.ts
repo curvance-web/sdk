@@ -1081,6 +1081,20 @@ describe('Preservation — sibling getters must keep returning shares / raw unit
         assert.equal(ctoken.formatSharesAsAssets(8n * WAD).toString(), '10');
     });
 
+    test('cached virtual conversions default to 1:1 for empty markets', () => {
+        const ctoken = createCToken({
+            totalSupply: 0n,
+            totalAssets: 0n,
+        });
+
+        assert.equal(ctoken.virtualConvertToAssets(12n * WAD), 12n * WAD);
+        assert.equal(ctoken.virtualConvertToShares(12n * WAD), 12n * WAD);
+        assert.equal(
+            ctoken.virtualConvertToShares(12n * WAD, 2n),
+            (12n * WAD * 9998n) / 10000n,
+        );
+    });
+
     test('getDebt(false) returns cache.debt (assets, unchanged)', () => {
         // debt is asset-denominated per ProtocolReader ABI. Included here as
         // a control — the Issue 3 fix is about collateral/deposits; the debt

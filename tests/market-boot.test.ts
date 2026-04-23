@@ -11,6 +11,7 @@ const MARKET_A = "0x00000000000000000000000000000000000000a1";
 const MARKET_B = "0x00000000000000000000000000000000000000b2";
 const TOKEN_A = "0x00000000000000000000000000000000000000c1";
 const TOKEN_B = "0x00000000000000000000000000000000000000c2";
+const TOKEN_C = "0x00000000000000000000000000000000000000c3";
 
 const originalFetchNativeYields = Api.fetchNativeYields;
 const originalFetchMerklOpportunities = merklModule.fetchMerklOpportunities;
@@ -177,6 +178,108 @@ test("Market.getAll joins dynamic and user payloads by address during boot", asy
     assert.equal(markets[1]?.cache.user.address, MARKET_B);
     assert.equal((markets[1]?.tokens[0] as any).cache.exchangeRate, 222n);
     assert.equal((markets[1]?.tokens[0] as any).cache.userAssetBalance, 22n);
+});
+
+test("Market.getAll joins token rows by address within each market", async () => {
+    Api.fetchNativeYields = async () => [];
+    merklModule.fetchMerklOpportunities = async () => [];
+
+    const staticMarket = createStaticMarket(MARKET_A, TOKEN_A);
+    (staticMarket as any).tokens = [
+        createStaticMarket(MARKET_A, TOKEN_A).tokens[0],
+        createStaticMarket(MARKET_A, TOKEN_B).tokens[0],
+    ];
+
+    const dynamicMarket = createDynamicMarket(MARKET_A, TOKEN_A, 111n);
+    (dynamicMarket as any).tokens = [
+        createDynamicMarket(MARKET_A, TOKEN_B, 222n).tokens[0],
+        createDynamicMarket(MARKET_A, TOKEN_A, 111n).tokens[0],
+    ];
+
+    const userMarket = createUserMarket(MARKET_A, TOKEN_A, 11n);
+    (userMarket as any).tokens = [
+        createUserMarket(MARKET_A, TOKEN_B, 22n).tokens[0],
+        createUserMarket(MARKET_A, TOKEN_A, 11n).tokens[0],
+    ];
+
+    const reader = {
+        getAllMarketData: async () => ({
+            staticMarket: [staticMarket],
+            dynamicMarket: [dynamicMarket],
+            userData: {
+                locks: [],
+                markets: [userMarket],
+            },
+        }),
+    } as any;
+
+    const markets = await Market.getAll(
+        reader,
+        {} as any,
+        {} as any,
+        null,
+        ACCOUNT as any,
+        {},
+        {},
+        createSetup() as any,
+    );
+
+    assert.equal(markets.length, 1);
+    assert.equal(markets[0]?.tokens.length, 2);
+    assert.equal(markets[0]?.tokens[0]?.address, TOKEN_A);
+    assert.equal((markets[0]?.tokens[0] as any).cache.exchangeRate, 111n);
+    assert.equal((markets[0]?.tokens[0] as any).cache.userAssetBalance, 11n);
+    assert.equal(markets[0]?.tokens[1]?.address, TOKEN_B);
+    assert.equal((markets[0]?.tokens[1] as any).cache.exchangeRate, 222n);
+    assert.equal((markets[0]?.tokens[1] as any).cache.userAssetBalance, 22n);
+});
+
+test("Market.getAll fails clearly when token rows drift within a market", async () => {
+    Api.fetchNativeYields = async () => [];
+    merklModule.fetchMerklOpportunities = async () => [];
+
+    const staticMarket = createStaticMarket(MARKET_A, TOKEN_A);
+    (staticMarket as any).tokens = [
+        createStaticMarket(MARKET_A, TOKEN_A).tokens[0],
+        createStaticMarket(MARKET_A, TOKEN_B).tokens[0],
+    ];
+
+    const dynamicMarket = createDynamicMarket(MARKET_A, TOKEN_A, 111n);
+    (dynamicMarket as any).tokens = [
+        createDynamicMarket(MARKET_A, TOKEN_A, 111n).tokens[0],
+        createDynamicMarket(MARKET_A, TOKEN_C, 333n).tokens[0],
+    ];
+
+    const userMarket = createUserMarket(MARKET_A, TOKEN_A, 11n);
+    (userMarket as any).tokens = [
+        createUserMarket(MARKET_A, TOKEN_A, 11n).tokens[0],
+        createUserMarket(MARKET_A, TOKEN_B, 22n).tokens[0],
+    ];
+
+    const reader = {
+        getAllMarketData: async () => ({
+            staticMarket: [staticMarket],
+            dynamicMarket: [dynamicMarket],
+            userData: {
+                locks: [],
+                markets: [userMarket],
+            },
+        }),
+    } as any;
+
+    await assert.rejects(
+        () => Market.getAll(
+            reader,
+            {} as any,
+            {} as any,
+            null,
+            ACCOUNT as any,
+            {},
+            {},
+            createSetup() as any,
+        ),
+        /Missing dynamic token data for 0x00000000000000000000000000000000000000c2 in market 0x00000000000000000000000000000000000000a1 during Market boot/i,
+    );
 });
 
 test("Market.getAll fails clearly when a static market is missing dynamic state", async () => {

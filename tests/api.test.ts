@@ -72,6 +72,26 @@ test("Api.getRewards filters malformed reward rows from successful responses", a
                 {},
                 {
                     market,
+                    tvl: -1,
+                    multiplier: 2,
+                    fail_multiplier: 3,
+                    chain_network: "monad-mainnet",
+                    start_date: "2026-01-01",
+                    end_date: "2026-01-02",
+                    duration_in_days: 1,
+                },
+                {
+                    market,
+                    tvl: 1,
+                    multiplier: 2,
+                    fail_multiplier: 3,
+                    chain_network: "monad-mainnet",
+                    start_date: "2026-01-01",
+                    end_date: "2026-01-02",
+                    duration_in_days: 0,
+                },
+                {
+                    market,
                     tvl: 1,
                     multiplier: 2,
                     fail_multiplier: 3,
@@ -83,6 +103,13 @@ test("Api.getRewards filters malformed reward rows from successful responses", a
             ],
             incentives: [
                 { market },
+                {
+                    market,
+                    type: "supply",
+                    rate: -1,
+                    description: "negative reward",
+                    image: "stars-rewards",
+                },
                 {
                     market,
                     type: "supply",
@@ -148,6 +175,7 @@ test("Api.fetchNativeYields filters malformed rows from successful responses", a
         json: async () => ({
             native_apy: [
                 { symbol: "WMON", apy: 4.25 },
+                { symbol: "NEGATIVE", apy: -0.01 },
                 { symbol: null, apy: 2 },
                 { symbol: "BROKEN", apy: "5" },
             ],

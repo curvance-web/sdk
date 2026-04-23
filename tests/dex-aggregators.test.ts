@@ -30,6 +30,7 @@ const TOKEN_IN = "0x0000000000000000000000000000000000000001" as address;
 const TOKEN_OUT = "0x0000000000000000000000000000000000000002" as address;
 const WALLET = "0x0000000000000000000000000000000000000003" as address;
 const FEE_RECEIVER = "0x0000000000000000000000000000000000000004" as address;
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as address;
 const MONAD_WMON = "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A" as address;
 const MONAD_USDC = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603" as address;
 const DECIMALS_SELECTOR = "0x313ce567";
@@ -86,26 +87,54 @@ function createDecimalsProvider(decimalsByAddress: Map<string, bigint>) {
 function encodeKyberSwapCalldata({
     feeBps,
     feeReceiver = FEE_RECEIVER,
+    callTarget = WALLET,
+    approveTarget = ZERO_ADDRESS,
+    targetData = "0x1234",
+    srcToken = TOKEN_IN,
+    dstToken = TOKEN_OUT,
+    srcReceivers = [WALLET],
+    srcAmounts = [1_000n],
+    feeReceivers,
+    feeAmounts,
+    dstReceiver = WALLET,
+    amount = 1_000n,
+    minReturnAmount = 995n,
+    flags = 0x280n,
+    permit = "0x",
 }: {
     feeBps: bigint;
     feeReceiver?: address;
+    callTarget?: address;
+    approveTarget?: address;
+    targetData?: string;
+    srcToken?: address;
+    dstToken?: address;
+    srcReceivers?: address[];
+    srcAmounts?: bigint[];
+    feeReceivers?: address[];
+    feeAmounts?: bigint[];
+    dstReceiver?: address;
+    amount?: bigint;
+    minReturnAmount?: bigint;
+    flags?: bigint;
+    permit?: string;
 }): bytes {
     const execution = [
-        WALLET,
-        TOKEN_IN,
-        "0x1234",
+        callTarget,
+        approveTarget,
+        targetData,
         [
-            TOKEN_IN,
-            TOKEN_OUT,
-            [WALLET],
-            [1_000n],
-            [feeReceiver],
-            [feeBps],
-            WALLET,
-            1_000n,
-            900n,
-            0x280n,
-            "0x",
+            srcToken,
+            dstToken,
+            srcReceivers,
+            srcAmounts,
+            feeReceivers ?? [feeReceiver],
+            feeAmounts ?? [feeBps],
+            dstReceiver,
+            amount,
+            minReturnAmount,
+            flags,
+            permit,
         ],
         "0x5678",
     ];
@@ -369,6 +398,22 @@ test("KyberSwap.quote validates current router fee calldata without warning", as
     }
 });
 
+test("KyberSwap.quote accepts zero dstReceiver as Kyber msg.sender shorthand", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+
+    const quote = await withMockedKyberFetch(
+        kyber,
+        encodeKyberSwapCalldata({
+            feeBps: 4n,
+            feeReceiver: FEE_RECEIVER,
+            dstReceiver: ZERO_ADDRESS,
+        }),
+        () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+    );
+
+    assert.equal(quote.min_out, 995n);
+});
+
 test("KyberSwap.quote rejects checker-incompatible missing or custom fee policy before fetch", async () => {
     const kyber = new KyberSwap(FEE_RECEIVER);
     const originalFetch = globalThis.fetch;
@@ -425,6 +470,126 @@ test("KyberSwap.quote rejects current router calldata with the wrong selector", 
         ),
         /KyberSwap calldata selector=0x12345678, expected 0xe21fd0e9/,
     );
+});
+
+test("KyberSwap.quote rejects calldata that does not bind requested swap fields", async () => {
+    const cases: Array<{
+        name: string;
+        calldata: bytes;
+        pattern: RegExp;
+    }> = [
+        {
+            name: "wrong source token",
+            calldata: encodeKyberSwapCalldata({
+                feeBps: 4n,
+                srcToken: TOKEN_OUT,
+            }),
+            pattern: /srcToken=.*expected 0x0000000000000000000000000000000000000001/i,
+        },
+        {
+            name: "wrong destination token",
+            calldata: encodeKyberSwapCalldata({
+                feeBps: 4n,
+                dstToken: TOKEN_IN,
+            }),
+            pattern: /dstToken=.*expected 0x0000000000000000000000000000000000000002/i,
+        },
+        {
+            name: "wrong amount",
+            calldata: encodeKyberSwapCalldata({
+                feeBps: 4n,
+                amount: 999n,
+            }),
+            pattern: /amount=999, expected 1000/i,
+        },
+        {
+            name: "wrong recipient",
+            calldata: encodeKyberSwapCalldata({
+                feeBps: 4n,
+                dstReceiver: FEE_RECEIVER,
+            }),
+            pattern: /dstReceiver=.*expected 0x0000000000000000000000000000000000000003/i,
+        },
+        {
+            name: "minimum return below SDK quote minimum",
+            calldata: encodeKyberSwapCalldata({
+                feeBps: 4n,
+                minReturnAmount: 994n,
+            }),
+            pattern: /minReturnAmount=994, expected at least 995/i,
+        },
+        {
+            name: "non-empty approve target",
+            calldata: encodeKyberSwapCalldata({
+                feeBps: 4n,
+                approveTarget: TOKEN_IN,
+            }),
+            pattern: /approveTarget=.*expected 0x0000000000000000000000000000000000000000/i,
+        },
+        {
+            name: "empty target data",
+            calldata: encodeKyberSwapCalldata({
+                feeBps: 4n,
+                targetData: "0x",
+            }),
+            pattern: /targetData cannot be empty/i,
+        },
+        {
+            name: "non-empty permit",
+            calldata: encodeKyberSwapCalldata({
+                feeBps: 4n,
+                permit: "0x1234",
+            }),
+            pattern: /permit must be empty/i,
+        },
+        {
+            name: "zero call target",
+            calldata: encodeKyberSwapCalldata({
+                feeBps: 4n,
+                callTarget: ZERO_ADDRESS,
+            }),
+            pattern: /callTarget cannot be 0x0000000000000000000000000000000000000000/i,
+        },
+        {
+            name: "zero source receiver",
+            calldata: encodeKyberSwapCalldata({
+                feeBps: 4n,
+                srcReceivers: [ZERO_ADDRESS],
+            }),
+            pattern: /srcReceiver cannot be 0x0000000000000000000000000000000000000000/i,
+        },
+        {
+            name: "source receiver amount length mismatch",
+            calldata: encodeKyberSwapCalldata({
+                feeBps: 4n,
+                srcReceivers: [WALLET],
+                srcAmounts: [],
+            }),
+            pattern: /srcReceivers\/srcAmounts length mismatch: 1\/0/i,
+        },
+        {
+            name: "source amounts do not sum to requested amount",
+            calldata: encodeKyberSwapCalldata({
+                feeBps: 4n,
+                srcAmounts: [999n],
+            }),
+            pattern: /srcAmounts total=999, expected 1000/i,
+        },
+    ];
+
+    for (const entry of cases) {
+        const kyber = new KyberSwap(FEE_RECEIVER);
+
+        await assert.rejects(
+            () => withMockedKyberFetch(
+                kyber,
+                entry.calldata,
+                () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+            ),
+            entry.pattern,
+            entry.name,
+        );
+    }
 });
 
 test("KyberSwap.quote rejects current router calldata that cannot be decoded", async () => {

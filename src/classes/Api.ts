@@ -42,6 +42,14 @@ function isFiniteNumber(value: unknown): value is number {
     return typeof value === "number" && Number.isFinite(value);
 }
 
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+    return isFiniteNumber(value) && value >= 0;
+}
+
+function isPositiveFiniteNumber(value: unknown): value is number {
+    return isFiniteNumber(value) && value > 0;
+}
+
 function isNonEmptyString(value: unknown): value is string {
     return typeof value === "string" && value.trim().length > 0;
 }
@@ -54,13 +62,13 @@ function isMilestoneResponse(value: unknown): value is MilestoneResponse {
     const row = value as Partial<Record<keyof MilestoneResponse, unknown>>;
     return (
         isNonEmptyString(row.market) &&
-        isFiniteNumber(row.tvl) &&
-        isFiniteNumber(row.multiplier) &&
-        isFiniteNumber(row.fail_multiplier) &&
+        isNonNegativeFiniteNumber(row.tvl) &&
+        isNonNegativeFiniteNumber(row.multiplier) &&
+        isNonNegativeFiniteNumber(row.fail_multiplier) &&
         isNonEmptyString(row.chain_network) &&
         isNonEmptyString(row.start_date) &&
         isNonEmptyString(row.end_date) &&
-        isFiniteNumber(row.duration_in_days)
+        isPositiveFiniteNumber(row.duration_in_days)
     );
 }
 
@@ -73,7 +81,7 @@ function isIncentiveResponse(value: unknown): value is IncentiveResponse {
     return (
         isNonEmptyString(row.market) &&
         isNonEmptyString(row.type) &&
-        isFiniteNumber(row.rate) &&
+        isNonNegativeFiniteNumber(row.rate) &&
         isNonEmptyString(row.description) &&
         isNonEmptyString(row.image)
     );
@@ -89,7 +97,7 @@ function isNativeYieldRow(value: unknown): value is { symbol: string; apy: numbe
     }
 
     const row = value as { symbol?: unknown; apy?: unknown };
-    return typeof row.symbol === "string" && typeof row.apy === "number" && Number.isFinite(row.apy);
+    return typeof row.symbol === "string" && isNonNegativeFiniteNumber(row.apy);
 }
 
 function resolveDefaultSetupConfig(context: string): SetupConfigSnapshot {

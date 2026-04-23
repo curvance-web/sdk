@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fetchMerklOpportunities } from "../src/integrations/merkl";
+import {
+    fetchMerklCampaignsBySymbol,
+    fetchMerklOpportunities,
+    fetchMerklUserRewards,
+} from "../src/integrations/merkl";
 import {
     aggregateMerklAprByToken,
     getBorrowCost,
@@ -55,6 +59,148 @@ test("fetchMerklOpportunities degrades malformed successful responses to no oppo
     });
 
     assert.deepEqual(await fetchMerklOpportunities({ action: "LEND", chainId: 143 }), []);
+});
+
+test("fetchMerklUserRewards filters malformed successful rows before returning typed data", async (t) => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => [
+            { chain: { id: "bad", name: "Broken" }, rewards: [] },
+            {
+                chain: { id: 143, name: "Monad" },
+                rewards: [
+                    {
+                        distributionChainId: 143,
+                        root: "0xroot",
+                        recipient: "0xrecipient",
+                        amount: "100",
+                        claimed: "0",
+                        token: {
+                            symbol: "MON",
+                            address: "0x0000000000000000000000000000000000000001",
+                            chainId: 143,
+                            decimals: 18,
+                        },
+                        breakdowns: [
+                            { campaignId: "campaign-a", amount: "100", claimed: "0" },
+                            { campaignId: 123, amount: "100", claimed: "0" },
+                        ],
+                    },
+                    {
+                        distributionChainId: 143,
+                        root: "0xroot",
+                        recipient: "0xrecipient",
+                        amount: "100",
+                        claimed: "0",
+                        token: { symbol: "MON" },
+                    },
+                ],
+            },
+        ],
+    } as Response)) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    const rows = await fetchMerklUserRewards({
+        wallet: "0x00000000000000000000000000000000000000aa",
+        chainId: 143,
+    });
+
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.chain.id, 143);
+    assert.equal(rows[0]?.rewards.length, 1);
+    assert.equal(rows[0]?.rewards[0]?.breakdowns?.length, 1);
+});
+
+test("fetchMerklUserRewards degrades malformed successful bodies to no rewards", async (t) => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => ({ rewards: [] }),
+    } as Response)) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    assert.deepEqual(await fetchMerklUserRewards({
+        wallet: "0x00000000000000000000000000000000000000aa",
+        chainId: 143,
+    }), []);
+});
+
+test("fetchMerklCampaignsBySymbol filters malformed successful campaign rows", async (t) => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => [
+            {
+                id: "campaign-a",
+                campaignId: "campaign-a",
+                computeChainId: 143,
+                distributionChainId: 143,
+                chain: { id: 143, name: "Monad" },
+                rewardToken: {
+                    symbol: "MON",
+                    address: "0x0000000000000000000000000000000000000001",
+                    chainId: 143,
+                    decimals: 18,
+                },
+            },
+            {
+                id: "campaign-b",
+                campaignId: "campaign-b",
+                computeChainId: 143,
+                distributionChainId: 143,
+                chain: { id: 143, name: "Monad" },
+                rewardToken: { symbol: "MON" },
+            },
+            {
+                id: "campaign-c",
+                campaignId: "campaign-c",
+                computeChainId: 143,
+                distributionChainId: 143,
+                chain: { id: 143, name: "Monad" },
+                distributionChain: { id: "bad", name: "Broken" },
+                rewardToken: {
+                    symbol: "MON",
+                    address: "0x0000000000000000000000000000000000000001",
+                    chainId: 143,
+                    decimals: 18,
+                },
+            },
+        ],
+    } as Response)) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    const campaigns = await fetchMerklCampaignsBySymbol({ tokenSymbol: "MON" });
+
+    assert.equal(campaigns.length, 1);
+    assert.equal(campaigns[0]?.id, "campaign-a");
+});
+
+test("fetchMerklCampaignsBySymbol degrades malformed successful bodies to no campaigns", async (t) => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => ({ campaigns: [] }),
+    } as Response)) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    assert.deepEqual(await fetchMerklCampaignsBySymbol({ tokenSymbol: "MON" }), []);
 });
 
 test("aggregateMerklAprByToken rolls duplicate lend opportunities up by token membership", () => {

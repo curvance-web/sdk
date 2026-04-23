@@ -156,7 +156,7 @@ export default class FormatConverter {
      * @returns The BPS value as a bigint
      */
     static percentageToBps(value: Percentage): bigint {
-        return BigInt(value.mul(10_000).toFixed(0));
+        return BigInt(value.mul(10_000).floor().toFixed(0));
     }
 
     /**

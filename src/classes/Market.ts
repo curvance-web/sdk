@@ -1,6 +1,15 @@
 import { aggregateMerklAprByToken, BPS, ChangeRate, contractSetup, EMPTY_ADDRESS, getRateSeconds, requireAccount, toBigInt, toDecimal, UINT256_MAX, WAD, WAD_DECIMAL } from "../helpers";
 import { Contract } from "ethers";
-import { DynamicMarketData, ProtocolReader, StaticMarketData, UserMarket, UserMarketSummary } from "./ProtocolReader";
+import {
+    DynamicMarketData,
+    DynamicMarketToken,
+    ProtocolReader,
+    StaticMarketData,
+    StaticMarketToken,
+    UserMarket,
+    UserMarketSummary,
+    UserMarketToken,
+} from "./ProtocolReader";
 import { AccountSnapshot, CToken } from "./CToken";
 import abi from '../abis/MarketManagerIsolated.json';
 import { Decimal } from "decimal.js";
@@ -110,15 +119,9 @@ export class Market {
         this.cache = { static: static_data, dynamic: dynamic_data, user: user_data, deploy: deploy_data };
         this._userDataScope = "full";
 
-        for(let i = 0; i < static_data.tokens.length; i++) {
+        for(const tokenData of Market.mergeTokenPayloads(static_data, dynamic_data, user_data)) {
             // @NOTE: Merged fields from the 3 types, so you wanna make sure there is no collisions
             // Otherwise we will have some dataloss
-            const tokenData = {
-                ...static_data.tokens[i]!,
-                ...dynamic_data.tokens[i]!,
-                ...user_data.tokens[i]!
-            };
-
             if(tokenData.isBorrowable) {
                 const ctoken = new BorrowableCToken(provider, tokenData.address, tokenData, this);
                 this.tokens.push(ctoken);
@@ -425,31 +428,43 @@ export class Market {
         );
     }
 
-    private hasCompleteUserTokenPayload(userData: UserMarket) {
-        if (userData.tokens.length !== this.tokens.length) {
-            return false;
+    private requireRefreshTokenRows<T extends { address: address }>(rows: T[], label: string): Map<string, T> {
+        if (rows.length !== this.tokens.length) {
+            throw new Error(
+                `Token row count mismatch for market ${this.address} during refresh: ` +
+                `expected=${this.tokens.length} ${label}=${rows.length}.`
+            );
         }
 
-        const tokenAddresses = new Set(userData.tokens.map((token) => token.address));
-        return this.tokens.every((token) => tokenAddresses.has(token.address));
+        const rowsByAddress = new Map(rows.map((row) => [row.address.toLowerCase(), row]));
+        for (const token of this.tokens) {
+            if (!rowsByAddress.has(token.address.toLowerCase())) {
+                throw new Error(`Missing ${label} token data for ${token.address} in market ${this.address} during refresh.`);
+            }
+        }
+
+        return rowsByAddress;
     }
 
     applyState(dynamicData: DynamicMarketData, userData?: UserMarket) {
+        const dynamicRowsByAddress = this.requireRefreshTokenRows(dynamicData.tokens, "dynamic");
+        const userRowsByAddress = userData != undefined
+            ? this.requireRefreshTokenRows(userData.tokens, "user")
+            : undefined;
+
         this.cache.dynamic = dynamicData;
 
         if(userData != undefined) {
             this.cache.user = userData;
-            if (this.hasCompleteUserTokenPayload(userData)) {
-                this._userDataScope = "full";
-            }
+            this._userDataScope = "full";
         }
 
         for(const token of this.tokens) {
-            const nextDynamic = dynamicData.tokens.find((t) => t.address == token.address);
-            const nextUser = userData?.tokens.find((t) => t.address == token.address);
+            const nextDynamic = dynamicRowsByAddress.get(token.address.toLowerCase());
+            const nextUser = userRowsByAddress?.get(token.address.toLowerCase());
             token.cache = {
                 ...token.cache,
-                ...(nextDynamic ?? {}),
+                ...nextDynamic,
                 ...(nextUser ?? {}),
             };
 
@@ -627,6 +642,44 @@ export class Market {
 
     private static buildMarketPayloadIndex<T extends { address: address }>(entries: T[]): Map<string, T> {
         return new Map(entries.map((entry) => [entry.address.toLowerCase(), entry]));
+    }
+
+    private static requireTokenRow<T extends { address: address }>(
+        rowsByAddress: Map<string, T>,
+        tokenAddress: address,
+        marketAddress: address,
+        label: string,
+    ): T {
+        const row = rowsByAddress.get(tokenAddress.toLowerCase());
+        if (row == undefined) {
+            throw new Error(`Missing ${label} token data for ${tokenAddress} in market ${marketAddress} during Market boot.`);
+        }
+        return row;
+    }
+
+    private static mergeTokenPayloads(
+        staticData: StaticMarketData,
+        dynamicData: DynamicMarketData,
+        userData: UserMarket,
+    ): Array<StaticMarketToken & DynamicMarketToken & UserMarketToken> {
+        if (
+            staticData.tokens.length !== dynamicData.tokens.length ||
+            staticData.tokens.length !== userData.tokens.length
+        ) {
+            throw new Error(
+                `Token row count mismatch for market ${staticData.address} during Market boot: ` +
+                `static=${staticData.tokens.length} dynamic=${dynamicData.tokens.length} user=${userData.tokens.length}.`
+            );
+        }
+
+        const dynamicByAddress = this.buildMarketPayloadIndex(dynamicData.tokens);
+        const userByAddress = this.buildMarketPayloadIndex(userData.tokens);
+
+        return staticData.tokens.map((staticToken) => ({
+            ...staticToken,
+            ...this.requireTokenRow(dynamicByAddress, staticToken.address, staticData.address, "dynamic"),
+            ...this.requireTokenRow(userByAddress, staticToken.address, staticData.address, "user"),
+        }));
     }
 
     /**

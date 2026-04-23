@@ -82,18 +82,20 @@ async function validateProviderChain(chain: ChainRpcPrefix, provider: curvance_r
     const providerTarget = getRetryableProviderTarget(provider);
     const timeoutMs = getActiveRetryConfig().timeoutMs;
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
-    const network = await Promise.race([
-        providerTarget.getNetwork(),
-        new Promise<never>((_, reject) => {
-            timeoutHandle = setTimeout(() => {
-                reject(new Error(`[rpc] ${label} getNetwork: timeout after ${timeoutMs}ms`));
-            }, timeoutMs);
-        }),
-    ]).finally(() => {
-        if (timeoutHandle != null) {
-            clearTimeout(timeoutHandle);
-        }
-    });
+    const network = timeoutMs <= 0
+        ? await providerTarget.getNetwork()
+        : await Promise.race([
+            providerTarget.getNetwork(),
+            new Promise<never>((_, reject) => {
+                timeoutHandle = setTimeout(() => {
+                    reject(new Error(`[rpc] ${label} getNetwork: timeout after ${timeoutMs}ms`));
+                }, timeoutMs);
+            }),
+        ]).finally(() => {
+            if (timeoutHandle != null) {
+                clearTimeout(timeoutHandle);
+            }
+        });
     const actualChainId = BigInt(network.chainId);
 
     if (actualChainId !== expectedChainId) {
@@ -111,18 +113,7 @@ async function validateSignerProviderChain(chain: ChainRpcPrefix, signer: curvan
     await validateProviderChain(chain, signer.provider as curvance_read_provider, "Signer provider");
 }
 
-function getHighestPendingSetupInvocation() {
-    let highest = 0;
-    for (const invocation of pending_setup_invocations) {
-        if (invocation > highest) {
-            highest = invocation;
-        }
-    }
-    return highest;
-}
-
 function publishLatestSuccessfulSetup() {
-    const highestPending = getHighestPendingSetupInvocation();
     let candidateInvocation = 0;
     let candidate:
         | {
@@ -134,7 +125,6 @@ function publishLatestSuccessfulSetup() {
     for (const [invocation, result] of successful_setup_results.entries()) {
         if (
             invocation > latest_published_setup_invocation &&
-            invocation > highestPending &&
             invocation > candidateInvocation
         ) {
             candidateInvocation = invocation;

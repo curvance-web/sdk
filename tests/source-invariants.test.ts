@@ -55,9 +55,18 @@ test("Kyber current-router calldata validation fails closed in source", () => {
 
     assert.match(
         source,
-        /validateSwapCalldata\(build_data\.data\.data,\s*feeBps \?\? 0n,\s*feeReceiver\);/,
+        /validateSwapCalldata\(build_data\.data\.data,\s*\{[\s\S]*tokenIn,[\s\S]*tokenOut,[\s\S]*amount,[\s\S]*recipient: wallet,[\s\S]*minReturnAmount: min_out,[\s\S]*feeBps: feeBps \?\? 0n,[\s\S]*feeReceiver,[\s\S]*\}\);/,
     );
     assert.doesNotMatch(source, /console\.warn/);
+    assert.match(validator, /validateEqualAddress\(desc\.srcToken,\s*expected\.tokenIn,\s*'srcToken'\);/);
+    assert.match(validator, /validateEqualAddress\(desc\.dstToken,\s*expected\.tokenOut,\s*'dstToken'\);/);
+    assert.match(validator, /validateRecipientAddress\(desc\.dstReceiver,\s*expected\.recipient\);/);
+    assert.match(validator, /BigInt\(desc\.amount\) !== expected\.amount/);
+    assert.match(validator, /BigInt\(desc\.minReturnAmount\) < expected\.minReturnAmount/);
+    assert.match(validator, /execution\.approveTarget/);
+    assert.match(validator, /execution\.targetData/);
+    assert.match(validator, /desc\.permit/);
+    assert.match(validator, /desc\.srcReceivers/);
     assert.match(validator, /throw new Error\(`KyberSwap calldata could not be decoded for fee validation:/);
 });
 

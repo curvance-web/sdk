@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Interface, getAddress } from "ethers";
 import { OptimizerReader } from "../src/classes/OptimizerReader";
 
 const OPTIMIZER = "0x00000000000000000000000000000000000000aa";
@@ -87,6 +88,116 @@ test("getOptimizerMarketData uses staticCall so read-provider consumers stay on 
         totalLiquidity: 67n,
         sharePrice: 89n,
         performanceFee: 10n,
+    }]);
+});
+
+test("getOptimizerMarketData falls back to view-only reads when staticCall rejects a write-shaped path", async () => {
+    const reader = createReader();
+    const optimizerIface = new Interface([
+        "function asset() view returns (address)",
+        "function totalAssets() view returns (uint256)",
+        "function exchangeRate() view returns (uint256)",
+        "function fee() view returns (uint256)",
+        "function getApprovedMarkets() view returns (address[])",
+    ]);
+    const cTokenIface = new Interface([
+        "function balanceOf(address owner) view returns (uint256)",
+        "function convertToAssets(uint256 shares) view returns (uint256)",
+        "function assetsHeld() view returns (uint256)",
+    ]);
+    const selectors = {
+        asset: optimizerIface.getFunction("asset")!.selector,
+        totalAssets: optimizerIface.getFunction("totalAssets")!.selector,
+        exchangeRate: optimizerIface.getFunction("exchangeRate")!.selector,
+        fee: optimizerIface.getFunction("fee")!.selector,
+        getApprovedMarkets: optimizerIface.getFunction("getApprovedMarkets")!.selector,
+        balanceOf: cTokenIface.getFunction("balanceOf")!.selector,
+        convertToAssets: cTokenIface.getFunction("convertToAssets")!.selector,
+        assetsHeld: cTokenIface.getFunction("assetsHeld")!.selector,
+    };
+    const sharesByMarket = new Map<string, bigint>([
+        [CTOKEN_A.toLowerCase(), 20n],
+        [CTOKEN_B.toLowerCase(), 30n],
+    ]);
+    const assetsByMarket = new Map<string, bigint>([
+        [CTOKEN_A.toLowerCase(), 200n],
+        [CTOKEN_B.toLowerCase(), 300n],
+    ]);
+    const liquidityByMarket = new Map<string, bigint>([
+        [CTOKEN_A.toLowerCase(), 70n],
+        [CTOKEN_B.toLowerCase(), 80n],
+    ]);
+
+    reader.contract = {
+        getOptimizerMarketData: {
+            staticCall: async () => {
+                throw new Error("static state write rejected");
+            },
+        },
+    } as any;
+    reader.provider = {
+        async call(tx: { to?: string; data?: string }) {
+            const selector = tx.data?.slice(0, 10);
+            const target = tx.to?.toLowerCase();
+
+            if (target === OPTIMIZER.toLowerCase()) {
+                switch (selector) {
+                    case selectors.asset:
+                        return optimizerIface.encodeFunctionResult("asset", [CTOKEN_A]);
+                    case selectors.totalAssets:
+                        return optimizerIface.encodeFunctionResult("totalAssets", [123n]);
+                    case selectors.exchangeRate:
+                        return optimizerIface.encodeFunctionResult("exchangeRate", [456n]);
+                    case selectors.fee:
+                        return optimizerIface.encodeFunctionResult("fee", [7n]);
+                    case selectors.getApprovedMarkets:
+                        return optimizerIface.encodeFunctionResult("getApprovedMarkets", [[CTOKEN_A, CTOKEN_B]]);
+                    default:
+                        break;
+                }
+            }
+
+            if (target != null && sharesByMarket.has(target)) {
+                switch (selector) {
+                    case selectors.balanceOf:
+                        return cTokenIface.encodeFunctionResult("balanceOf", [sharesByMarket.get(target)!]);
+                    case selectors.convertToAssets:
+                        return cTokenIface.encodeFunctionResult("convertToAssets", [assetsByMarket.get(target)!]);
+                    case selectors.assetsHeld:
+                        return cTokenIface.encodeFunctionResult("assetsHeld", [liquidityByMarket.get(target)!]);
+                    default:
+                        break;
+                }
+            }
+
+            throw new Error(`Unexpected optimizer fallback call: ${tx.to} ${tx.data}`);
+        },
+        async resolveName(name: string) {
+            return name;
+        },
+    } as any;
+
+    const result = await reader.getOptimizerMarketData([OPTIMIZER as any]);
+
+    assert.deepEqual(result, [{
+        address: OPTIMIZER,
+        asset: getAddress(CTOKEN_A),
+        totalAssets: 123n,
+        markets: [
+            {
+                address: getAddress(CTOKEN_A),
+                allocatedAssets: 200n,
+                liquidity: 70n,
+            },
+            {
+                address: getAddress(CTOKEN_B),
+                allocatedAssets: 300n,
+                liquidity: 80n,
+            },
+        ],
+        totalLiquidity: 150n,
+        sharePrice: 456n,
+        performanceFee: 7n,
     }]);
 });
 
