@@ -193,6 +193,11 @@ interface TokenApprovalTarget {
     spenderLabel: string;
 }
 
+export interface TokenOracle {
+    type: bigint;
+    address: address;
+}
+
 export interface ZapToken {
     interface: NativeToken | ERC20;
     type: ZapperTypes;
@@ -482,6 +487,53 @@ export class CToken extends Calldata<ICToken> {
         return this.formatAssets(this.virtualConvertToAssets(shares));
     }
 
+    /**
+     * Returns the oracle adaptor used to price this token's asset.
+     *
+     * Static market data stores oracle adaptor types, not adaptor addresses.
+     * This resolves the first non-empty adaptor type from `adapters` through
+     * the active chain deployment config, matching the app's "Oracle Address"
+     * display logic while also exposing the adaptor type.
+     *
+     * @returns The configured oracle adaptor type and address, or `null` when
+     * no adaptor is configured for the token.
+     * @throws If the token references an unknown adaptor type or the active
+     * chain config is missing the expected adaptor address.
+     */
+    getOracle(): TokenOracle | null {
+        const adapter = this.adapters.find((adapter) => adapter !== 0n);
+        if (adapter == undefined) {
+            return null;
+        }
+
+        const adaptors = this.setup.contracts.adaptors;
+        let adaptorName: keyof typeof adaptors;
+
+        switch (adapter) {
+            case AdaptorTypes.CHAINLINK:
+                adaptorName = "ChainlinkAdaptor";
+                break;
+            case AdaptorTypes.REDSTONE_CLASSIC:
+                adaptorName = "RedstoneClassicAdaptor";
+                break;
+            case AdaptorTypes.REDSTONE_CORE:
+                adaptorName = "RedstoneCoreAdaptor";
+                break;
+            case AdaptorTypes.MOCK:
+                const mockOracleAddress = (this.setup.contracts as any).MockOracle as address | undefined;
+                return mockOracleAddress == undefined ? null : { type: adapter, address: mockOracleAddress };
+            default:
+                throw new Error(`Unknown oracle adaptor type ${adapter.toString()} for ${this.symbol}`);
+        }
+
+        const oracleAddress = adaptors?.[adaptorName] as address | undefined;
+        if (oracleAddress == undefined) {
+            throw new Error(`Oracle adaptor ${adaptorName} not configured for chain ${this.currentChain}`);
+        }
+
+        return { type: adapter, address: oracleAddress };
+    }
+    
     /**
      * Convert assets to shares using cached totalSupply/totalAssets.
      * @param bufferBps Optional downward buffer in BPS to account for
