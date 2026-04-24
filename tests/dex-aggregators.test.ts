@@ -420,6 +420,48 @@ test("KyberSwap.quote validates current router fee calldata without warning", as
     }
 });
 
+test("KyberSwap.quote accepts currency_in fee-net source amounts", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+    const amount = 1_000_000n;
+    const feeBps = 4n;
+    const feeNetSourceAmount = amount - (amount * feeBps / 10_000n);
+
+    const quote = await withMockedKyberFetch(
+        kyber,
+        encodeKyberSwapCalldata({
+            feeBps,
+            feeReceiver: FEE_RECEIVER,
+            amount,
+            srcAmounts: [feeNetSourceAmount],
+        }),
+        () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, amount, 50n, feeBps, FEE_RECEIVER),
+    );
+
+    assert.equal(quote.min_out, 995n);
+});
+
+test("KyberSwap.quote accepts bounded currency_in source amount rounding", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+    const amount = 1_000_000n;
+    const feeBps = 4n;
+
+    for (const deductedBps of [2n, 6n]) {
+        const sourceAmount = amount - (amount * deductedBps / 10_000n);
+        const quote = await withMockedKyberFetch(
+            kyber,
+            encodeKyberSwapCalldata({
+                feeBps,
+                feeReceiver: FEE_RECEIVER,
+                amount,
+                srcAmounts: [sourceAmount],
+            }),
+            () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, amount, 50n, feeBps, FEE_RECEIVER),
+        );
+
+        assert.equal(quote.min_out, 995n);
+    }
+});
+
 test("KyberSwap.quote accepts zero dstReceiver as Kyber msg.sender shorthand", async () => {
     const kyber = new KyberSwap(FEE_RECEIVER);
 
@@ -593,9 +635,9 @@ test("KyberSwap.quote rejects calldata that does not bind requested swap fields"
             name: "source amounts do not sum to requested amount",
             calldata: encodeKyberSwapCalldata({
                 feeBps: 4n,
-                srcAmounts: [999n],
+                srcAmounts: [100n],
             }),
-            pattern: /srcAmounts total=999, expected 1000/i,
+            pattern: /srcAmounts total=100, expected 1000 or fee deduction 0-1 wei/i,
         },
     ];
 
