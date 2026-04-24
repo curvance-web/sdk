@@ -34,6 +34,8 @@ export interface OptimizerMarketData {
     totalLiquidity: bigint;
     sharePrice: bigint;
     performanceFee: bigint;
+    /** Pre-performance-fee weighted supply APY in WAD (1e18 = 100%). */
+    apy: bigint;
 }
 
 export interface OptimizerUserData {
@@ -75,22 +77,6 @@ function normalizeAllocationBound(bound: any): AllocationBound {
     };
 }
 
-function normalizeOptimizerMarketData(opt: any): OptimizerMarketData {
-    return {
-        address: opt._address,
-        asset: opt.asset,
-        totalAssets: BigInt(opt.totalAssets),
-        markets: opt.markets.map((m: any) => ({
-            address: m._address,
-            allocatedAssets: BigInt(m.allocatedAssets),
-            liquidity: BigInt(m.liquidity)
-        })),
-        totalLiquidity: BigInt(opt.totalLiquidity),
-        sharePrice: BigInt(opt.sharePrice),
-        performanceFee: BigInt(opt.performanceFee)
-    };
-}
-
 export class OptimizerReader {
     provider: curvance_read_provider;
     address: address;
@@ -117,7 +103,7 @@ export class OptimizerReader {
     async getOptimizerMarketData(optimizers: address[]): Promise<OptimizerMarketData[]> {
         try {
             const data = await (this.contract as any).getOptimizerMarketData.staticCall(optimizers);
-            return data.map(normalizeOptimizerMarketData);
+            return Promise.all(data.map((opt: any) => this.normalizeOptimizerMarketData(opt)));
         } catch (error: any) {
             if (!this.shouldFallbackToViewOnlyOptimizerReads(error)) {
                 throw error;
@@ -165,6 +151,24 @@ export class OptimizerReader {
             totalLiquidity: marketRows.reduce((sum, market) => sum + market.liquidity, 0n),
             sharePrice: BigInt(sharePrice),
             performanceFee: BigInt(performanceFee),
+            apy: await this.getOptimizerAPY(optimizer),
+        };
+    }
+
+    private async normalizeOptimizerMarketData(opt: any): Promise<OptimizerMarketData> {
+        return {
+            address: opt._address,
+            asset: opt.asset,
+            totalAssets: BigInt(opt.totalAssets),
+            markets: opt.markets.map((m: any) => ({
+                address: m._address,
+                allocatedAssets: BigInt(m.allocatedAssets),
+                liquidity: BigInt(m.liquidity)
+            })),
+            totalLiquidity: BigInt(opt.totalLiquidity),
+            sharePrice: BigInt(opt.sharePrice),
+            performanceFee: BigInt(opt.performanceFee),
+            apy: opt.apy == null ? await this.getOptimizerAPY(opt._address) : BigInt(opt.apy),
         };
     }
 

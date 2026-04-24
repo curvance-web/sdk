@@ -592,7 +592,7 @@ const marketSnapshot = snapshotMarket(market)
 The `OptimizerReader` reads yield-rebalancing vaults that allocate across markets.
 
 ```ts
-import { OptimizerReader } from "curvance"
+import { ERC20, LendingOptimizer, OptimizerReader } from "curvance"
 
 const optimizer = new OptimizerReader(optimizerReaderAddress, provider)
 
@@ -600,13 +600,20 @@ await optimizer.getOptimizerAPY(optimizerAddress)
 // Returns: weighted-average optimizer APY in WAD
 
 await optimizer.getOptimizerMarketData(optimizerAddresses)
-// Returns: { totalAssets, sharePrice, performanceFee, markets[] }
+// Returns: { totalAssets, sharePrice, performanceFee, apy, markets[] }
 
 await optimizer.getOptimizerUserData(optimizerAddresses, account)
 // Returns: user balance and redeemable amounts
 
 await optimizer.optimalRebalance(optimizer, 100n)
 // Returns: { actions: { cToken, assetsOrBps }[], bounds: { cToken, minBps, maxBps }[] }
+
+const asset = new ERC20(provider, assetAddress, undefined, undefined, signer)
+const vault = new LendingOptimizer(optimizerAddress, asset, provider, signer)
+
+await vault.deposit(amount, account)
+await vault.withdraw(amount, account, account)
+await vault.redeem(shares, account, account)
 ```
 
 ## ❯ TypeScript Types
