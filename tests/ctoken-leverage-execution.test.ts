@@ -896,4 +896,63 @@ describe('CToken simple leverage execution', () => {
         assert.deepEqual(tx, { hash: '0xdeleverage' });
         assert.equal(deleverageCalls.length, 1);
     });
+
+    test('partial leverageDown fee-grosses collateral with ceil rounding', async () => {
+        const { token, borrow, quoteCalls, deleverageCalls } = createSimpleExecutionHarness({
+            feeByOperation: {
+                'leverage-down': 4n,
+            },
+        });
+        (token as any).previewLeverageDown = () => ({
+            collateralAssetReduction: 999n,
+            collateralAssetReductionUsd: Decimal('0.000000000000000999'),
+            leverageDiff: Decimal('0.1'),
+            newDebt: Decimal(0),
+            newDebtInAssets: Decimal(0),
+            newCollateral: Decimal(0),
+            newCollateralInAssets: Decimal(0),
+            feeBps: 4n,
+            feeAssets: Decimal(0),
+            feeUsd: Decimal(0),
+        });
+
+        const tx = await token.leverageDown(
+            borrow,
+            Decimal('1.6666666667'),
+            Decimal('1.5'),
+            'simple',
+            Decimal(0.01),
+        );
+
+        assert.deepEqual(tx, { hash: '0xdeleverage' });
+        assert.equal(quoteCalls[0]?.inputAmount, 1000n);
+        assert.equal(
+            (deleverageCalls[0]?.action as any).collateralAssets,
+            1000n,
+        );
+    });
+
+    test('full leverageDown fee and overhead sizing uses ceil rounding', async () => {
+        const { token, borrow, quoteCalls, deleverageCalls } = createSimpleExecutionHarness({
+            feeByOperation: {
+                'leverage-down': 4n,
+            },
+            selectedDebtTokenBalance: 999n,
+        });
+
+        const tx = await token.leverageDown(
+            borrow,
+            Decimal('1.6666666667'),
+            Decimal(1),
+            'simple',
+            Decimal(0.01),
+        );
+
+        assert.deepEqual(tx, { hash: '0xdeleverage' });
+        assert.equal(quoteCalls[0]?.inputAmount, 1002n);
+        assert.equal(
+            (deleverageCalls[0]?.action as any).collateralAssets,
+            1002n,
+        );
+    });
 });
