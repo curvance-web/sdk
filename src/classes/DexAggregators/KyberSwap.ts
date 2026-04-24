@@ -20,6 +20,7 @@ import { buildLocalSimpleZapTokens } from "./helpers";
  *  Must match KyberSwapChecker.REQUIRED_FLAGS on-chain. */
 const REQUIRED_FLAGS = 0x280n;
 const CHECKER_FEE_BPS = 4n;
+const SOURCE_AMOUNT_FEE_TOLERANCE_BPS = 2n;
 const KYBER_SWAP_SELECTOR = '0xe21fd0e9';
 
 /** ABI type string for KyberSwap MetaAggregationRouterV2's SwapExecutionParams struct. */
@@ -61,6 +62,38 @@ function validateRecipientAddress(actual: string, expected: string): void {
     if (normalizedActual !== normalizeCalldataAddress(expected, 'dstReceiver expected')) {
         throw new Error(`KyberSwap calldata dstReceiver=${actual}, expected ${expected}`);
     }
+}
+
+function getCurrencyInFeeAmountBounds(
+    amount: bigint,
+    feeBps: bigint,
+): { min: bigint; max: bigint } {
+    if (feeBps === 0n) {
+        return { min: 0n, max: 0n };
+    }
+
+    const minFeeBps = feeBps > SOURCE_AMOUNT_FEE_TOLERANCE_BPS
+        ? feeBps - SOURCE_AMOUNT_FEE_TOLERANCE_BPS
+        : 0n;
+    const maxFeeBps = feeBps + SOURCE_AMOUNT_FEE_TOLERANCE_BPS;
+
+    return {
+        min: amount * minFeeBps / 10000n,
+        max: (amount * maxFeeBps + 9999n) / 10000n,
+    };
+}
+
+function isValidSourceAmountTotal(totalSourceAmount: bigint, expected: KyberSwapValidationRequest): boolean {
+    if (totalSourceAmount === expected.amount) {
+        return true;
+    }
+    if (expected.feeBps === 0n || totalSourceAmount > expected.amount) {
+        return false;
+    }
+
+    const feeAmount = expected.amount - totalSourceAmount;
+    const bounds = getCurrencyInFeeAmountBounds(expected.amount, expected.feeBps);
+    return feeAmount >= bounds.min && feeAmount <= bounds.max;
 }
 
 /**
@@ -149,9 +182,12 @@ function validateSwapCalldata(
             (total: bigint, amount: bigint | string | number) => total + BigInt(amount),
             0n,
         );
-        if (totalSourceAmount !== expected.amount) {
+        if (!isValidSourceAmountTotal(totalSourceAmount, expected)) {
+            const bounds = getCurrencyInFeeAmountBounds(expected.amount, expected.feeBps);
             throw new Error(
-                `KyberSwap calldata srcAmounts total=${totalSourceAmount}, expected ${expected.amount}`
+                `KyberSwap calldata srcAmounts total=${totalSourceAmount}, ` +
+                `expected ${expected.amount} or fee deduction ` +
+                `${bounds.min}-${bounds.max} wei`
             );
         }
 
