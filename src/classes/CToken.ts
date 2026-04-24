@@ -20,6 +20,13 @@ const EXCLUDED_ZAP_SYMBOLS = new Set([
 ]);
 const EXECUTION_DEBT_BUFFER_TIME = 100n;
 
+function ceilDiv(numerator: bigint, denominator: bigint): bigint {
+    if (denominator <= 0n) {
+        throw new Error("ceilDiv denominator must be positive");
+    }
+    return numerator === 0n ? 0n : (numerator - 1n) / denominator + 1n;
+}
+
 /**
  * Leverage operation buffers — centralized for tuning.
  * Calibrated for fresh-state operation via getLeverageSnapshot under
@@ -1867,7 +1874,7 @@ export class CToken extends Calldata<ICToken> {
                         // Additive approximation is accurate to sub-bp at typical
                         // fee+overhead magnitudes (< 100 bps combined).
                         const overheadBps = LEVERAGE.DELEVERAGE_OVERHEAD_BPS + feeBps;
-                        swapCollateral = debtInCollateral * (10000n + overheadBps) / 10000n;
+                        swapCollateral = ceilDiv(debtInCollateral * (10000n + overheadBps), 10000n);
 
                         if (swapCollateral > maxTokenCollateral) {
                             const error = "Selected collateral token does not have enough posted collateral to fully deleverage.";
@@ -1889,7 +1896,7 @@ export class CToken extends Calldata<ICToken> {
                             // from input before swapping, so without compensation
                             // the swap underdelivers and actual leverage is slightly
                             // higher than target.
-                            swapCollateral = swapCollateral * 10000n / (10000n - feeBps);
+                            swapCollateral = ceilDiv(swapCollateral * 10000n, 10000n - feeBps);
                         }
                     }
 
