@@ -22,6 +22,20 @@ const MANAGER = '0x0000000000000000000000000000000000000fed';
 const toWad = (value: string | number) =>
     BigInt(new Decimal(value).mul(new Decimal(10).pow(18)).toFixed(0));
 
+const pow10 = (decimals: bigint) => 10n ** decimals;
+
+const toUnits = (value: Decimal.Value, decimals: bigint) =>
+    BigInt(new Decimal(value).mul(new Decimal(10).pow(decimals.toString())).toFixed(0));
+
+const usdToTokenUnits = (
+    usd: Decimal.Value,
+    priceWad: bigint,
+    decimals: bigint,
+) => {
+    const price = new Decimal(priceWad.toString()).div(new Decimal(WAD.toString()));
+    return toUnits(new Decimal(usd).div(price), decimals);
+};
+
 function expectClose(actual: Decimal, expected: Decimal.Value, tolerance = '0.0000001') {
     assert.ok(
         actual.sub(new Decimal(expected)).abs().lte(new Decimal(tolerance)),
@@ -39,7 +53,11 @@ function createSimpleExecutionHarness({
     borrowDebtCapAssets = 1_000n * WAD,
     borrowOutstandingDebtAssets = 0n,
     borrowLiquidityAssets = 1_000n * WAD,
-    selectedDebtTokenBalance = toWad(userDebtUsd.toString()),
+    collateralAssetDecimals = 18n,
+    borrowAssetDecimals = 18n,
+    collateralAssetPrice = WAD,
+    debtAssetPrice = WAD,
+    selectedDebtTokenBalance,
 }: {
     feeByOperation?: Partial<Record<'leverage-up' | 'deposit-and-leverage' | 'leverage-down', bigint>>;
     maxLeverage?: Decimal;
@@ -50,6 +68,10 @@ function createSimpleExecutionHarness({
     borrowDebtCapAssets?: bigint;
     borrowOutstandingDebtAssets?: bigint;
     borrowLiquidityAssets?: bigint;
+    collateralAssetDecimals?: bigint;
+    borrowAssetDecimals?: bigint;
+    collateralAssetPrice?: bigint;
+    debtAssetPrice?: bigint;
     selectedDebtTokenBalance?: bigint;
 } = {}) {
     const feeCalls: FeePolicyContext[] = [];
@@ -68,8 +90,18 @@ function createSimpleExecutionHarness({
 
     const token = Object.create(CToken.prototype) as CToken;
     const borrow = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
-    const tokenCollateralShares = BigInt(
-        tokenCollateralUsd.div(Decimal(2)).mul(new Decimal(10).pow(18)).toFixed(0),
+    const collateralTotalAssets = 200n * pow10(collateralAssetDecimals);
+    const collateralTotalSupply = 100n * WAD;
+    const tokenCollateralAssets = usdToTokenUnits(
+        tokenCollateralUsd,
+        collateralAssetPrice,
+        collateralAssetDecimals,
+    );
+    const tokenCollateralShares = tokenCollateralAssets * collateralTotalSupply / collateralTotalAssets;
+    const debtTokenBalance = selectedDebtTokenBalance ?? usdToTokenUnits(
+        userDebtUsd,
+        debtAssetPrice,
+        borrowAssetDecimals,
     );
 
     const market = {
@@ -145,14 +177,14 @@ function createSimpleExecutionHarness({
     (token as any).cache = {
         maxLeverage: 100_000n,
         userCollateral: tokenCollateralShares,
-        decimals: 18n,
-        asset: { address: COLLATERAL, decimals: 18n },
-        assetPrice: WAD,
-        assetPriceLower: WAD,
+        decimals: collateralAssetDecimals,
+        asset: { address: COLLATERAL, decimals: collateralAssetDecimals },
+        assetPrice: collateralAssetPrice,
+        assetPriceLower: collateralAssetPrice,
         sharePrice: 2n * WAD,
         sharePriceLower: 2n * WAD,
-        totalAssets: 200n * WAD,
-        totalSupply: 100n * WAD,
+        totalAssets: collateralTotalAssets,
+        totalSupply: collateralTotalSupply,
     };
     Object.defineProperty(token, 'maxLeverage', {
         configurable: true,
@@ -169,9 +201,9 @@ function createSimpleExecutionHarness({
         spenderLabel: 'simple PositionManager',
     });
     (token as any)._getLeverageSnapshot = async () => ({
-        debtTokenBalance: selectedDebtTokenBalance,
-        debtAssetPrice: WAD,
-        collateralAssetPrice: WAD,
+        debtTokenBalance,
+        debtAssetPrice,
+        collateralAssetPrice,
     });
     (token as any)._checkPositionManagerApproval = async () => {};
     (token as any)._checkTokenApproval = async () => {};
@@ -185,10 +217,10 @@ function createSimpleExecutionHarness({
     (borrow as any).market = market;
     (borrow as any).address = DEBT;
     (borrow as any).cache = {
-        decimals: 18n,
-        asset: { address: borrowAsset, decimals: 18n },
-        assetPrice: WAD,
-        assetPriceLower: WAD,
+        decimals: borrowAssetDecimals,
+        asset: { address: borrowAsset, decimals: borrowAssetDecimals },
+        assetPrice: debtAssetPrice,
+        assetPriceLower: debtAssetPrice,
         sharePrice: WAD,
         sharePriceLower: WAD,
         totalAssets: WAD,
@@ -949,10 +981,54 @@ describe('CToken simple leverage execution', () => {
         );
 
         assert.deepEqual(tx, { hash: '0xdeleverage' });
-        assert.equal(quoteCalls[0]?.inputAmount, 1002n);
+        assert.equal(quoteCalls[0]?.inputAmount, 1006n);
         assert.equal(
             (deleverageCalls[0]?.action as any).collateralAssets,
-            1002n,
+            1006n,
         );
+        assert.equal(
+            (deleverageCalls[0]?.action as any).repayAssets,
+            1n,
+        );
+    });
+
+    test('full leverageDown sizes low-notional WBTC collateral against USDC debt decimals', async () => {
+        const { token, borrow, quoteCalls, deleverageCalls } = createSimpleExecutionHarness({
+            feeByOperation: {
+                'leverage-down': 4n,
+            },
+            marketCollateralUsd: Decimal(16),
+            tokenCollateralUsd: Decimal(16),
+            userDebtUsd: Decimal(12),
+            collateralAssetDecimals: 8n,
+            borrowAssetDecimals: 6n,
+            collateralAssetPrice: toWad(100_000),
+            debtAssetPrice: WAD,
+            selectedDebtTokenBalance: 12_000_000n,
+        });
+
+        const tx = await token.leverageDown(
+            borrow,
+            Decimal(4),
+            Decimal(1),
+            'simple',
+            Decimal(0.01),
+        );
+
+        assert.deepEqual(tx, { hash: '0xdeleverage' });
+        // $16 WBTC collateral at $100k/WBTC is only 16,000 sats. Repaying
+        // $12 USDC requires 12,000 sats before overhead, so this keeps the
+        // full-close path near the collateral boundary and above the $10 debt
+        // floor without relying on large-position rounding.
+        assert.equal(quoteCalls[0]?.inputAmount, 12_077n);
+        assert.equal(
+            (deleverageCalls[0]?.action as any).collateralAssets,
+            12_077n,
+        );
+        assert.equal(
+            (deleverageCalls[0]?.action as any).repayAssets,
+            1n,
+        );
+        assert.equal((deleverageCalls[0]?.action as any).borrowableCToken, borrow.address);
     });
 });

@@ -118,9 +118,10 @@ export const LEVERAGE = {
      *  debt token to the user, so economic loss is zero — but the contract's
      *  checkSlippage modifier sees the overshoot as equity loss and amplifies
      *  it by (L-1)x. The deleverage contract slippage expansion compensates
-     *  for that amplification (see leverageDown). Bump when aggregator fees
-     *  are enabled to keep dust prevention reliable. */
-    DELEVERAGE_OVERHEAD_BPS: 20n,
+     *  for that amplification (see leverageDown). Keep this above observed
+     *  route underdelivery so full-close attempts do not partially repay into
+     *  the market's minimum-loan dust band. */
+    DELEVERAGE_OVERHEAD_BPS: 60n,
     /** BPS buffer on expected-share calculations for zap/leverage paths.
      *  Covers exchange rate drift from interest accrual since cache load. */
     SHARES_BUFFER_BPS: 2n,
@@ -1921,6 +1922,13 @@ export class CToken extends Calldata<ICToken> {
                     // Fee-aware slippage expansion for `_swapSafe` is handled by
                     // KyberSwap.quoteAction. See KyberSwap.ts for rationale.
 
+                    // In the current PositionManager, `repayAssets` is only a
+                    // minimum-output guard. The PM later recomputes the actual
+                    // repayment as min(assetsHeld, debtBalanceUpdated(owner)).
+                    // BorrowableCToken's full-repay sentinel is `repayFor(0)`,
+                    // but this PM path does not pass the action value through
+                    // as the repay amount, so full-close reliability must come
+                    // from conservative swap sizing rather than a sentinel here.
                     const minRepay = isFullDeleverage ? 1n : quote.min_out;
 
                     // checkSlippage measures equity-fraction loss. Both the
