@@ -194,7 +194,7 @@ interface TokenApprovalTarget {
 }
 
 export interface TokenOracle {
-    type: bigint;
+    type: string;
     address: address;
 }
 
@@ -531,7 +531,7 @@ export class CToken extends Calldata<ICToken> {
             throw new Error(`Oracle adaptor ${adaptorName} not configured for chain ${this.currentChain}`);
         }
 
-        return { type: adapter, address: oracleAddress };
+        return { type: adaptorName, address: oracleAddress };
     }
     
     /**
