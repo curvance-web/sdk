@@ -16,7 +16,7 @@ import { ERC4626 } from "./ERC4626";
 import FormatConverter from "./FormatConverter";
 
 const EXCLUDED_ZAP_SYMBOLS = new Set([
-    'eBTC', 'earnAUSD', 'vUSD', 'syzUSD', 'ezETH', 'YZM', 'wsrUSD', 'sAUSD',
+    'eBTC', 'vUSD', 'syzUSD', 'ezETH', 'YZM', 'wsrUSD', 'sAUSD',
 ]);
 const EXECUTION_DEBT_BUFFER_TIME = 100n;
 
@@ -506,7 +506,7 @@ export class CToken extends Calldata<ICToken> {
             return null;
         }
 
-        const adaptors = this.setup.contracts.adaptors;
+    const adaptors = this.setup.contracts.adaptors;
         let adaptorName: keyof typeof adaptors;
 
         switch (adapter) {

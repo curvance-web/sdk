@@ -8,7 +8,7 @@
   },
   "calldataCheckers": {
     "RedstoneAdaptorMulticallChecker": "0x75c30005f479307D743753F8604A847fFFe01a04",
-    "KyberSwapChecker": "0x206639D34bB079C1AD334c958c3ED3feC85Fbfff"
+    "KyberSwapChecker": "0xc63ac1e79c540DE6516679C97Bb00462fa6e15F7"
   },
   "zappers": {
     "nativeVaultZapper": "0x792451D679542B660E8a2284d458Ed1b5657dE88",
@@ -184,7 +184,9 @@
         "syzUSD": "0x7EdA3cb060Ff7B650eB227971dbfEBD3513b11D5",
         "AUSD": "0x8E94704607E857eB3E10Bd21D90bf8C1Ecba0452"
       },
-      "plugins": {},
+      "plugins": {
+        "simplePositionManager": "0x9352318f75e8Cb7C47C5B086D56d3e6D761b7419"
+      },
       "AUSD-DynamicIRM": "0xdCB32fc822eAe8794E48Ad005b50AA850529296D"
     },
     "wsrUSD | AUSD": {
