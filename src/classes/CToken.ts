@@ -521,7 +521,7 @@ export class CToken extends Calldata<ICToken> {
                 break;
             case AdaptorTypes.MOCK:
                 const mockOracleAddress = (this.setup.contracts as any).MockOracle as address | undefined;
-                return mockOracleAddress == undefined ? null : { type: adapter, address: mockOracleAddress };
+                return mockOracleAddress == undefined ? null : { type: "MockAdaptor", address: mockOracleAddress };
             default:
                 throw new Error(`Unknown oracle adaptor type ${adapter.toString()} for ${this.symbol}`);
         }
