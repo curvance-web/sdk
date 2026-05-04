@@ -112,6 +112,10 @@ function isNonnegativeFiniteNumber(value: unknown): value is number {
     return isFiniteNumber(value) && value >= 0;
 }
 
+function isAddressLike(value: string): boolean {
+    return /^0x[a-fA-F0-9]{40}$/.test(value);
+}
+
 function normalizeChainInfo(value: unknown): MerklChainInfo | null {
     if (
         !isRecord(value) ||
@@ -324,6 +328,109 @@ function normalizeMerklCampaigns(value: unknown): MerklCampaign[] {
         .filter((campaign): campaign is MerklCampaign => campaign != null);
 }
 
+function normalizeOpportunityToken(value: unknown): { address: string; symbol: string } | null {
+    if (!isRecord(value) || !isString(value.address)) {
+        return null;
+    }
+
+    return {
+        address: value.address,
+        symbol: isString(value.symbol) ? value.symbol : "",
+    };
+}
+
+function normalizeRewardRecordBreakdown(value: unknown): MerklRewardRecordBreakdown | null {
+    if (!isRecord(value) || !isRecord(value.token)) {
+        return null;
+    }
+
+    const token: MerklRewardRecordToken = {};
+    if (isString(value.token.id)) token.id = value.token.id;
+    if (isString(value.token.name)) token.name = value.token.name;
+    if (isString(value.token.symbol)) token.symbol = value.token.symbol;
+    if (isString(value.token.address)) token.address = value.token.address;
+    if (isFiniteNumber(value.token.chainId)) token.chainId = value.token.chainId;
+    if (isNonnegativeFiniteNumber(value.token.decimals)) token.decimals = value.token.decimals;
+    if (isString(value.token.icon)) token.icon = value.token.icon;
+    if (isFiniteNumber(value.token.price)) token.price = value.token.price;
+    if (isString(value.token.priceSource)) token.priceSource = value.token.priceSource;
+
+    if (Object.keys(token).length === 0) {
+        return null;
+    }
+
+    const breakdown: MerklRewardRecordBreakdown = { token };
+    if (isString(value.amount)) breakdown.amount = value.amount;
+    if (isFiniteNumber(value.value)) breakdown.value = value.value;
+    if (isString(value.distributionType)) breakdown.distributionType = value.distributionType;
+    if (isString(value.onChainCampaignId)) breakdown.onChainCampaignId = value.onChainCampaignId;
+    if (isString(value.id)) breakdown.id = value.id;
+    if (isString(value.timestamp)) breakdown.timestamp = value.timestamp;
+    if (isString(value.campaignId)) breakdown.campaignId = value.campaignId;
+    if (isString(value.dailyRewardsRecordId)) breakdown.dailyRewardsRecordId = value.dailyRewardsRecordId;
+
+    return breakdown;
+}
+
+function normalizeMerklOpportunity(value: unknown): MerklOpportunity | null {
+    if (
+        !isRecord(value) ||
+        !isString(value.name) ||
+        !isFiniteNumber(value.apr) ||
+        !isString(value.identifier) ||
+        !isString(value.type)
+    ) {
+        return null;
+    }
+
+    const rawTokens = value.tokens;
+    const hasTokenArray = Array.isArray(rawTokens);
+    if (!hasTokenArray && !isAddressLike(value.identifier)) {
+        return null;
+    }
+
+    const tokens = Array.isArray(rawTokens)
+        ? rawTokens
+            .map(normalizeOpportunityToken)
+            .filter((token): token is { address: string; symbol: string } => token != null)
+        : [];
+
+    const opportunity: MerklOpportunity = {
+        name: value.name,
+        apr: value.apr,
+        identifier: value.identifier,
+        type: value.type,
+        tokens,
+    };
+    if (isString(value.action)) {
+        opportunity.action = value.action;
+    }
+    if (isRecord(value.rewardsRecord)) {
+        const rewardsRecord: NonNullable<MerklOpportunity["rewardsRecord"]> = {};
+        if (isString(value.rewardsRecord.id)) rewardsRecord.id = value.rewardsRecord.id;
+        if (isFiniteNumber(value.rewardsRecord.total)) rewardsRecord.total = value.rewardsRecord.total;
+        if (isString(value.rewardsRecord.timestamp)) rewardsRecord.timestamp = value.rewardsRecord.timestamp;
+        if (Array.isArray(value.rewardsRecord.breakdowns)) {
+            rewardsRecord.breakdowns = value.rewardsRecord.breakdowns
+                .map(normalizeRewardRecordBreakdown)
+                .filter((breakdown): breakdown is MerklRewardRecordBreakdown => breakdown != null);
+        }
+        opportunity.rewardsRecord = rewardsRecord;
+    }
+
+    return opportunity;
+}
+
+function normalizeMerklOpportunities(value: unknown): MerklOpportunity[] {
+    if (!Array.isArray(value)) {
+        return [];
+    }
+
+    return value
+        .map(normalizeMerklOpportunity)
+        .filter((opportunity): opportunity is MerklOpportunity => opportunity != null);
+}
+
 export async function fetchMerklUserRewards({
     wallet,
     chainId,
@@ -385,10 +492,5 @@ export async function fetchMerklOpportunities({
         throw new Error('Failed to fetch Merkl opportunities');
     }
 
-    const body = await response.json();
-    if (!Array.isArray(body)) {
-        return [];
-    }
-
-    return body as MerklOpportunity[];
+    return normalizeMerklOpportunities(await response.json());
 }

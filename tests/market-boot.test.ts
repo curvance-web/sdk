@@ -16,6 +16,10 @@ const TOKEN_C = "0x00000000000000000000000000000000000000c3";
 const originalFetchNativeYields = Api.fetchNativeYields;
 const originalFetchMerklOpportunities = merklModule.fetchMerklOpportunities;
 
+function assertDecimalString(actual: Decimal | undefined, expected: string, message: string) {
+    assert.equal(actual?.toString(), expected, message);
+}
+
 function createStaticMarket(marketAddress: string, tokenAddress: string) {
     return {
         address: marketAddress as any,
@@ -417,8 +421,8 @@ test("Market.getAll forwards chainId to Merkl and aggregates duplicate opportuni
         { action: "LEND", chainId: 143 },
         { action: "BORROW", chainId: 143 },
     ]);
-    assert.ok(token.incentiveSupplyApy.eq(new Decimal(0.46)));
-    assert.ok(token.incentiveBorrowApy.eq(new Decimal(0.12)));
+    assertDecimalString(token.incentiveSupplyApy, "0.46", "boot should attach summed supply incentive APY");
+    assertDecimalString(token.incentiveBorrowApy, "0.12", "boot should attach summed borrow incentive APY");
 });
 
 test("Market.hypotheticalLiquidityOf routes through ProtocolReader with the market address", async () => {

@@ -49,6 +49,24 @@ test("test:transport includes every deterministic test file", () => {
     assert.deepEqual(missing, []);
 });
 
+test("test:fork includes every env-backed fork test file", () => {
+    const packageJson = JSON.parse(readRepoFile("package.json"));
+    const forkScript = packageJson.scripts["test:fork"] as string;
+    const expectedForkTests = [
+        "fork-integration.ts",
+        "basic.test.ts",
+        "arb-basic.test.ts",
+        "optimizer.test.ts",
+        "leverage.test.ts",
+        "zap.test.ts",
+    ];
+
+    const missing = expectedForkTests
+        .filter((file) => !forkScript.includes(`tests/${file}`));
+
+    assert.deepEqual(missing, []);
+});
+
 test("package lifecycle rebuilds dist before pack and publish", () => {
     const packageJson = JSON.parse(readRepoFile("package.json"));
 

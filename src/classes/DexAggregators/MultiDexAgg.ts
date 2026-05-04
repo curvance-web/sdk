@@ -141,7 +141,7 @@ export class MultiDexAgg implements IDexAgg {
             tokenOut,
             amount,
             slippage,
-            (quote) => quote.out,
+            (quote) => quote.min_out,
             feeBps,
             feeReceiver,
         );

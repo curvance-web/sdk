@@ -282,6 +282,27 @@ test("reloadUserMarkets batches addresses and applies responses by address", asy
     assert.equal(marketB.account, ACCOUNT);
 });
 
+test("reloadMarketData matches dynamic rows by normalized market address", async () => {
+    const market = Object.create(Market.prototype) as Market;
+    const upperMarket = MARKET_A.toUpperCase() as any;
+    const applied: string[] = [];
+
+    market.address = MARKET_A as any;
+    market.reader = {
+        getDynamicMarketData: async () => [
+            { address: MARKET_B, tokens: [] },
+            { address: upperMarket, tokens: [] },
+        ],
+    } as any;
+    market.applyState = ((dynamic: { address: string }) => {
+        applied.push(dynamic.address);
+    }) as any;
+
+    await market.reloadMarketData();
+
+    assert.deepEqual(applied, [upperMarket]);
+});
+
 test("cached market health and credit getters fail closed on oracle error state", () => {
     const { market } = createUserRefreshMarket();
 

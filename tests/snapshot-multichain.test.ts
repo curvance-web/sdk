@@ -493,6 +493,52 @@ test("takePortfolioSnapshot rejects full caches bound to a different account unl
     );
 });
 
+test("takePortfolioSnapshot preflights full-cache accounts before promoting summary markets", async () => {
+    let scope: "summary" | "full" = "summary";
+    let reloads = 0;
+
+    const summaryMarket = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Summary Market",
+        chain: "monad-mainnet",
+        reader: {
+            batchKey: "monad-mainnet:summary-preflight-reader",
+            getMarketStates: async () => {
+                reloads += 1;
+                return {
+                    dynamicMarkets: [createRefreshDynamicMarket(MARKET_A, summaryMarket.tokens[0]!.address)],
+                    userMarkets: [createRefreshUserMarket(MARKET_A, summaryMarket.tokens[0]!.address)],
+                };
+            },
+        },
+        applyState: () => {
+            scope = "full";
+        },
+    });
+    Object.defineProperty(summaryMarket, "userDataScope", {
+        get: () => scope,
+        configurable: true,
+    });
+
+    const wrongAccountMarket = createSnapshotMarket({
+        address: MARKET_B,
+        name: "Wrong Account Market",
+        chain: "monad-mainnet",
+        account: OTHER_ACCOUNT,
+    });
+
+    await assert.rejects(
+        () => takePortfolioSnapshot(ACCOUNT as any, {
+            markets: [summaryMarket, wrongAccountMarket],
+        }),
+        /cache is bound to 0x00000000000000000000000000000000000000bb/i,
+    );
+
+    assert.equal(reloads, 0);
+    assert.equal(scope, "summary");
+    assert.equal(summaryMarket.account, ACCOUNT);
+});
+
 test("takePortfolioSnapshot promotes summary-scoped markets back to full user data", async () => {
     let scope: "summary" | "full" = "summary";
     let reloads = 0;

@@ -199,6 +199,12 @@ export async function takePortfolioSnapshot(
             market.bindRefreshedAccount(account);
         }
     } else {
+        for (const market of markets) {
+            if (market.userDataScope !== "summary") {
+                assertSnapshotAccount(market, account);
+            }
+        }
+
         const summaryScopedMarkets = markets.filter((market) => market.userDataScope === "summary");
         if (summaryScopedMarkets.length > 0) {
             await Market.reloadUserMarkets(summaryScopedMarkets, account);

@@ -185,12 +185,25 @@ interface ResolveLeverageUpPreviewParams {
     borrow: BorrowableCToken;
     depositAssets?: bigint;
     positionManagerType?: PositionManagerTypes | undefined;
+    leverageState?: LeverageStateOverride | undefined;
+}
+
+interface LeverageStateOverride {
+    collateralUsd: bigint;
+    debtUsd: bigint;
 }
 
 interface TokenApprovalTarget {
     token: ERC20;
     spender: address;
     spenderLabel: string;
+}
+
+interface ZapBuildResult {
+    calldata: bytes;
+    calldata_overrides: { [key: string]: any };
+    zapper: Zapper | null;
+    expectedShares?: bigint | undefined;
 }
 
 export interface TokenOracle {
@@ -547,9 +560,13 @@ export class CToken extends Calldata<ICToken> {
         return bufferBps > 0n ? shares * (10000n - bufferBps) / 10000n : shares;
     }
 
-    private getMarketLeverageState() {
-        const currentCollateralInUsd = this.market.userCollateral;
-        const currentDebt = this.market.userDebt;
+    private getMarketLeverageState(leverageState?: LeverageStateOverride) {
+        const currentCollateralInUsd = leverageState?.collateralUsd != null
+            ? toDecimal(leverageState.collateralUsd, 18n)
+            : this.market.userCollateral;
+        const currentDebt = leverageState?.debtUsd != null
+            ? toDecimal(leverageState.debtUsd, 18n)
+            : this.market.userDebt;
         const equity = currentCollateralInUsd.sub(currentDebt);
 
         if (currentCollateralInUsd.lte(0) || equity.lte(0)) {
@@ -1102,7 +1119,8 @@ export class CToken extends Calldata<ICToken> {
 
     async transfer(receiver: address, amount: TokenInput) {
         const shares = this.convertTokenInputToShares(amount);
-        return this.getWriteContract().transfer(receiver, shares);
+        const calldata = this.getCallData("transfer", [receiver, shares]);
+        return this.oracleRoute(calldata);
     }
 
     async redeemCollateral(amount: Decimal, receiver: address | null = null, owner: address | null = null) {
@@ -1142,6 +1160,7 @@ export class CToken extends Calldata<ICToken> {
         if(max_shares <= 0n) {
             throw new Error("No cToken shares available to post as collateral.");
         }
+        this.assertCollateralCapacity(max_shares);
 
         const calldata = this.getCallData("postCollateral", [max_shares]);
         const tx = await this.oracleRoute(calldata);
@@ -1150,6 +1169,31 @@ export class CToken extends Calldata<ICToken> {
         await this.fetchUserCollateral();
 
         return tx;
+    }
+
+    private assertCollateralCapacity(shares?: bigint) {
+        const collateralCapError = "There is not enough collateral left in this tokens collateral cap for this deposit.";
+        const remainingCollateral = this.getRemainingCollateral(false);
+        if(remainingCollateral <= 0n) throw new Error(collateralCapError);
+        if(shares != undefined && shares > remainingCollateral) {
+            throw new Error(collateralCapError);
+        }
+    }
+
+    private getZapperExpectedShares(zapper: Zapper | null, calldata: bytes): bigint | undefined {
+        if(zapper == null) return undefined;
+
+        let expectedShares: bigint;
+        try {
+            const decoded = zapper.contract.interface.decodeFunctionData("swapAndDeposit", calldata);
+            expectedShares = BigInt(decoded[3]);
+        } catch {
+            return undefined;
+        }
+        if(expectedShares <= 0n) {
+            throw new Error("Zap expected shares must be greater than zero.");
+        }
+        return expectedShares;
     }
 
     async getZapBalance(zap: ZapperInstructions): Promise<bigint> {
@@ -1437,8 +1481,9 @@ export class CToken extends Calldata<ICToken> {
      * Single-RPC snapshot of fresh position state for leverage operations.
      * Calls ProtocolReader.getLeverageSnapshot which internally uses
      * hypotheticalLiquidityOf for aggregate position + fresh oracle prices
-     * + projected debt balance. Updates the local cache so downstream
-     * preview computations (previewLeverageUp/Down) read fresh values.
+     * + projected debt balance. Updates only token price/share caches; leverage
+     * previews consume the returned aggregate values explicitly so failed or
+     * simulated plans cannot leave market user totals ahead of token user rows.
      *
      * Returns the snapshot for direct use where needed (e.g. debtTokenBalance
      * for full deleverage swap sizing).
@@ -1452,12 +1497,9 @@ export class CToken extends Calldata<ICToken> {
             throw new Error(`Oracle error fetching leverage snapshot for ${this.symbol}/${borrow.symbol}`);
         }
 
-        // Update cache so preview functions read fresh values
         this.cache.assetPrice = snapshot.collateralAssetPrice;
         this.cache.sharePrice = snapshot.sharePrice;
         borrow.cache.assetPrice = snapshot.debtAssetPrice;
-        this.market.cache.user.collateral = snapshot.collateralUsd;
-        this.market.cache.user.debt = snapshot.debtUsd;
 
         return snapshot;
     }
@@ -1556,15 +1598,16 @@ export class CToken extends Calldata<ICToken> {
         borrow,
         depositAssets = 0n,
         positionManagerType,
+        leverageState,
     }: ResolveLeverageUpPreviewParams): LeverageUpPreview {
-        const leverageState = this.getMarketLeverageState();
-        const currentLeverage = leverageState.currentLeverage ?? Decimal(1);
-        const currentCollateralInUsd = leverageState.currentCollateralInUsd;
+        const currentState = this.getMarketLeverageState(leverageState);
+        const currentLeverage = currentState.currentLeverage ?? Decimal(1);
+        const currentCollateralInUsd = currentState.currentCollateralInUsd;
         const depositInAssets = FormatConverter.bigIntToDecimal(depositAssets, this.asset.decimals);
         const depositInUsd = depositAssets > 0n
             ? this.convertTokensToUsd(depositAssets, true)
             : Decimal(0);
-        const currentDebt = leverageState.currentDebt;
+        const currentDebt = currentState.currentDebt;
         const effectiveCurrentLeverage = depositAssets > 0n
             ? this.computePostDepositNaturalLeverage(currentCollateralInUsd, currentDebt, depositInUsd)
             : currentLeverage;
@@ -1642,6 +1685,7 @@ export class CToken extends Calldata<ICToken> {
         borrow: BorrowableCToken,
         depositAmount: bigint,
         positionManagerType?: PositionManagerTypes,
+        leverageState?: LeverageStateOverride,
     ) {
         return this.resolveLeverageUpPreview({
             operation: 'deposit-and-leverage',
@@ -1649,6 +1693,7 @@ export class CToken extends Calldata<ICToken> {
             borrow,
             depositAssets: depositAmount,
             positionManagerType,
+            leverageState,
         });
     }
 
@@ -1657,9 +1702,10 @@ export class CToken extends Calldata<ICToken> {
         borrow: BorrowableCToken,
         depositAmount?: bigint,
         positionManagerType?: PositionManagerTypes,
+        leverageState?: LeverageStateOverride,
     ) {
         if ((depositAmount ?? 0n) > 0n) {
-            return this.previewDepositAndLeverage(newLeverage, borrow, depositAmount!, positionManagerType);
+            return this.previewDepositAndLeverage(newLeverage, borrow, depositAmount!, positionManagerType, leverageState);
         }
 
         return this.resolveLeverageUpPreview({
@@ -1667,10 +1713,16 @@ export class CToken extends Calldata<ICToken> {
             targetLeverage: newLeverage,
             borrow,
             positionManagerType,
+            leverageState,
         });
     }
 
-    previewLeverageDown(newLeverage: Decimal, currentLeverage: Decimal, borrow?: BorrowableCToken) {
+    previewLeverageDown(
+        newLeverage: Decimal,
+        currentLeverage: Decimal,
+        borrow?: BorrowableCToken,
+        leverageState?: LeverageStateOverride,
+    ) {
         if(newLeverage.gte(currentLeverage)) {
             throw new Error("New leverage must be less than current leverage");
         }
@@ -1680,9 +1732,9 @@ export class CToken extends Calldata<ICToken> {
         }
 
 
-        const leverageState = this.getMarketLeverageState();
-        const collateralInUsd = leverageState.currentCollateralInUsd;
-        const currentDebt = leverageState.currentDebt;
+        const currentState = this.getMarketLeverageState(leverageState);
+        const collateralInUsd = currentState.currentCollateralInUsd;
+        const currentDebt = currentState.currentDebt;
         const equity = collateralInUsd.sub(currentDebt);
         if (equity.lte(0)) {
             throw new Error("Position has no positive equity to deleverage.");
@@ -1745,8 +1797,8 @@ export class CToken extends Calldata<ICToken> {
             }
 
             let calldata: bytes;
-            await this._getLeverageSnapshot(borrow);
-            const preview = this.previewLeverageUp(newLeverage, borrow, undefined, type);
+            const snapshot = await this._getLeverageSnapshot(borrow);
+            const preview = this.previewLeverageUp(newLeverage, borrow, undefined, type, snapshot);
             const slippage = this._leverageUpSlippage(
                 FormatConverter.percentageToBps(slippage_),
                 preview.targetLeverage,
@@ -1874,7 +1926,7 @@ export class CToken extends Calldata<ICToken> {
             let calldata: bytes;
 
             const snapshot = await this._getLeverageSnapshot(borrowToken);
-            const preview = this.previewLeverageDown(newLeverage, currentLeverage);
+            const preview = this.previewLeverageDown(newLeverage, currentLeverage, undefined, snapshot);
             const { collateralAssetReduction } = preview;
             const isFullDeleverage = newLeverage.equals(1);
             const maxTokenCollateral = this.virtualConvertToAssets(
@@ -2058,9 +2110,13 @@ export class CToken extends Calldata<ICToken> {
             let calldata: bytes;
 
             const depositAssets = FormatConverter.decimalToBigInt(depositAmount, this.asset.decimals);
+            if(depositAssets <= 0n) {
+                if (simulate) return { success: false, error: "Deposit amount must be greater than zero." };
+                throw new Error("Deposit amount must be greater than zero.");
+            }
             await this._checkTokenApproval(this.getPositionManagerDepositApprovalTarget(manager), depositAssets);
-            await this._getLeverageSnapshot(borrow);
-            const preview = this.previewDepositAndLeverage(multiplier, borrow, depositAssets, type);
+            const snapshot = await this._getLeverageSnapshot(borrow);
+            const preview = this.previewDepositAndLeverage(multiplier, borrow, depositAssets, type, snapshot);
             if (preview.borrowAssets === 0n) {
                 if (simulate) {
                     return {
@@ -2172,6 +2228,9 @@ export class CToken extends Calldata<ICToken> {
 
             const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
             const zapAssets = await this.getZapAssetAmount(amount, zap);
+            if(zapAssets <= 0n) {
+                throw new Error("Deposit amount must be greater than zero.");
+            }
 
             const default_calldata = this.getCallData("deposit", [depositAssets, receiver]);
             const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, false, default_calldata, receiver);
@@ -2194,12 +2253,21 @@ export class CToken extends Calldata<ICToken> {
 
             const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
             const zapAssets = await this.getZapAssetAmount(amount, zap);
+            if(zapAssets <= 0n) {
+                throw new Error("Deposit amount must be greater than zero.");
+            }
+            const depositShares = this.isZapInstruction(zap) ? undefined : this.virtualConvertToShares(depositAssets);
+            this.assertCollateralCapacity(depositShares);
 
             const collateralMethod = receiver.toLowerCase() === signer.address.toLowerCase()
                 ? "depositAsCollateral"
                 : "depositAsCollateralFor";
             const default_calldata = this.getCallData(collateralMethod, [depositAssets, receiver]);
-            const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, true, default_calldata, receiver);
+            const { calldata, calldata_overrides, expectedShares } = await this.zap(zapAssets, zap, true, default_calldata, receiver);
+            if(expectedShares !== undefined && expectedShares <= 0n) {
+                throw new Error("Zap expected shares must be greater than zero.");
+            }
+            this.assertCollateralCapacity(expectedShares ?? depositShares);
 
             return this.simulateOracleRoute(calldata, calldata_overrides);
         } catch (error: any) {
@@ -2207,7 +2275,7 @@ export class CToken extends Calldata<ICToken> {
         }
     }
 
-    async zap(assets: bigint, zap: ZapperInstructions, collateralize = false, default_calldata : bytes, receiver: address = this.requireSigner().address as address) {
+    async zap(assets: bigint, zap: ZapperInstructions, collateralize = false, default_calldata : bytes, receiver: address = this.requireSigner().address as address): Promise<ZapBuildResult> {
         let calldata: bytes;
         let calldata_overrides = {};
         let slippage: bigint = 0n;
@@ -2255,7 +2323,12 @@ export class CToken extends Calldata<ICToken> {
                 throw new Error("This zap type is not supported: " + type_of_zap);
         }
 
-        return { calldata, calldata_overrides, zapper };
+        return {
+            calldata,
+            calldata_overrides,
+            zapper,
+            expectedShares: this.getZapperExpectedShares(zapper, calldata),
+        };
     }
 
     async deposit(amount: TokenInput, zap: ZapperInstructions = 'none', receiver: address | null = null) {
@@ -2264,6 +2337,9 @@ export class CToken extends Calldata<ICToken> {
         receiver ??= signer.address as address;
         const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
         const zapAssets = await this.getZapAssetAmount(amount, zap);
+        if(zapAssets <= 0n) {
+            throw new Error("Deposit amount must be greater than zero.");
+        }
         await this._checkDepositApprovals(zap, depositAssets, zapAssets);
 
         const default_calldata = this.getCallData("deposit", [depositAssets, receiver]);
@@ -2278,18 +2354,12 @@ export class CToken extends Calldata<ICToken> {
         receiver ??= signer.address as address;
         const depositAssets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
         const zapAssets = await this.getZapAssetAmount(amount, zap);
-
-        if (!this.isZapInstruction(zap)) {
-            const collateralCapError = "There is not enough collateral left in this tokens collateral cap for this deposit.";
-            const remainingCollateral = this.getRemainingCollateral(false);
-            if(remainingCollateral <= 0n) throw new Error(collateralCapError);
-            if(remainingCollateral > 0n) {
-                const shares = this.virtualConvertToShares(depositAssets);
-                if(shares > remainingCollateral) {
-                    throw new Error(collateralCapError);
-                }
-            }
+        if(zapAssets <= 0n) {
+            throw new Error("Deposit amount must be greater than zero.");
         }
+
+        const depositShares = this.isZapInstruction(zap) ? undefined : this.virtualConvertToShares(depositAssets);
+        this.assertCollateralCapacity(depositShares);
 
         await this._checkDepositApprovals(zap, depositAssets, zapAssets, true, receiver);
 
@@ -2297,7 +2367,12 @@ export class CToken extends Calldata<ICToken> {
             ? "depositAsCollateral"
             : "depositAsCollateralFor";
         const default_calldata = this.getCallData(collateralMethod, [depositAssets, receiver]);
-        const { calldata, calldata_overrides } = await this.zap(zapAssets, zap, true, default_calldata, receiver);
+        const { calldata, calldata_overrides, expectedShares } = await this.zap(zapAssets, zap, true, default_calldata, receiver);
+        if(expectedShares !== undefined && expectedShares <= 0n) {
+            throw new Error("Zap expected shares must be greater than zero.");
+        }
+        this.assertCollateralCapacity(expectedShares ?? depositShares);
+
         return this.oracleRoute(calldata, calldata_overrides, receiver);
     }
 
@@ -2305,16 +2380,22 @@ export class CToken extends Calldata<ICToken> {
         const signer   = this.requireSigner();
         const receiver = signer.address as address;
         const owner    = signer.address as address;
+        const converted_shares = this.convertTokenInputToShares(amount);
+        if(converted_shares <= 0n) {
+            throw new Error("Redeem amount must be greater than zero.");
+        }
 
         const buffer = this.getExecutionDebtBufferTime();
         const balance_avail = await this.balanceOf(signer.address as address);
         const max_shares = await this.maxRedemption(true, buffer);
-        const converted_shares = this.convertTokenInputToShares(amount);
 
         const maxExecutableShares = max_shares < balance_avail ? max_shares : balance_avail;
         let shares = maxExecutableShares < converted_shares ? maxExecutableShares : converted_shares;
         if(maxExecutableShares === balance_avail && balance_avail - shares <= 10n) {
             shares = balance_avail;
+        }
+        if(shares <= 0n) {
+            throw new Error("No redeemable cToken shares available.");
         }
 
         const calldata = this.getCallData("redeem", [shares, receiver, owner]);
@@ -2322,6 +2403,9 @@ export class CToken extends Calldata<ICToken> {
     }
 
     async redeemShares(amount: bigint) {
+        if(amount <= 0n) {
+            throw new Error("Redeem amount must be greater than zero.");
+        }
         const signer = this.requireSigner();
         const receiver = signer.address as address;
         const owner = signer.address as address;
@@ -2601,10 +2685,11 @@ export class CToken extends Calldata<ICToken> {
         if (typeof tx.wait === "function") {
             await tx.wait();
         }
-        const refreshAccount = reloadAccount ?? signer.address as address;
-        await this.market.reloadUserData(refreshAccount, {
-            allowSignerMismatch: refreshAccount.toLowerCase() !== signer.address.toLowerCase(),
-        });
+        const signerAddress = signer.address as address;
+        const refreshAccount = reloadAccount?.toLowerCase() === signerAddress.toLowerCase()
+            ? reloadAccount
+            : signerAddress;
+        await this.market.reloadUserData(refreshAccount);
 
         return tx;
     }

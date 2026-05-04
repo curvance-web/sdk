@@ -69,7 +69,7 @@ setupChain(
 for (const market of markets) {
     console.log(`${market.name} | deposits: ${market.totalDeposits} | debt: ${market.totalDebt}`);
     for (const token of market.tokens) {
-        console.log(`  ${token.symbol} | price: ${token.getPrice()} | apy: ${token.getApy(true)}%`);
+        console.log(`  ${token.symbol} | price: ${token.getPrice(true)} | apy: ${token.getApy(true)}%`);
     }
 }
 ```
@@ -166,8 +166,8 @@ token.mintPaused
 ### Prices & conversions
 
 ```ts
-token.getPrice()                         // asset price (USD, Decimal)
-token.getPrice(true)                     // share price
+token.getPrice()                         // share price (USD, Decimal)
+token.getPrice(true)                     // asset price
 token.convertTokensToUsd(amount)         // TokenInput → USD
 token.convertUsdToTokens(usd)            // USD → TokenInput
 token.convertTokenInputToShares(amount)  // user input → shares
@@ -313,22 +313,24 @@ Zap deposits allow depositing any token by swapping to the required underlying v
 ```ts
 // Native token (MON) → deposit
 await token.approvePlugin('native-simple', 'zapper')
-await zapper.nativeZap(ctoken, amount, collateralize)
+await token.depositAsCollateral(amount, 'native-simple')
 
 // Any ERC20 → swap → deposit
 await token.approvePlugin('simple', 'zapper')
-await token.approveUnderlying(amount)
-await token.depositAsCollateral(amount, {
+const simpleZap = {
     type: 'simple',
     inputToken: inputTokenAddress,
     slippage: new Decimal(0.01)   // 1%
-})
+} as const
+await token.approveZapAsset(simpleZap, amount)
+await token.depositAsCollateral(amount, simpleZap)
 ```
 
 Check approval status for a zap before executing:
 
 ```ts
-const approved = await token.isZapAssetApproved(instructions, amount)
+const rawZapAmount = toBigInt(amount, inputTokenDecimals)
+const approved = await token.isZapAssetApproved(instructions, rawZapAmount)
 if (!approved) await token.approveZapAsset(instructions, amount)
 ```
 
@@ -338,11 +340,14 @@ Leverage uses the PositionManager plugin to atomically borrow and swap into the 
 
 ```ts
 // One-step: deposit collateral + leverage
-await collateralToken.approveUnderlying(amount)
-await collateralToken.approvePlugin('simple', 'positionManager')
+const positionManager = collateralToken.getPluginAddress('simple', 'positionManager')
+if (positionManager == null) throw new Error("Simple position manager is not configured")
+
+await collateralToken.approveUnderlying(amount, positionManager)
 await collateralToken.depositAndLeverage(amount, borrowToken, targetLeverage, 'simple', slippage)
 
 // Separate: deposit first, then leverage
+await collateralToken.approveUnderlying(amount)
 await collateralToken.depositAsCollateral(amount)
 await collateralToken.leverageUp(borrowToken, new Decimal(3), 'simple', new Decimal(0.005))
 
@@ -371,7 +376,7 @@ await market.previewPositionHealthDeposit(ctoken, amount)
 await market.previewPositionHealthRedeem(ctoken, amount)
 await market.previewPositionHealthBorrow(borrowToken, amount)
 await market.previewPositionHealthRepay(borrowToken, amount)
-await market.previewPositionHealthLeverageUp(depositCToken, depositAmount, borrowCToken, borrowAmount)
+await market.previewPositionHealthLeverageUp(depositCToken, borrowCToken, newLeverage, depositAmount)
 await market.previewPositionHealthLeverageDown(depositCToken, borrowCToken, newLeverage, currentLeverage)
 
 // Generic preview
@@ -402,7 +407,10 @@ await market.multiHoldExpiresAt(markets) // cooldown across multiple markets
 
 ## ❯ Format Utilities
 
-Pure calculation helpers for building UI or simulating outcomes. All accept and return `Decimal`.
+Pure calculation helpers for building UI or simulating outcomes. Amount and
+leverage helpers primarily use `Decimal`; validation, health-status, slippage,
+and normalization helpers also expose `number`, `bigint`, string, and structured
+result types where those are the safer UI boundary.
 
 ### Leverage math
 
@@ -431,13 +439,13 @@ import { amplifyContractSlippage, toContractSwapSlippage } from "curvance"
 // user's raw `slippage` budget (reserved for variable DEX impact + drift).
 amplifyContractSlippage(baseSlippageBps, leverageDelta, bpsToAmplify)
 
-// Used by DEX aggregator adapters (KyberSwap etc.) in `quoteAction` to
+// Used by DEX aggregator adapters (KyberSwap, Kuru, etc.) in `quoteAction` to
 // compute the WAD-BPS slippage tolerance for the `Swap.slippage` struct
-// field consumed by on-chain `_swapSafe`. When the aggregator pre-deducts
-// a currency_in fee, the expansion absorbs that fee so `_swapSafe` doesn't
-// double-count it as swap slippage. Adapters whose fee model does NOT
-// pre-deduct (e.g., out-of-band referrer paid from output) should call
-// with `feeBps` omitted / 0n so no expansion applies.
+// field consumed by on-chain `_swapSafe`. When an adapter's fee model is
+// represented as value loss in the swap calldata (for example Kyber's
+// currency_in fee or Kuru's referrer-fee path), pass `feeBps` so `_swapSafe`
+// does not treat deterministic fee loss as user slippage. Adapters whose
+// fees are not observable as swap value loss should omit `feeBps` / pass 0n.
 toContractSwapSlippage(userSlippageBps, feeBps?)
 ```
 
@@ -491,7 +499,6 @@ amounts.normalizeCurrencyAmounts({ amount, currencyView, tokenDecimals, price })
 import {
     getContractAddresses,
     contractSetup,
-    handleTransactionWithOracles,
     toDecimal, toBigInt,
     getDepositApy, getBorrowCost,
     getInterestYield, getNativeYield,
@@ -507,7 +514,6 @@ import {
 |---|---|
 | `getContractAddresses(chain)` | All contract addresses for a chain |
 | `contractSetup(provider, address, abi)` | Create a typed contract instance |
-| `handleTransactionWithOracles(...)` | Wraps a tx in a Redstone multicall when a pull oracle price write is required |
 | `toDecimal(value, decimals)` | `bigint` → `Decimal` |
 | `toBigInt(value, decimals)` | `Decimal` → `bigint` |
 | `getDepositApy(token, opportunities, apyOverrides)` | Total deposit yield (interest + Merkl + native) |
@@ -594,18 +600,18 @@ The `OptimizerReader` reads yield-rebalancing vaults that allocate across market
 ```ts
 import { ERC20, LendingOptimizer, OptimizerReader } from "curvance"
 
-const optimizer = new OptimizerReader(optimizerReaderAddress, provider)
+const optimizerReader = new OptimizerReader(optimizerReaderAddress, provider)
 
-await optimizer.getOptimizerAPY(optimizerAddress)
+await optimizerReader.getOptimizerAPY(optimizerAddress)
 // Returns: weighted-average optimizer APY in WAD
 
-await optimizer.getOptimizerMarketData(optimizerAddresses)
+await optimizerReader.getOptimizerMarketData(optimizerAddresses)
 // Returns: { totalAssets, sharePrice, performanceFee, apy, markets[] }
 
-await optimizer.getOptimizerUserData(optimizerAddresses, account)
+await optimizerReader.getOptimizerUserData(optimizerAddresses, account)
 // Returns: user balance and redeemable amounts
 
-await optimizer.optimalRebalance(optimizer, 100n)
+await optimizerReader.optimalRebalance(optimizerAddress, 100n)
 // Returns: { actions: { cToken, assetsOrBps }[], bounds: { cToken, minBps, maxBps }[] }
 
 const asset = new ERC20(provider, assetAddress, undefined, undefined, signer)
@@ -684,7 +690,7 @@ LEVERAGE.LEVERAGE_UP_BUFFER_BPS       // 10n
 // Redstone price drift between snapshot RPC and tx broadcast. NOT amplified
 // by (L-1); the contract's equity-fraction denominator handles amplification.
 
-LEVERAGE.DELEVERAGE_OVERHEAD_BPS      // 20n
+LEVERAGE.DELEVERAGE_OVERHEAD_BPS      // 60n
 // BPS overhead added to full-deleverage swap sizing to absorb DEX impact
 // and oracle drift without leaving dust debt. The contract returns any
 // excess debt token to the user, so economic loss is zero — but
@@ -716,15 +722,26 @@ LEVERAGE.LEVERAGE_UP_VAULT_DRIFT_BPS  // 30n
 
 ## ❯ Pre-Publish Checklist
 
-Run before every `npm publish` that touches `src/chains/`, `src/setup.ts`,
-`src/retry-provider.ts`, or any RPC-adjacent code:
+Run before every `npm publish`:
 
-1. **Unit tests green.** `npm test` — must show all `test:transport` tests
+1. **Deterministic transport gate green.** `npm run test:transport` must pass,
+   or `npm test` must show all `test:transport` tests
    passing. `tests/rpc-config-shape.test.ts` locks the structural invariants
    of `chain_rpc_config` (no known-bad RPCs, no duplicate fallbacks, policy
    fields within sane ranges).
 
-2. **Live RPC probe against both app origins.** In the app repo:
+2. **Fork gate green or explicitly skipped with reason.** `npm run test:fork`
+   must pass when fork env is available. If it skips, record which env/artifact
+   blocker caused the skip before treating the release as covered.
+
+3. **Package artifact smoke green.** `npm run test:dist-smoke` must pass after
+   the fork gate. Package consumers load `dist`, so `npm run build` alone is not
+   enough package-boundary proof.
+
+4. **Build green.** `npm run build` must pass.
+
+5. **Live RPC probe against both app origins for RPC-adjacent changes.** In the
+   app repo:
 
    ```bash
    cd path/to/curvance-app

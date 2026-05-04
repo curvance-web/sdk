@@ -54,13 +54,13 @@ export class Zapper extends Calldata<IZapper> {
     async nativeZap(ctoken: CToken, amount: bigint, collateralize: boolean, receiver: address = this.signer.address as address) {
         const wrapped = this.type === 'native-simple' || ctoken.isWrappedNative;
         const calldata = await this.getNativeZapCalldata(ctoken, amount, collateralize, wrapped, receiver);
-        return this.executeCallData(calldata, { value: amount });
+        return ctoken.oracleRoute(calldata, { value: amount, to: this.address }, receiver);
     }
 
     async simpleZap(ctoken: CToken, inputToken: address, outputToken: address,  amount: bigint, collateralize: boolean, slippage: bigint, receiver: address = this.signer.address as address) {
         const calldata = await this.getSimpleZapCalldata(ctoken, inputToken, outputToken, amount, collateralize, slippage, receiver);
         const isNative = inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
-        return this.executeCallData(calldata, isNative ? { value: amount } : {});
+        return ctoken.oracleRoute(calldata, isNative ? { value: amount, to: this.address } : { to: this.address }, receiver);
     }
 
     async getSimpleZapCalldata(ctoken: CToken, inputToken: address, outputToken: address, amount: bigint, collateralize: boolean, slippage: bigint, receiver: address = this.signer.address as address) {

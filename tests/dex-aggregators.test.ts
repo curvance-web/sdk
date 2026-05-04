@@ -24,8 +24,8 @@ import type { IDexAgg, Quote, QuoteArgs, SetupChainResult } from "../src";
 // That expansion belongs INSIDE the DEX aggregator so every caller of
 // `quoteAction` inherits correct behavior automatically. Without it, any new
 // call site that forgets the post-override causes on-chain reverts with no
-// client-side signal. Kuru's fee semantics differ (Kuru takes a referrer-style
-// fee) so Kuru.quoteAction intentionally keeps raw slippage.
+// client-side signal. Kuru routes fees through its referrer-fee fields, but
+// the resulting swap action still needs the same `_swapSafe` fee absorption.
 
 const TOKEN_IN = "0x0000000000000000000000000000000000000001" as address;
 const TOKEN_OUT = "0x0000000000000000000000000000000000000002" as address;
@@ -36,11 +36,16 @@ const MONAD_WMON = "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A" as address;
 const MONAD_USDC = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603" as address;
 const DECIMALS_SELECTOR = "0x313ce567";
 const KYBER_SWAP_SELECTOR = "0xe21fd0e9";
+const KURU_EXECUTE_SWAP_SELECTOR = "0x2a45a6c3";
 const KYBER_SWAP_PARAMS_TYPE =
     "tuple(address callTarget,address approveTarget,bytes targetData," +
     "tuple(address srcToken,address dstToken,address[] srcReceivers,uint256[] srcAmounts," +
     "address[] feeReceivers,uint256[] feeAmounts,address dstReceiver,uint256 amount," +
     "uint256 minReturnAmount,uint256 flags,bytes permit) desc,bytes clientData)";
+const KURU_SWAP_INTENT_TYPE =
+    "tuple(address tokenUserBuys,uint256 minAmountUserBuys,address tokenUserSells,uint256 amountUserSells)";
+const KURU_FEE_COLLECTION_TYPE =
+    "tuple(address feeCollectorAddress,uint256 feeBps,address referrerAddress,uint256 referrerFeeBps,bool isInTokenFee)";
 
 test("IDexAgg quoteMin exposes primitive bigint", () => {
     const quoteMinShape = (agg: IDexAgg): Promise<bigint> =>
@@ -164,6 +169,41 @@ function encodeKyberSwapCalldata({
     return (KYBER_SWAP_SELECTOR + AbiCoder.defaultAbiCoder().encode([KYBER_SWAP_PARAMS_TYPE], [execution]).slice(2)) as bytes;
 }
 
+function encodeKuruSwapCalldata({
+    tokenUserBuys = TOKEN_OUT,
+    minAmountUserBuys = 995n,
+    tokenUserSells = TOKEN_IN,
+    amountUserSells = 1_000n,
+    feeCollectorAddress = WALLET,
+    feeBps = 0n,
+    referrerAddress = FEE_RECEIVER,
+    referrerFeeBps = 4n,
+    isInTokenFee = false,
+    program = "0x1234",
+}: {
+    tokenUserBuys?: address;
+    minAmountUserBuys?: bigint;
+    tokenUserSells?: address;
+    amountUserSells?: bigint;
+    feeCollectorAddress?: address;
+    feeBps?: bigint;
+    referrerAddress?: address;
+    referrerFeeBps?: bigint;
+    isInTokenFee?: boolean;
+    program?: string;
+} = {}): bytes {
+    const encoded = AbiCoder.defaultAbiCoder().encode(
+        [KURU_SWAP_INTENT_TYPE, KURU_FEE_COLLECTION_TYPE, "bytes"],
+        [
+            [tokenUserBuys, minAmountUserBuys, tokenUserSells, amountUserSells],
+            [feeCollectorAddress, feeBps, referrerAddress, referrerFeeBps, isInTokenFee],
+            program,
+        ],
+    );
+
+    return (KURU_EXECUTE_SWAP_SELECTOR + encoded.slice(2)) as bytes;
+}
+
 function jsonResponse(body: unknown, ok = true): any {
     return {
         ok,
@@ -173,6 +213,18 @@ function jsonResponse(body: unknown, ok = true): any {
             return body;
         },
     };
+}
+
+async function withMockedKuruJWTFetch<T>(body: unknown, run: () => Promise<T>): Promise<T> {
+    const originalFetch = globalThis.fetch;
+
+    (globalThis as any).fetch = async () => jsonResponse(body);
+
+    try {
+        return await run();
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
 }
 
 async function withMockedKyberFetch<T>(kyber: KyberSwap, calldata: bytes, run: () => Promise<T>): Promise<T> {
@@ -228,6 +280,52 @@ async function withMockedKyberFetch<T>(kyber: KyberSwap, calldata: bytes, run: (
             },
             requestId: "build",
         });
+    };
+
+    try {
+        return await run();
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+}
+
+async function withMockedKuruFetch<T>(
+    kuru: Kuru,
+    calldata: bytes,
+    run: () => Promise<T>,
+    onQuoteRequest?: (body: any) => void,
+    quoteResponse?: unknown,
+): Promise<T> {
+    const originalFetch = globalThis.fetch;
+
+    (kuru as any).loadJWT = async () => {
+        (kuru as any).jwt = "test-jwt";
+    };
+    (kuru as any).rateLimitSleep = async () => undefined;
+
+    (globalThis as any).fetch = async (_url: string, init?: { body?: string }) => {
+        if (init?.body) {
+            onQuoteRequest?.(JSON.parse(init.body));
+        }
+
+        return jsonResponse(quoteResponse === undefined ? {
+            type: "MARKET",
+            status: "SUCCESS",
+            output: "1000",
+            minOut: "995",
+            transaction: {
+                calldata,
+                value: "0",
+                to: kuru.router,
+            },
+            gasPrices: {
+                slow: "1",
+                standard: "1",
+                fast: "1",
+                rapid: "1",
+                extreme: "1",
+            },
+        } : quoteResponse);
     };
 
     try {
@@ -333,10 +431,10 @@ test("KyberSwap.quoteAction rejects effective swap slippage at the contract ceil
     );
 });
 
-test("Kuru.quoteAction keeps action.slippage raw even when feeBps is active (regression guard)", async () => {
-    // Kuru's referrer-fee model takes fee via API parameter, not by pre-swap
-    // deduction. The on-chain swap path does not double-count the fee as
-    // slippage, so Kuru must not expand.
+test("Kuru.quoteAction expands action.slippage by feeBps when fees are active", async () => {
+    // Kuru's referrer-fee model is represented in the swap calldata, so
+    // _swapSafe can observe it as value loss. Keep Kuru aligned with the
+    // shared contract swap-slippage helper.
     const kuru = new Kuru();
     stubKuruQuote(kuru);
 
@@ -352,8 +450,8 @@ test("Kuru.quoteAction keeps action.slippage raw even when feeBps is active (reg
 
     assert.equal(
         action.slippage,
-        FormatConverter.bpsToBpsWad(50n),
-        "Kuru slippage must remain raw; expansion is a KyberSwap-specific concern",
+        FormatConverter.bpsToBpsWad(60n),
+        "Kuru action.slippage must cover user slippage + fee BPS",
     );
 });
 
@@ -396,6 +494,181 @@ test("Kuru.quoteMin returns the minimum output, not the optimistic output", asyn
     );
 
     assert.equal(minOut, 88n);
+});
+
+test("Kuru.loadJWT rejects malformed successful auth responses", async () => {
+    const cases: Array<{
+        name: string;
+        body: unknown;
+        pattern: RegExp;
+    }> = [
+        {
+            name: "non-object body",
+            body: null,
+            pattern: /Malformed Kuru JWT response: expected object/,
+        },
+        {
+            name: "missing token",
+            body: {
+                expires_at: Number.MAX_SAFE_INTEGER,
+                rate_limit: { rps: 1 },
+            },
+            pattern: /Malformed Kuru JWT response: missing token/,
+        },
+        {
+            name: "empty token",
+            body: {
+                token: "",
+                expires_at: Number.MAX_SAFE_INTEGER,
+                rate_limit: { rps: 1 },
+            },
+            pattern: /Malformed Kuru JWT response: missing token/,
+        },
+        {
+            name: "missing expires_at",
+            body: {
+                token: "test-jwt",
+                rate_limit: { rps: 1 },
+            },
+            pattern: /Malformed Kuru JWT response: missing expires_at/,
+        },
+        {
+            name: "non-finite expires_at",
+            body: {
+                token: "test-jwt",
+                expires_at: Number.POSITIVE_INFINITY,
+                rate_limit: { rps: 1 },
+            },
+            pattern: /Malformed Kuru JWT response: missing expires_at/,
+        },
+        {
+            name: "missing rate_limit",
+            body: {
+                token: "test-jwt",
+                expires_at: Number.MAX_SAFE_INTEGER,
+            },
+            pattern: /Malformed Kuru JWT response: missing rate_limit/,
+        },
+        {
+            name: "missing rps",
+            body: {
+                token: "test-jwt",
+                expires_at: Number.MAX_SAFE_INTEGER,
+                rate_limit: {},
+            },
+            pattern: /Malformed Kuru JWT response: invalid rate_limit\.rps/,
+        },
+        {
+            name: "zero rps",
+            body: {
+                token: "test-jwt",
+                expires_at: Number.MAX_SAFE_INTEGER,
+                rate_limit: { rps: 0 },
+            },
+            pattern: /Malformed Kuru JWT response: invalid rate_limit\.rps/,
+        },
+        {
+            name: "negative rps",
+            body: {
+                token: "test-jwt",
+                expires_at: Number.MAX_SAFE_INTEGER,
+                rate_limit: { rps: -1 },
+            },
+            pattern: /Malformed Kuru JWT response: invalid rate_limit\.rps/,
+        },
+        {
+            name: "NaN rps",
+            body: {
+                token: "test-jwt",
+                expires_at: Number.MAX_SAFE_INTEGER,
+                rate_limit: { rps: Number.NaN },
+            },
+            pattern: /Malformed Kuru JWT response: invalid rate_limit\.rps/,
+        },
+        {
+            name: "infinite rps",
+            body: {
+                token: "test-jwt",
+                expires_at: Number.MAX_SAFE_INTEGER,
+                rate_limit: { rps: Number.POSITIVE_INFINITY },
+            },
+            pattern: /Malformed Kuru JWT response: invalid rate_limit\.rps/,
+        },
+    ];
+
+    for (const [i, entry] of cases.entries()) {
+        const kuru = new Kuru();
+
+        await assert.rejects(
+            () => withMockedKuruJWTFetch(
+                entry.body,
+                () => kuru.loadJWT(`malformed-jwt-${i}`),
+            ),
+            entry.pattern,
+            entry.name,
+        );
+    }
+});
+
+test("Kuru.loadJWT stores valid JWT response fields and reuses the cache", async () => {
+    const originalFetch = globalThis.fetch;
+    const wallet = "valid-jwt-cache-wallet";
+    const first = new Kuru();
+    const second = new Kuru();
+    let calls = 0;
+
+    (globalThis as any).fetch = async () => {
+        calls++;
+        return jsonResponse({
+            token: "cached-token",
+            expires_at: Number.MAX_SAFE_INTEGER,
+            rate_limit: { rps: 3, burst: 9 },
+        });
+    };
+
+    try {
+        await first.loadJWT(wallet);
+        await second.loadJWT(wallet);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+
+    assert.equal(calls, 1, "second load should use cached JWT");
+    assert.equal((first as any).jwt, "cached-token");
+    assert.equal((first as any).rps, 3);
+    assert.equal((second as any).jwt, "cached-token");
+    assert.equal((second as any).rps, 3);
+});
+
+test("Kuru.loadJWT keeps cached JWTs isolated by API URL", async () => {
+    const originalFetch = globalThis.fetch;
+    const wallet = "api-scoped-jwt-cache-wallet";
+    const first = new Kuru(undefined, undefined, undefined, "https://kuru-a.example/api");
+    const second = new Kuru(undefined, undefined, undefined, "https://kuru-b.example/api");
+    const calls: string[] = [];
+
+    (globalThis as any).fetch = async (url: string) => {
+        calls.push(url);
+        const prefix = url.includes("kuru-a") ? "a" : "b";
+        return jsonResponse({
+            token: `${prefix}-token`,
+            expires_at: Number.MAX_SAFE_INTEGER,
+            rate_limit: { rps: prefix === "a" ? 2 : 4, burst: 9 },
+        });
+    };
+
+    try {
+        await first.loadJWT(wallet);
+        await second.loadJWT(wallet);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+
+    assert.equal(calls.length, 2, "distinct API URLs must not share cached JWTs");
+    assert.equal((first as any).jwt, "a-token");
+    assert.equal((first as any).rps, 2);
+    assert.equal((second as any).jwt, "b-token");
+    assert.equal((second as any).rps, 4);
 });
 
 test("KyberSwap.quote validates current router fee calldata without warning", async () => {
@@ -669,6 +942,319 @@ test("KyberSwap.quote rejects current router calldata that cannot be decoded", a
     );
 });
 
+test("Kuru.quote validates executable calldata before returning a quote", async () => {
+    const kuru = new Kuru();
+
+    const quote = await withMockedKuruFetch(
+        kuru,
+        encodeKuruSwapCalldata(),
+        () => kuru.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+    );
+
+    assert.equal(quote.to.toLowerCase(), kuru.router.toLowerCase());
+    assert.equal(quote.min_out, 995n);
+});
+
+test("Kuru.quote omits referrer fields for no-fee quotes and accepts zero-fee calldata", async () => {
+    const kuru = new Kuru();
+    const payloads: any[] = [];
+
+    const quote = await withMockedKuruFetch(
+        kuru,
+        encodeKuruSwapCalldata({
+            referrerAddress: ZERO_ADDRESS,
+            referrerFeeBps: 0n,
+        }),
+        () => kuru.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 0n, FEE_RECEIVER),
+        (body) => payloads.push(body),
+    );
+
+    assert.equal(quote.to.toLowerCase(), kuru.router.toLowerCase());
+    assert.equal(quote.min_out, 995n);
+    assert.equal(payloads.length, 1);
+    assert.equal("referrerAddress" in payloads[0], false);
+    assert.equal("referrerFeeBps" in payloads[0], false);
+});
+
+test("Kuru.quote rejects malformed successful quote responses", async () => {
+    const validTransaction = {
+        calldata: encodeKuruSwapCalldata(),
+        value: "0",
+        to: new Kuru().router,
+    };
+    const cases: Array<{
+        name: string;
+        body: unknown;
+        pattern: RegExp;
+    }> = [
+        {
+            name: "non-object body",
+            body: null,
+            pattern: /Malformed Kuru quote response: expected object/,
+        },
+        {
+            name: "missing transaction",
+            body: {
+                output: "1000",
+                minOut: "995",
+            },
+            pattern: /Malformed Kuru quote response: missing transaction/,
+        },
+        {
+            name: "missing router target",
+            body: {
+                output: "1000",
+                minOut: "995",
+                transaction: { ...validTransaction, to: undefined },
+            },
+            pattern: /Malformed Kuru quote response: missing transaction\.to/,
+        },
+        {
+            name: "missing calldata",
+            body: {
+                output: "1000",
+                minOut: "995",
+                transaction: { ...validTransaction, calldata: undefined },
+            },
+            pattern: /Malformed Kuru quote response: missing transaction\.calldata/,
+        },
+        {
+            name: "missing transaction value",
+            body: {
+                output: "1000",
+                minOut: "995",
+                transaction: { ...validTransaction, value: undefined },
+            },
+            pattern: /Malformed Kuru quote response: missing transaction\.value/,
+        },
+        {
+            name: "missing minOut",
+            body: {
+                output: "1000",
+                transaction: validTransaction,
+            },
+            pattern: /Malformed Kuru quote response: missing minOut/,
+        },
+        {
+            name: "missing output",
+            body: {
+                minOut: "995",
+                transaction: validTransaction,
+            },
+            pattern: /Malformed Kuru quote response: missing output/,
+        },
+    ];
+
+    for (const entry of cases) {
+        const kuru = new Kuru();
+
+        await assert.rejects(
+            () => withMockedKuruFetch(
+                kuru,
+                encodeKuruSwapCalldata(),
+                () => kuru.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+                undefined,
+                entry.body,
+            ),
+            entry.pattern,
+            entry.name,
+        );
+    }
+});
+
+test("Kuru.quote rejects non-zero transaction value the SDK swap action cannot carry", async () => {
+    const kuru = new Kuru();
+
+    await assert.rejects(
+        () => withMockedKuruFetch(
+            kuru,
+            encodeKuruSwapCalldata(),
+            () => kuru.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+            undefined,
+            {
+                type: "MARKET",
+                status: "SUCCESS",
+                output: "1000",
+                minOut: "995",
+                transaction: {
+                    calldata: encodeKuruSwapCalldata(),
+                    value: "1",
+                    to: kuru.router,
+                },
+                gasPrices: {},
+            },
+        ),
+        /Kuru quote transaction value=1, expected 0/,
+    );
+});
+
+test("Kuru.quote rejects calldata that does not bind requested swap fields", async () => {
+    const INVALID_NATIVE_PLACEHOLDER = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" as address;
+    const cases: Array<{
+        name: string;
+        calldata: bytes;
+        pattern: RegExp;
+    }> = [
+        {
+            name: "wrong selector",
+            calldata: "0x12345678" as bytes,
+            pattern: /Kuru calldata selector=0x12345678, expected 0x2a45a6c3/i,
+        },
+        {
+            name: "wrong source token",
+            calldata: encodeKuruSwapCalldata({ tokenUserSells: TOKEN_OUT }),
+            pattern: /tokenUserSells=.*expected 0x0000000000000000000000000000000000000001/i,
+        },
+        {
+            name: "wrong destination token",
+            calldata: encodeKuruSwapCalldata({ tokenUserBuys: TOKEN_IN }),
+            pattern: /tokenUserBuys=.*expected 0x0000000000000000000000000000000000000002/i,
+        },
+        {
+            name: "wrong amount",
+            calldata: encodeKuruSwapCalldata({ amountUserSells: 999n }),
+            pattern: /amountUserSells=999, expected 1000/i,
+        },
+        {
+            name: "minimum return below SDK quote minimum",
+            calldata: encodeKuruSwapCalldata({ minAmountUserBuys: 994n }),
+            pattern: /minAmountUserBuys=994, expected at least 995/i,
+        },
+        {
+            name: "unsupported native source placeholder",
+            calldata: encodeKuruSwapCalldata({ tokenUserSells: INVALID_NATIVE_PLACEHOLDER }),
+            pattern: /tokenUserSells=.*expected 0x0000000000000000000000000000000000000001/i,
+        },
+        {
+            name: "wrong referrer",
+            calldata: encodeKuruSwapCalldata({ referrerAddress: TOKEN_IN }),
+            pattern: /referrerAddress=.*expected 0x0000000000000000000000000000000000000004/i,
+        },
+        {
+            name: "wrong referrer fee",
+            calldata: encodeKuruSwapCalldata({ referrerFeeBps: 5n }),
+            pattern: /referrerFeeBps=5, expected 4/i,
+        },
+        {
+            name: "unexpected direct fee collector",
+            calldata: encodeKuruSwapCalldata({ feeCollectorAddress: TOKEN_IN, feeBps: 5n }),
+            pattern: /feeCollectorAddress=.*expected 0x0000000000000000000000000000000000000004/i,
+        },
+        {
+            name: "unexpected direct fee",
+            calldata: encodeKuruSwapCalldata({ feeCollectorAddress: FEE_RECEIVER, feeBps: 5n }),
+            pattern: /feeBps=5, expected 0/i,
+        },
+        {
+            name: "unexpected direct fee mode",
+            calldata: encodeKuruSwapCalldata({ isInTokenFee: true }),
+            pattern: /isInTokenFee=true, expected false/i,
+        },
+    ];
+
+    for (const entry of cases) {
+        const kuru = new Kuru();
+
+        await assert.rejects(
+            () => withMockedKuruFetch(
+                kuru,
+                entry.calldata,
+                () => kuru.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+            ),
+            entry.pattern,
+            entry.name,
+        );
+    }
+});
+
+test("Kuru.quote rejects the native placeholder Kuru cannot execute", async () => {
+    const kuru = new Kuru();
+    const invalidNativePlaceholder = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" as address;
+
+    await assert.rejects(
+        () => withMockedKuruFetch(
+            kuru,
+            encodeKuruSwapCalldata({ tokenUserSells: invalidNativePlaceholder }),
+            () => kuru.quote(WALLET, invalidNativePlaceholder, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+        ),
+        /tokenUserSells uses unsupported native placeholder/i,
+    );
+});
+
+test("Kuru.quote rejects calldata that cannot be decoded", async () => {
+    const kuru = new Kuru();
+
+    await assert.rejects(
+        () => withMockedKuruFetch(
+            kuru,
+            `${KURU_EXECUTE_SWAP_SELECTOR}00` as bytes,
+            () => kuru.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+        ),
+        /Kuru calldata could not be decoded for validation/,
+    );
+});
+
+test("Kuru.getAvailableTokens rejects malformed successful token-list responses", async () => {
+    const originalFetch = globalThis.fetch;
+    const cases: unknown[] = [
+        null,
+        {},
+        { data: {} },
+        { data: { data: "not-an-array" } },
+    ];
+
+    try {
+        for (const body of cases) {
+            const kuru = new Kuru();
+            (globalThis as any).fetch = async () => jsonResponse(body);
+
+            await assert.rejects(
+                () => kuru.getAvailableTokens({} as any, null, WALLET),
+                /Malformed Kuru token list response: missing data\.data/,
+            );
+        }
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("Kuru.getAvailableTokens filters malformed token-list rows", async () => {
+    const originalFetch = globalThis.fetch;
+    const kuru = new Kuru();
+
+    (globalThis as any).fetch = async () => jsonResponse({
+        data: {
+            data: [
+                null,
+                { address: "not-an-address", ticker: "BAD" },
+                { address: TOKEN_OUT, ticker: "BAD_DEC", decimals: "bad" },
+                { address: TOKEN_OUT, ticker: "BAD_BAL", balance: "bad" },
+                { address: TOKEN_OUT, ticker: "BAD_SUPPLY", total_supply: "bad" },
+                { address: TOKEN_OUT, ticker: "BAD_PRICE", last_price: "bad" },
+                {
+                    address: TOKEN_IN,
+                    decimals: "18",
+                    name: "Token In",
+                    ticker: "TIN",
+                    imageurl: "https://example.invalid/token.png",
+                    balance: "3",
+                    last_price: "2",
+                    total_supply: "1000",
+                },
+            ],
+        },
+    });
+
+    try {
+        const tokens = await kuru.getAvailableTokens({} as any, null, WALLET);
+
+        assert.equal(tokens.length, 1);
+        assert.equal(tokens[0]!.interface.address.toLowerCase(), TOKEN_IN.toLowerCase());
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
 test("validation rejects negative unsigned API integers and 10000 BPS swap slippage", () => {
     assert.equal(safeBigInt("42", "test amount"), 42n);
     assert.throws(
@@ -725,6 +1311,53 @@ test("MultiDexAgg.quoteMin picks the route with the highest guaranteed output", 
     );
 
     assert.equal(minOut, 80n);
+});
+
+test("MultiDexAgg.quote picks the route with the highest guaranteed output", async () => {
+    const conservative = {
+        dao: FEE_RECEIVER,
+        router: TOKEN_IN,
+        getAvailableTokens: async () => [],
+        quoteAction: async () => {
+            throw new Error("not used");
+        },
+        quoteMin: async () => 80n,
+        quote: async () => ({
+            to: TOKEN_IN,
+            calldata: "0x" as bytes,
+            min_out: 80n,
+            out: 90n,
+        }),
+    } as any;
+
+    const optimistic = {
+        dao: FEE_RECEIVER,
+        router: TOKEN_OUT,
+        getAvailableTokens: async () => [],
+        quoteAction: async () => {
+            throw new Error("not used");
+        },
+        quoteMin: async () => 50n,
+        quote: async () => ({
+            to: TOKEN_OUT,
+            calldata: "0x" as bytes,
+            min_out: 50n,
+            out: 100n,
+        }),
+    } as any;
+
+    const multi = new MultiDexAgg([optimistic, conservative]);
+    const quote = await multi.quote(
+        WALLET,
+        TOKEN_IN,
+        TOKEN_OUT,
+        1_000n,
+        50n,
+    );
+
+    assert.equal(quote.min_out, 80n);
+    assert.equal(quote.out, 90n);
+    assert.equal(quote.to, TOKEN_IN);
 });
 
 test("MultiDexAgg.quoteAction picks the route with the highest guaranteed output", async () => {

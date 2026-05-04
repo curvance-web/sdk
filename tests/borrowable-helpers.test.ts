@@ -9,6 +9,10 @@ const OWNER = "0x00000000000000000000000000000000000000aa";
 const CTOKEN = "0x00000000000000000000000000000000000000c1";
 const ASSET = "0x00000000000000000000000000000000000000d1";
 
+async function assertDecimalEqual(actual: Promise<Decimal>, expected: string, message: string) {
+    assert.equal((await actual).toString(), expected, message);
+}
+
 test("IDynamicIRM adjustedBorrowRate wrapper matches the nonpayable tuple ABI", () => {
     const adjustedBorrowRate = (irmAbi as any[]).find((entry) => entry.name === "adjustedBorrowRate");
     assert.equal(adjustedBorrowRate?.stateMutability, "nonpayable");
@@ -29,6 +33,7 @@ test("IDynamicIRM adjustedBorrowRate wrapper matches the nonpayable tuple ABI", 
 
 test("BorrowableCToken.getMaxBorrowable clamps negative and non-finite outputs to zero", async () => {
     const token = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
+    let convertUsdToTokensCalls = 0;
 
     (token as any).cache = {
         debtCap: 100n,
@@ -40,24 +45,36 @@ test("BorrowableCToken.getMaxBorrowable clamps negative and non-finite outputs t
         userRemainingCredit: new Decimal(-5),
     };
     (token as any).convertUsdToTokens = () => {
+        convertUsdToTokensCalls += 1;
         throw new Error("negative credit should not attempt conversion");
     };
 
-    assert.ok((await token.getMaxBorrowable()).eq(0));
-    assert.ok((await token.getMaxBorrowable(true)).eq(0));
+    await assertDecimalEqual(token.getMaxBorrowable(), "0", "negative credit should return zero tokens");
+    await assertDecimalEqual(token.getMaxBorrowable(true), "0", "negative credit should return zero USD");
+    assert.equal(convertUsdToTokensCalls, 0, "negative credit should not convert USD to tokens");
 
     (token as any).market = {
         userRemainingCredit: new Decimal(5),
     };
     (token as any).convertTokensToUsd = () => new Decimal(100);
-    (token as any).convertUsdToTokens = () => new Decimal(Infinity);
+    convertUsdToTokensCalls = 0;
+    (token as any).convertUsdToTokens = () => {
+        convertUsdToTokensCalls += 1;
+        return new Decimal(Infinity);
+    };
 
-    assert.ok((await token.getMaxBorrowable()).eq(0));
+    await assertDecimalEqual(token.getMaxBorrowable(), "0", "non-finite token conversion should return zero");
+    assert.equal(convertUsdToTokensCalls, 1, "positive USD cap should attempt token conversion once");
 
-    (token as any).convertUsdToTokens = () => new Decimal(2.5);
+    convertUsdToTokensCalls = 0;
+    (token as any).convertUsdToTokens = () => {
+        convertUsdToTokensCalls += 1;
+        return new Decimal(2.5);
+    };
 
-    assert.ok((await token.getMaxBorrowable()).eq(2.5));
-    assert.ok((await token.getMaxBorrowable(true)).eq(5));
+    await assertDecimalEqual(token.getMaxBorrowable(), "2.5", "finite conversion should return token amount");
+    await assertDecimalEqual(token.getMaxBorrowable(true), "5", "USD mode should return capped credit");
+    assert.equal(convertUsdToTokensCalls, 1, "USD mode should not convert capped credit to tokens");
 });
 
 test("BorrowableCToken.getMaxBorrowable is capped by token debt capacity and liquidity", async () => {
@@ -76,8 +93,8 @@ test("BorrowableCToken.getMaxBorrowable is capped by token debt capacity and liq
         new Decimal(assets.toString()).div(WAD.toString()).mul(usdPerToken);
     (token as any).convertUsdToTokens = (usd: Decimal) => usd.div(usdPerToken);
 
-    assert.ok((await token.getMaxBorrowable(true)).eq(40));
-    assert.ok((await token.getMaxBorrowable()).eq(20));
+    await assertDecimalEqual(token.getMaxBorrowable(true), "40", "debt capacity should cap max borrowable USD");
+    await assertDecimalEqual(token.getMaxBorrowable(), "20", "debt capacity should cap max borrowable tokens");
 
     (token as any).cache = {
         debtCap: 200n * WAD,
@@ -85,8 +102,8 @@ test("BorrowableCToken.getMaxBorrowable is capped by token debt capacity and liq
         liquidity: 7n * WAD,
     };
 
-    assert.ok((await token.getMaxBorrowable(true)).eq(14));
-    assert.ok((await token.getMaxBorrowable()).eq(7));
+    await assertDecimalEqual(token.getMaxBorrowable(true), "14", "liquidity should cap max borrowable USD");
+    await assertDecimalEqual(token.getMaxBorrowable(), "7", "liquidity should cap max borrowable tokens");
 });
 
 function createRepayToken(allowance: bigint, projectedDebt: bigint = 0n) {
@@ -263,6 +280,43 @@ test("BorrowableCToken.borrow encodes when same-token collateral is absent", asy
     assert.equal(token.__state.oracleRouteCalled, true);
 });
 
+test("BorrowableCToken.borrow rejects zero-sized borrows before calldata", async () => {
+    const token = Object.create(BorrowableCToken.prototype) as BorrowableCToken & {
+        __state: {
+            callDataCalls: unknown[];
+            oracleRouteCalled: boolean;
+        };
+    };
+
+    (token as any).cache = {
+        userCollateral: 0n,
+        asset: {
+            address: ASSET,
+            decimals: 18n,
+        },
+    };
+    (token as any).requireSigner = () => ({ address: OWNER });
+    token.__state = {
+        callDataCalls: [],
+        oracleRouteCalled: false,
+    };
+    (token as any).getCallData = (...args: unknown[]) => {
+        token.__state.callDataCalls.push(args);
+        return "0xborrow";
+    };
+    (token as any).oracleRoute = async () => {
+        token.__state.oracleRouteCalled = true;
+        return {} as any;
+    };
+
+    await assert.rejects(
+        () => token.borrow(Decimal(0)),
+        /Borrow amount must be greater than zero/i,
+    );
+    assert.deepEqual(token.__state.callDataCalls, []);
+    assert.equal(token.__state.oracleRouteCalled, false);
+});
+
 test("BorrowableCToken refresh helpers use assetsHeld as the IRM denominator", async () => {
     const token = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
     const calls: Array<{ method: string; assetsHeld: bigint; debt: bigint; fee?: bigint }> = [];
@@ -359,6 +413,9 @@ test("BorrowableCToken.depositAsCollateral does not apply signer debt guard to t
     (token as any).readFreshUserCache = () => {
         throw new Error("signer debt cache should not be read for third-party collateral");
     };
+    (token as any).contract = {
+        debtBalance: async () => 0n,
+    };
     (token as any).ensureUnderlyingAmount = async (amount: Decimal) => amount;
     (token as any).getZapAssetAmount = async () => 1n * WAD;
     (token as any).isZapInstruction = () => false;
@@ -384,4 +441,35 @@ test("BorrowableCToken.depositAsCollateral does not apply signer debt guard to t
         method: "depositAsCollateralFor",
         reloadAccount: receiver,
     }]);
+});
+
+test("BorrowableCToken.depositAsCollateral fails before submit when third-party receiver has debt", async () => {
+    const token = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
+    const receiver = "0x00000000000000000000000000000000000000bb";
+    const debtChecks: string[] = [];
+
+    (token as any).cache = { asset: { decimals: 18n } };
+    (token as any).requireSigner = () => ({ address: OWNER });
+    (token as any).readFreshUserCache = () => {
+        throw new Error("signer debt cache should not be read for third-party collateral");
+    };
+    (token as any).contract = {
+        debtBalance: async (account: string) => {
+            debtChecks.push(account);
+            return 1n;
+        },
+    };
+    (token as any).getCallData = () => {
+        throw new Error("calldata should not be built when receiver has debt");
+    };
+    (token as any).oracleRoute = async () => {
+        throw new Error("transaction should not be submitted when receiver has debt");
+    };
+
+    await assert.rejects(
+        () => token.depositAsCollateral(Decimal(1), "none", receiver as any),
+        /Cannot deposit as collateral when there is outstanding debt/,
+    );
+
+    assert.deepEqual(debtChecks, [receiver]);
 });

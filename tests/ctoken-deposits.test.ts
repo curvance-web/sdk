@@ -1,6 +1,7 @@
 import { afterEach, test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
+import { Interface } from 'ethers';
 import { CToken, BorrowableCToken, ERC20, FormatConverter, NATIVE_ADDRESS } from '../src';
 
 /**
@@ -173,12 +174,29 @@ test('getDepositTokens does not expose a duplicate simple native route for nativ
     });
 
     const options = await token.getDepositTokens();
-    const nativeRoutes = options
-        .filter((option) => option.interface.address.toLowerCase() === NATIVE_ADDRESS.toLowerCase())
-        .map((option) => option.type);
+    const routeSummary = options.map((option) => ({
+        address: option.interface.address.toLowerCase(),
+        symbol: option.interface.symbol,
+        type: option.type,
+    }));
 
-    assert.deepEqual(nativeRoutes, ['native-vault']);
-    assert.ok(options.some((option) => option.interface.address === ZAP_ASSET && option.type === 'simple'));
+    assert.deepEqual(routeSummary, [
+        {
+            address: ADDR.toLowerCase(),
+            symbol: 'cVAULT',
+            type: 'none',
+        },
+        {
+            address: NATIVE_ADDRESS.toLowerCase(),
+            symbol: 'MON',
+            type: 'native-vault',
+        },
+        {
+            address: ZAP_ASSET.toLowerCase(),
+            symbol: 'USDC',
+            type: 'simple',
+        },
+    ]);
 });
 
 describe('getDeposits — Issue 3 fix (renamed from getTvl, valued from totalAssets)', () => {
@@ -243,7 +261,9 @@ describe('getDeposits — Issue 3 fix (renamed from getTvl, valued from totalAss
         });
         const deposits = token.getDeposits(true);
         const liquidity = token.getLiquidity(true);
-        assert.ok(liquidity.lte(deposits),
+        assert.equal(deposits.toString(), '103', 'deposits should value total assets at asset price');
+        assert.equal(liquidity.toString(), '63', 'liquidity should value available assets at asset price');
+        assert.equal(liquidity.lte(deposits), true,
             `expected liquidity (${liquidity}) ≤ deposits (${deposits})`);
     });
 
@@ -261,8 +281,11 @@ describe('getDeposits — Issue 3 fix (renamed from getTvl, valued from totalAss
         const liquidity = token.getLiquidity(true);
         const debtUsd = FormatConverter.bigIntTokensToUsd(40n * WAD, 1n * WAD, 18n);
         const sum = liquidity.plus(debtUsd);
-        assert.ok(deposits.sub(sum).abs().lt(new Decimal('0.000001')),
-            `expected deposits (${deposits}) ≈ liquidity (${liquidity}) + debt USD (${debtUsd}) = ${sum}`);
+        assert.equal(liquidity.toString(), '63', 'liquidity should match fixture assetsHeld after debt');
+        assert.equal(debtUsd.toString(), '40', 'debt USD should match fixture debt at $1 asset price');
+        assert.equal(sum.toString(), '103', 'liquidity plus debt should reconstruct total deposits');
+        assert.equal(deposits.toString(), sum.toString(),
+            `expected deposits (${deposits}) to equal liquidity (${liquidity}) + debt USD (${debtUsd}) = ${sum}`);
     });
 });
 
@@ -427,6 +450,23 @@ describe('Approval preflights â€” single-path execution', () => {
             (await token.ensureUnderlyingAmount(Decimal(50), 'none')).toString(),
             '50',
         );
+    });
+
+    test('transfer routes through oracleRoute and reload semantics', async () => {
+        const token = createExecutionToken();
+
+        await token.transfer(RECEIVER as any, Decimal(1));
+
+        assert.deepEqual(token.__state.callDataCalls, [{
+            method: 'transfer',
+            args: [RECEIVER, WAD],
+        }]);
+        assert.equal(token.__state.oracleRouteCalled, true);
+        assert.deepEqual(token.__state.oracleRouteCalls, [{
+            calldata: '0xdeadbeef',
+            overrides: {},
+            reloadAccount: undefined,
+        }]);
     });
 
     const simpleZap = {
@@ -903,6 +943,310 @@ describe('Approval preflights â€” single-path execution', () => {
         assert.equal(token.__state.oracleRouteCalled, false);
     });
 
+    test('postCollateral fails before submit when collateral cap cannot fit postable shares', async () => {
+        const token = createExecutionToken();
+        (token as any).balanceOf = async () => 5n * WAD;
+        (token as any).fetchUserCollateral = async () => 0n;
+        (token as any).getRemainingCollateral = () => WAD - 1n;
+
+        await assert.rejects(
+            () => token.postCollateral(Decimal(1)),
+            /not enough collateral left/i,
+        );
+        assert.deepEqual(token.__state.callDataCalls, []);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('deposit rejects zero-sized inputs before approvals or calldata', async () => {
+        const token = createExecutionToken();
+        (token as any).getZapAssetAmount = async () => 0n;
+        (token as any).getAsset = () => ({
+            allowance: async () => {
+                throw new Error('approval should not be checked for zero deposit');
+            },
+            symbol: 'WMON',
+        });
+
+        await assert.rejects(
+            () => token.deposit(Decimal(0)),
+            /Deposit amount must be greater than zero/i,
+        );
+        assert.deepEqual(token.__state.callDataCalls, []);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('depositAsCollateral rejects zero-sized inputs before cap checks, approvals, or calldata', async () => {
+        const token = createExecutionToken();
+        let capChecked = false;
+        (token as any).getZapAssetAmount = async () => 0n;
+        (token as any).getRemainingCollateral = () => {
+            capChecked = true;
+            return 100n * WAD;
+        };
+        (token as any).getAsset = () => ({
+            allowance: async () => {
+                throw new Error('approval should not be checked for zero collateral deposit');
+            },
+            symbol: 'WMON',
+        });
+
+        await assert.rejects(
+            () => token.depositAsCollateral(Decimal(0), 'none'),
+            /Deposit amount must be greater than zero/i,
+        );
+        assert.equal(capChecked, false);
+        assert.deepEqual(token.__state.callDataCalls, []);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('depositAsCollateral checks zap collateral deposits against available cap before approvals', async () => {
+        const token = createExecutionToken();
+        (token as any).getRemainingCollateral = () => 0n;
+        (token as any).getZapAssetAmount = async () => WAD;
+        (token as any).getAsset = () => ({
+            allowance: async () => {
+                throw new Error('approval should not be checked after zap cap failure');
+            },
+            symbol: 'WMON',
+        });
+
+        await assert.rejects(
+            () => token.depositAsCollateral(Decimal(1), {
+                type: 'simple',
+                inputToken: INPUT_TOKEN,
+                slippage: new Decimal('0.005'),
+            }),
+            /not enough collateral left/i,
+        );
+        assert.deepEqual(token.__state.callDataCalls, []);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('depositAsCollateral checks zap expected shares against positive remaining cap before submission', async () => {
+        const token = createExecutionToken();
+        const simpleZap = {
+            type: 'simple' as const,
+            inputToken: INPUT_TOKEN as any,
+            slippage: new Decimal('0.005'),
+        };
+        (token as any).getRemainingCollateral = () => WAD - 1n;
+        (token as any).getZapAssetAmount = async () => WAD;
+        (token as any)._checkDepositApprovals = async () => undefined;
+        (token as any).zap = async (
+            assets: bigint,
+            _zap: unknown,
+            collateralize: boolean,
+            defaultCalldata: string,
+            receiver: string,
+        ) => {
+            token.__state.zapAssets = assets;
+            token.__state.zapCollateralize = collateralize;
+            token.__state.zapReceiver = receiver;
+            return {
+                calldata: defaultCalldata,
+                calldata_overrides: { to: SIMPLE_ZAPPER },
+                zapper: { address: SIMPLE_ZAPPER },
+                expectedShares: WAD,
+            };
+        };
+
+        await assert.rejects(
+            () => token.depositAsCollateral(Decimal(1), simpleZap),
+            /not enough collateral left/i,
+        );
+        assert.equal(token.__state.zapAssets, WAD);
+        assert.equal(token.__state.zapCollateralize, true);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('depositAsCollateral checks zap approvals before building quote calldata', async () => {
+        const token = createExecutionToken();
+        const simpleZap = {
+            type: 'simple' as const,
+            inputToken: INPUT_TOKEN as any,
+            slippage: new Decimal('0.005'),
+        };
+        (token as any).getRemainingCollateral = () => 100n * WAD;
+        (token as any).getZapAssetAmount = async () => WAD;
+        (token as any)._checkDepositApprovals = async () => {
+            throw new Error('approval missing before quote');
+        };
+        (token as any).zap = async () => {
+            throw new Error('zap quote should not be built before approval failure');
+        };
+
+        await assert.rejects(
+            () => token.depositAsCollateral(Decimal(1), simpleZap),
+            /approval missing before quote/i,
+        );
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('depositAsCollateral rejects zap calldata with zero expected shares', async () => {
+        const token = createExecutionToken();
+        const simpleZap = {
+            type: 'simple' as const,
+            inputToken: INPUT_TOKEN as any,
+            slippage: new Decimal('0.005'),
+        };
+        (token as any).getRemainingCollateral = () => 100n * WAD;
+        (token as any).getZapAssetAmount = async () => WAD;
+        (token as any)._checkDepositApprovals = async () => undefined;
+        (token as any).zap = async (
+            assets: bigint,
+            _zap: unknown,
+            collateralize: boolean,
+            defaultCalldata: string,
+            receiver: string,
+        ) => {
+            token.__state.zapAssets = assets;
+            token.__state.zapCollateralize = collateralize;
+            token.__state.zapReceiver = receiver;
+            return {
+                calldata: defaultCalldata,
+                calldata_overrides: { to: SIMPLE_ZAPPER },
+                zapper: { address: SIMPLE_ZAPPER },
+                expectedShares: 0n,
+            };
+        };
+
+        await assert.rejects(
+            () => token.depositAsCollateral(Decimal(1), simpleZap),
+            /Zap expected shares must be greater than zero/i,
+        );
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('zap decodes expected shares from real swapAndDeposit calldata', async () => {
+        const token = createExecutionToken();
+        const simpleZap = {
+            type: 'simple' as const,
+            inputToken: INPUT_TOKEN as any,
+            slippage: new Decimal('0.005'),
+        };
+        const iface = new Interface([
+            'function swapAndDeposit(address ctoken,bool depositAsWrappedNative,(address inputToken,uint256 inputAmount,address outputToken,address target,uint256 slippage,bytes call) swapAction,uint256 expectedShares,bool collateralizeFor,address receiver)',
+        ]);
+        const expectedShares = 42n * WAD;
+        (token as any).zap = CToken.prototype.zap;
+        (token as any).getZapper = () => ({
+            address: SIMPLE_ZAPPER,
+            contract: { interface: iface },
+            getSimpleZapCalldata: async () => iface.encodeFunctionData('swapAndDeposit', [
+                CTOKEN,
+                false,
+                [INPUT_TOKEN, WAD, ADDR, DEX_ROUTER, 0n, '0x'],
+                expectedShares,
+                true,
+                RECEIVER,
+            ]),
+        });
+
+        const result = await (token as any).zap(WAD, simpleZap, true, '0xdeadbeef', RECEIVER);
+
+        assert.equal(result.expectedShares, expectedShares);
+        assert.equal(result.calldata_overrides.to, SIMPLE_ZAPPER);
+    });
+
+    test('simulateDepositAsCollateral checks zap expected shares against positive remaining cap', async () => {
+        const token = createExecutionToken();
+        const simpleZap = {
+            type: 'simple' as const,
+            inputToken: INPUT_TOKEN as any,
+            slippage: new Decimal('0.005'),
+        };
+        (token as any).getRemainingCollateral = () => WAD - 1n;
+        (token as any).getZapAssetAmount = async () => WAD;
+        (token as any).zap = async (
+            assets: bigint,
+            _zap: unknown,
+            collateralize: boolean,
+            defaultCalldata: string,
+            receiver: string,
+        ) => {
+            token.__state.zapAssets = assets;
+            token.__state.zapCollateralize = collateralize;
+            token.__state.zapReceiver = receiver;
+            return {
+                calldata: defaultCalldata,
+                calldata_overrides: { to: SIMPLE_ZAPPER },
+                expectedShares: WAD,
+            };
+        };
+
+        const result = await token.simulateDepositAsCollateral(Decimal(1), simpleZap);
+
+        assert.equal(result.success, false);
+        assert.match(result.error ?? '', /not enough collateral left/i);
+        assert.equal(token.__state.zapAssets, WAD);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('simulateDepositAsCollateral rejects zap calldata with zero expected shares', async () => {
+        const token = createExecutionToken();
+        const simpleZap = {
+            type: 'simple' as const,
+            inputToken: INPUT_TOKEN as any,
+            slippage: new Decimal('0.005'),
+        };
+        (token as any).getRemainingCollateral = () => 100n * WAD;
+        (token as any).getZapAssetAmount = async () => WAD;
+        (token as any).zap = async (
+            assets: bigint,
+            _zap: unknown,
+            collateralize: boolean,
+            defaultCalldata: string,
+            receiver: string,
+        ) => {
+            token.__state.zapAssets = assets;
+            token.__state.zapCollateralize = collateralize;
+            token.__state.zapReceiver = receiver;
+            return {
+                calldata: defaultCalldata,
+                calldata_overrides: { to: SIMPLE_ZAPPER },
+                expectedShares: 0n,
+            };
+        };
+
+        const result = await token.simulateDepositAsCollateral(Decimal(1), simpleZap);
+
+        assert.equal(result.success, false);
+        assert.match(result.error ?? '', /Zap expected shares must be greater than zero/i);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('redeem rejects zero or unavailable share execution before calldata', async () => {
+        const token = createExecutionToken();
+        (token as any).balanceOf = async () => 5n * WAD;
+        (token as any).maxRedemption = async () => 5n * WAD;
+        (token as any).getExecutionDebtBufferTime = () => 0n;
+
+        await assert.rejects(
+            () => token.redeem(Decimal(0)),
+            /Redeem amount must be greater than zero/i,
+        );
+        assert.deepEqual(token.__state.callDataCalls, []);
+
+        (token as any).maxRedemption = async () => 0n;
+        await assert.rejects(
+            () => token.redeem(Decimal(1)),
+            /No redeemable cToken shares available/i,
+        );
+        assert.deepEqual(token.__state.callDataCalls, []);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
+    test('redeemShares rejects zero-sized share inputs before calldata', async () => {
+        const token = createExecutionToken();
+
+        await assert.rejects(
+            () => token.redeemShares(0n),
+            /Redeem amount must be greater than zero/i,
+        );
+        assert.deepEqual(token.__state.callDataCalls, []);
+        assert.equal(token.__state.oracleRouteCalled, false);
+    });
+
     test('depositAsCollateral rejects negative remaining collateral capacity before approvals', async () => {
         const token = createExecutionToken();
         (token as any).getRemainingCollateral = () => -1n;
@@ -970,13 +1314,13 @@ describe('Approval preflights â€” single-path execution', () => {
         assert.equal(token.__state.oracleRouteCalled, false);
     });
 
-    test('depositAsCollateral treats bare vault zaps as zap paths for units and cap checks', async () => {
+    test('depositAsCollateral treats bare vault zaps as zap paths for units while checking cap availability', async () => {
         const token = createExecutionToken();
         let capChecked = false;
         (token as any).isPluginApproved = async () => true;
         (token as any).getRemainingCollateral = () => {
             capChecked = true;
-            throw new Error('non-zap collateral cap check should not run for vault zaps');
+            return 100n * WAD;
         };
         (token as any).getVaultAsset = async () => ({
             address: VAULT_ASSET,
@@ -987,7 +1331,7 @@ describe('Approval preflights â€” single-path execution', () => {
 
         await token.depositAsCollateral(Decimal('1.23'), 'vault' as any);
 
-        assert.equal(capChecked, false);
+        assert.equal(capChecked, true);
         assert.equal(token.__state.zapAssets, 1_230_000n);
         assert.equal(token.__state.zapCollateralize, true);
         assert.equal(token.__state.oracleRouteCalled, true);
@@ -995,13 +1339,55 @@ describe('Approval preflights â€” single-path execution', () => {
 
     test('simulateDepositAsCollateral sizes bare native-vault zaps as native value', async () => {
         const token = createExecutionToken();
-        (token as any).simulateOracleRoute = async () => ({ success: true });
+        const nativeZapCalls: Array<{
+            assets: bigint;
+            collateralize: boolean;
+            useSimple: boolean;
+            receiver: string;
+        }> = [];
+        const simulateCalls: Array<{ calldata: string; overrides: Record<string, unknown> }> = [];
+        (token as any).zap = (CToken.prototype as any).zap;
+        (token as any).getZapper = () => ({
+            address: VAULT_ZAPPER,
+            type: 'native-vault',
+            getNativeZapCalldata: async (
+                _ctoken: CToken,
+                assets: bigint,
+                collateralize: boolean,
+                useSimple: boolean,
+                receiver: string,
+            ) => {
+                nativeZapCalls.push({ assets, collateralize, useSimple, receiver });
+                return '0xnativevault';
+            },
+        });
+        (token as any).simulateOracleRoute = async (calldata: string, overrides: Record<string, unknown>) => {
+            simulateCalls.push({ calldata, overrides });
+            return { success: true };
+        };
 
         const result = await token.simulateDepositAsCollateral(Decimal('1.25'), 'native-vault' as any);
 
         assert.deepEqual(result, { success: true });
-        assert.equal(token.__state.zapAssets, 1_250_000_000_000_000_000n);
-        assert.equal(token.__state.zapCollateralize, true);
+        assert.equal(token.__state.zapAssets, null);
+        assert.equal(token.__state.zapCollateralize, null);
+        assert.deepEqual(token.__state.callDataCalls, [{
+            method: 'depositAsCollateral',
+            args: [1_250_000_000_000_000_000n, OWNER],
+        }]);
+        assert.deepEqual(nativeZapCalls, [{
+            assets: 1_250_000_000_000_000_000n,
+            collateralize: true,
+            useSimple: false,
+            receiver: OWNER,
+        }]);
+        assert.deepEqual(simulateCalls, [{
+            calldata: '0xnativevault',
+            overrides: {
+                value: 1_250_000_000_000_000_000n,
+                to: VAULT_ZAPPER,
+            },
+        }]);
     });
 });
 

@@ -8,6 +8,7 @@ const ACCOUNT = '0x00000000000000000000000000000000000000aa';
 const MARKET = '0x00000000000000000000000000000000000000bb';
 const CTOKEN = '0x00000000000000000000000000000000000000cc';
 const WAD = 10n ** 18n;
+const SECONDS_PER_YEAR = 31_536_000n;
 
 const toWad = (value: string | number) =>
     BigInt(new Decimal(value).mul(new Decimal(10).pow(18)).toFixed(0));
@@ -184,8 +185,12 @@ describe('Market position health units', () => {
         );
 
         assert.deepEqual(borrowRateArgs, { assetsHeld: 70n, debt: 50n });
-        assert.ok(result.borrow.percent.gt(0));
-        assert.ok(result.borrow.change.gt(0));
+        assert.equal(result.supply.percent.toString(), '0');
+        assert.equal(result.supply.change.toString(), '0');
+        assert.equal(result.borrow.percent.toString(), SECONDS_PER_YEAR.toString());
+        assert.equal(result.borrow.change.toString(), new Decimal(30).mul(SECONDS_PER_YEAR.toString()).toString());
+        assert.equal(result.earn.percent.toString(), new Decimal(0).sub(SECONDS_PER_YEAR.toString()).toString());
+        assert.equal(result.earn.change.toString(), new Decimal(0).sub(new Decimal(30).mul(SECONDS_PER_YEAR.toString())).toString());
     });
 
     test('previewPositionHealthLeverageDown removes fee-gross collateral but credits net repay output', async () => {

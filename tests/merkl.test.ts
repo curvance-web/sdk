@@ -15,6 +15,10 @@ import {
 } from "../src/helpers";
 import Decimal from "decimal.js";
 
+function assertDecimalString(actual: Decimal | undefined, expected: string, message: string) {
+    assert.equal(actual?.toString(), expected, message);
+}
+
 test("fetchMerklOpportunities forwards action and chainId in the request URL", async (t) => {
     const originalFetch = globalThis.fetch;
     let requestedUrl: string | null = null;
@@ -59,6 +63,105 @@ test("fetchMerklOpportunities degrades malformed successful responses to no oppo
     });
 
     assert.deepEqual(await fetchMerklOpportunities({ action: "LEND", chainId: 143 }), []);
+});
+
+test("fetchMerklOpportunities filters malformed successful rows before returning typed data", async (t) => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => [
+            { name: "bad apr", apr: "12", identifier: "bad-apr", type: "lend", tokens: [] },
+            { name: "bad tokens", apr: 1, identifier: "bad-tokens", type: "lend", tokens: {} },
+            {
+                name: "valid lend",
+                apr: 12.5,
+                action: "LEND",
+                identifier: "valid-lend",
+                type: "lend",
+                tokens: [
+                    { address: "0x00000000000000000000000000000000000000a1", symbol: "MON" },
+                    { address: "0x00000000000000000000000000000000000000a2" },
+                ],
+                rewardsRecord: {
+                    id: "record-a",
+                    total: 3,
+                    breakdowns: [
+                        {
+                            token: {
+                                symbol: "MERKL",
+                                address: "0x00000000000000000000000000000000000000b1",
+                            },
+                            amount: "1",
+                        },
+                        { token: {} },
+                    ],
+                },
+            },
+        ],
+    } as Response)) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    const rows = await fetchMerklOpportunities({ action: "LEND", chainId: 143 });
+
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.identifier, "valid-lend");
+    assert.deepEqual(rows[0]?.tokens, [{
+        address: "0x00000000000000000000000000000000000000a1",
+        symbol: "MON",
+    }, {
+        address: "0x00000000000000000000000000000000000000a2",
+        symbol: "",
+    }]);
+    assert.equal(rows[0]?.rewardsRecord?.breakdowns?.length, 1);
+});
+
+test("fetchMerklOpportunities preserves identifier-only borrow rows", async (t) => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => [
+            {
+                name: "borrow WMON",
+                apr: 7,
+                action: "BORROW",
+                identifier: "0x00000000000000000000000000000000000000a1",
+                type: "borrow",
+                tokens: [],
+            },
+            {
+                name: "borrow sparse WMON",
+                apr: 3,
+                action: "BORROW",
+                identifier: "0x00000000000000000000000000000000000000a1",
+                type: "borrow",
+            },
+            {
+                name: "borrow malformed-token WMON",
+                apr: 2,
+                action: "BORROW",
+                identifier: "0x00000000000000000000000000000000000000a1",
+                type: "borrow",
+                tokens: {},
+            },
+        ],
+    } as Response)) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    const rows = await fetchMerklOpportunities({ action: "BORROW", chainId: 143 });
+
+    assert.equal(rows.length, 3);
+    assert.deepEqual(rows[0]?.tokens, []);
+    assert.deepEqual(rows[1]?.tokens, []);
+    assert.deepEqual(rows[2]?.tokens, []);
+    assert.equal(getMerklBorrowIncentives("0x00000000000000000000000000000000000000a1", rows).toString(), "0.12");
 });
 
 test("fetchMerklUserRewards filters malformed successful rows before returning typed data", async (t) => {
@@ -231,8 +334,8 @@ test("aggregateMerklAprByToken rolls duplicate lend opportunities up by token me
     ], "deposit");
 
     assert.equal(apyByToken.size, 2);
-    assert.ok(apyByToken.get(WMON.toLowerCase())?.eq(new Decimal(0.25)));
-    assert.ok(apyByToken.get(AUSD.toLowerCase())?.eq(new Decimal(0.25)));
+    assertDecimalString(apyByToken.get(WMON.toLowerCase()), "0.25", "WMON deposit APY should sum duplicate campaigns");
+    assertDecimalString(apyByToken.get(AUSD.toLowerCase()), "0.25", "AUSD deposit APY should sum duplicate campaigns");
 });
 
 test("aggregateMerklAprByToken skips malformed rows instead of throwing during boot enrichment", () => {
@@ -250,7 +353,7 @@ test("aggregateMerklAprByToken skips malformed rows instead of throwing during b
     ] as any, "deposit");
 
     assert.equal(apyByToken.size, 1);
-    assert.ok(apyByToken.get(WMON.toLowerCase())?.eq(new Decimal(0.10)));
+    assertDecimalString(apyByToken.get(WMON.toLowerCase()), "0.1", "malformed rows should be skipped while valid WMON APY remains");
 });
 
 test("aggregateMerklAprByToken falls back to identifier when token membership is malformed", () => {
@@ -265,7 +368,7 @@ test("aggregateMerklAprByToken falls back to identifier when token membership is
     ] as any, "borrow");
 
     assert.equal(apyByToken.size, 1);
-    assert.ok(apyByToken.get(WMON.toLowerCase())?.eq(new Decimal(0.07)));
+    assertDecimalString(apyByToken.get(WMON.toLowerCase()), "0.07", "borrow APY should fall back to identifier when token membership is malformed");
 });
 
 test("Merkl helper APYs match the shared rollup semantics used by market hydration", () => {
@@ -296,9 +399,9 @@ test("Merkl helper APYs match the shared rollup semantics used by market hydrati
         },
     ];
 
-    assert.ok(getMerklDepositIncentives(WMON, lendOpps).eq(new Decimal(0.15)));
-    assert.ok(getMerklDepositIncentives(USDC, lendOpps).eq(new Decimal(0.10)));
-    assert.ok(getMerklBorrowIncentives(WMON, borrowOpps).eq(new Decimal(0.10)));
+    assert.equal(getMerklDepositIncentives(WMON, lendOpps).toString(), "0.15");
+    assert.equal(getMerklDepositIncentives(USDC, lendOpps).toString(), "0.1");
+    assert.equal(getMerklBorrowIncentives(WMON, borrowOpps).toString(), "0.1");
 
     const depositToken = {
         nativeYield: 0,
@@ -311,8 +414,8 @@ test("Merkl helper APYs match the shared rollup semantics used by market hydrati
         address: WMON,
     };
 
-    assert.ok(getDepositApy(depositToken, lendOpps).eq(new Decimal(0.17)));
-    assert.ok(getBorrowCost(borrowToken, borrowOpps).eq(new Decimal(0.02)));
+    assert.equal(getDepositApy(depositToken, lendOpps).toString(), "0.17");
+    assert.equal(getBorrowCost(borrowToken, borrowOpps).toString(), "0.02");
 });
 
 test("APY helpers read current nativeApy from real SDK-shaped tokens", () => {
@@ -323,8 +426,8 @@ test("APY helpers read current nativeApy from real SDK-shaped tokens", () => {
         address: "0x00000000000000000000000000000000000000a1",
     };
 
-    assert.ok(getNativeYield(token).eq(new Decimal("0.04")));
-    assert.ok(getDepositApy(token, []).eq(new Decimal("0.04")));
+    assert.equal(getNativeYield(token).toString(), "0.04");
+    assert.equal(getDepositApy(token, []).toString(), "0.04");
 });
 
 test("APY helpers fall back to interest plus overrides when nativeApy is absent", () => {
@@ -334,6 +437,6 @@ test("APY helpers fall back to interest plus overrides when nativeApy is absent"
         address: "0x00000000000000000000000000000000000000a1",
     };
 
-    assert.ok(getNativeYield(token, { wmon: { value: 0.03 } }).eq(new Decimal("0.03")));
-    assert.ok(getDepositApy(token, [], { wmon: { value: 0.03 } }).eq(new Decimal("0.05")));
+    assert.equal(getNativeYield(token, { wmon: { value: 0.03 } }).toString(), "0.03");
+    assert.equal(getDepositApy(token, [], { wmon: { value: 0.03 } }).toString(), "0.05");
 });

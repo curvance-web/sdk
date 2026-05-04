@@ -71,6 +71,7 @@ test("getOptimizerMarketData uses staticCall so read-provider consumers stay on 
 
     reader.contract = {
         getOptimizerMarketData,
+        getOptimizerAPY: async () => 111n,
     } as any;
 
     const result = await reader.getOptimizerMarketData([OPTIMIZER as any]);
@@ -88,6 +89,7 @@ test("getOptimizerMarketData uses staticCall so read-provider consumers stay on 
         totalLiquidity: 67n,
         sharePrice: 89n,
         performanceFee: 10n,
+        apy: 111n,
     }]);
 });
 
@@ -97,6 +99,7 @@ test("getOptimizerMarketData falls back to view-only reads when staticCall rejec
         "function asset() view returns (address)",
         "function totalAssets() view returns (uint256)",
         "function exchangeRate() view returns (uint256)",
+        "function exchangeRateUpdated() returns (uint256)",
         "function fee() view returns (uint256)",
         "function getApprovedMarkets() view returns (address[])",
     ]);
@@ -109,12 +112,15 @@ test("getOptimizerMarketData falls back to view-only reads when staticCall rejec
         asset: optimizerIface.getFunction("asset")!.selector,
         totalAssets: optimizerIface.getFunction("totalAssets")!.selector,
         exchangeRate: optimizerIface.getFunction("exchangeRate")!.selector,
+        exchangeRateUpdated: optimizerIface.getFunction("exchangeRateUpdated")!.selector,
         fee: optimizerIface.getFunction("fee")!.selector,
         getApprovedMarkets: optimizerIface.getFunction("getApprovedMarkets")!.selector,
         balanceOf: cTokenIface.getFunction("balanceOf")!.selector,
         convertToAssets: cTokenIface.getFunction("convertToAssets")!.selector,
         assetsHeld: cTokenIface.getFunction("assetsHeld")!.selector,
     };
+    const selectorNames = new Map(Object.entries(selectors).map(([name, selector]) => [selector, name]));
+    const providerCalls: Array<{ target: string | undefined; method: string | undefined }> = [];
     const sharesByMarket = new Map<string, bigint>([
         [CTOKEN_A.toLowerCase(), 20n],
         [CTOKEN_B.toLowerCase(), 30n],
@@ -134,11 +140,13 @@ test("getOptimizerMarketData falls back to view-only reads when staticCall rejec
                 throw new Error("static state write rejected");
             },
         },
+        getOptimizerAPY: async () => 222n,
     } as any;
     reader.provider = {
         async call(tx: { to?: string; data?: string }) {
             const selector = tx.data?.slice(0, 10);
             const target = tx.to?.toLowerCase();
+            providerCalls.push({ target, method: selector == null ? undefined : selectorNames.get(selector) });
 
             if (target === OPTIMIZER.toLowerCase()) {
                 switch (selector) {
@@ -148,6 +156,8 @@ test("getOptimizerMarketData falls back to view-only reads when staticCall rejec
                         return optimizerIface.encodeFunctionResult("totalAssets", [123n]);
                     case selectors.exchangeRate:
                         return optimizerIface.encodeFunctionResult("exchangeRate", [456n]);
+                    case selectors.exchangeRateUpdated:
+                        throw new Error("fallback must not static-call exchangeRateUpdated");
                     case selectors.fee:
                         return optimizerIface.encodeFunctionResult("fee", [7n]);
                     case selectors.getApprovedMarkets:
@@ -178,6 +188,9 @@ test("getOptimizerMarketData falls back to view-only reads when staticCall rejec
     } as any;
 
     const result = await reader.getOptimizerMarketData([OPTIMIZER as any]);
+    const sortedCalls = providerCalls
+        .map((call) => `${call.target}:${call.method}`)
+        .sort();
 
     assert.deepEqual(result, [{
         address: OPTIMIZER,
@@ -198,7 +211,47 @@ test("getOptimizerMarketData falls back to view-only reads when staticCall rejec
         totalLiquidity: 150n,
         sharePrice: 456n,
         performanceFee: 7n,
+        apy: 222n,
     }]);
+    assert.deepEqual(sortedCalls, [
+        `${OPTIMIZER.toLowerCase()}:asset`,
+        `${OPTIMIZER.toLowerCase()}:exchangeRate`,
+        `${OPTIMIZER.toLowerCase()}:fee`,
+        `${OPTIMIZER.toLowerCase()}:getApprovedMarkets`,
+        `${OPTIMIZER.toLowerCase()}:totalAssets`,
+        `${CTOKEN_A.toLowerCase()}:assetsHeld`,
+        `${CTOKEN_A.toLowerCase()}:balanceOf`,
+        `${CTOKEN_A.toLowerCase()}:convertToAssets`,
+        `${CTOKEN_B.toLowerCase()}:assetsHeld`,
+        `${CTOKEN_B.toLowerCase()}:balanceOf`,
+        `${CTOKEN_B.toLowerCase()}:convertToAssets`,
+    ]);
+});
+
+test("getOptimizerMarketData does not mask real reader reverts with view-only fallback", async () => {
+    const reader = createReader();
+    let fallbackCalls = 0;
+    const revert = new Error("execution reverted: bad optimizer");
+
+    reader.contract = {
+        getOptimizerMarketData: {
+            staticCall: async () => {
+                throw revert;
+            },
+        },
+    } as any;
+    reader.provider = {
+        async call() {
+            fallbackCalls += 1;
+            return "0x";
+        },
+    } as any;
+
+    await assert.rejects(
+        () => reader.getOptimizerMarketData([OPTIMIZER as any]),
+        /bad optimizer/,
+    );
+    assert.equal(fallbackCalls, 0, "real reader reverts should not use view-only fallback");
 });
 
 test("optimalRebalance forwards the default slippage and decodes actions plus bounds", async () => {

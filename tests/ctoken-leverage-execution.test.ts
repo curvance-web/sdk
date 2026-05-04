@@ -384,7 +384,7 @@ describe('CToken simple leverage execution', () => {
         );
     });
 
-    test('oracleRoute refreshes an explicit receiver account after execution', async () => {
+    test('oracleRoute keeps signer-backed cache bound to signer after third-party writes', async () => {
         const token = Object.create(CToken.prototype) as CToken;
         const reloads: Array<{ account: string; allowSignerMismatch: boolean | undefined }> = [];
         const events: string[] = [];
@@ -409,9 +409,58 @@ describe('CToken simple leverage execution', () => {
 
         assert.deepEqual(events, ['wait', 'reload']);
         assert.deepEqual(reloads, [{
-            account: RECEIVER,
-            allowSignerMismatch: true,
+            account: ACCOUNT,
+            allowSignerMismatch: undefined,
         }]);
+    });
+
+    test('_getLeverageSnapshot does not partially mutate market user cache', async () => {
+        const token = Object.create(CToken.prototype) as CToken;
+        const borrow = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
+        const marketUser = {
+            collateral: 10n * WAD,
+            debt: 4n * WAD,
+        };
+
+        (token as any).address = COLLATERAL;
+        (token as any).cache = {
+            symbol: 'cCOLL',
+            assetPrice: WAD,
+            sharePrice: WAD,
+        };
+        (token as any).getAccountOrThrow = () => ACCOUNT;
+        (token as any).market = {
+            cache: {
+                user: marketUser,
+            },
+            reader: {
+                getLeverageSnapshot: async () => ({
+                    collateralUsd: 200n * WAD,
+                    debtUsd: 80n * WAD,
+                    collateralAssetPrice: 2n * WAD,
+                    sharePrice: 3n * WAD,
+                    debtAssetPrice: 4n * WAD,
+                    debtTokenBalance: 40n * WAD,
+                    oracleError: false,
+                }),
+            },
+        };
+        (borrow as any).address = DEBT;
+        (borrow as any).cache = {
+            symbol: 'dDEBT',
+            assetPrice: WAD,
+        };
+
+        const snapshot = await (token as any)._getLeverageSnapshot(borrow);
+
+        assert.equal(snapshot.collateralUsd, 200n * WAD);
+        assert.equal((token as any).cache.assetPrice, 2n * WAD);
+        assert.equal((token as any).cache.sharePrice, 3n * WAD);
+        assert.equal((borrow as any).cache.assetPrice, 4n * WAD);
+        assert.deepEqual(marketUser, {
+            collateral: 10n * WAD,
+            debt: 4n * WAD,
+        });
     });
 
     test('leverageDown fails closed for unsupported position manager types before quoting', async () => {
@@ -472,6 +521,32 @@ describe('CToken simple leverage execution', () => {
             success: false,
             error: 'Simple leverage requires distinct collateral and borrow assets.',
         });
+        assert.deepEqual(quoteCalls, []);
+        assert.deepEqual(depositCalls, []);
+    });
+
+    test('depositAndLeverage rejects zero-sized deposits before approvals or quoting', async () => {
+        const { token, borrow, quoteCalls, depositCalls } = createSimpleExecutionHarness();
+        let approvalChecked = false;
+        (token as any)._checkTokenApproval = async () => {
+            approvalChecked = true;
+            throw new Error('approval should not be checked for zero deposit-and-leverage');
+        };
+
+        const result = await token.depositAndLeverage(
+            Decimal(0),
+            borrow,
+            Decimal('1.60'),
+            'simple',
+            Decimal(0.01),
+            true,
+        );
+
+        assert.deepEqual(result, {
+            success: false,
+            error: 'Deposit amount must be greater than zero.',
+        });
+        assert.equal(approvalChecked, false);
         assert.deepEqual(quoteCalls, []);
         assert.deepEqual(depositCalls, []);
     });

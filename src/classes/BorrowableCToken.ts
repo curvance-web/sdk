@@ -117,10 +117,11 @@ export class BorrowableCToken extends CToken {
     override async depositAsCollateral(amount: TokenInput, zap: ZapperInstructions = 'none',  receiver: address | null = null) {
         const signer = this.requireSigner();
         const collateralReceiver = receiver ?? signer.address as address;
-        if(
-            collateralReceiver.toLowerCase() === (signer.address as string).toLowerCase() &&
-            this.readFreshUserCache("userDebt", "depositing as collateral") > 0n
-        ) {
+        const receiverDebt = collateralReceiver.toLowerCase() === (signer.address as string).toLowerCase()
+            ? this.readFreshUserCache("userDebt", "depositing as collateral")
+            : await this.debtBalance(collateralReceiver);
+
+        if(receiverDebt > 0n) {
             throw new Error("Cannot deposit as collateral when there is outstanding debt");
         }
         return super.depositAsCollateral(amount, zap, receiver);
@@ -157,6 +158,9 @@ export class BorrowableCToken extends CToken {
         }
 
         const assets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
+        if(assets <= 0n) {
+            throw new Error("Borrow amount must be greater than zero.");
+        }
 
         const calldata = this.getCallData("borrow", [ assets, receiver ]);
         return this.oracleRoute(calldata);

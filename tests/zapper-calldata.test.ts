@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CToken, LEVERAGE, NATIVE_ADDRESS } from "../src";
+import { CToken, LEVERAGE, NATIVE_ADDRESS, chain_config, toContractSwapSlippage } from "../src";
 import { Zapper } from "../src/classes/Zapper";
 import type { address } from "../src/types";
 import Decimal from "decimal.js";
@@ -27,7 +27,7 @@ function createBufferedToken() {
     return { token, calls };
 }
 
-function createZapper() {
+function createZapper(feeBps: bigint = 0n) {
     const calls: Array<{ method: string; args: unknown[] }> = [];
     const zapper = Object.create(Zapper.prototype) as Zapper;
     (zapper as any).address = ZAPPER;
@@ -35,8 +35,8 @@ function createZapper() {
     (zapper as any).setup = {
         chain: "monad-mainnet",
         feePolicy: {
-            getFeeBps: () => 0n,
-            feeReceiver: undefined,
+            getFeeBps: () => feeBps,
+            feeReceiver: feeBps > 0n ? RECEIVER : undefined,
         },
     };
     (zapper as any).getCallData = (method: string, args: unknown[]) => {
@@ -45,6 +45,46 @@ function createZapper() {
     };
 
     return { zapper, calls };
+}
+
+function installDexQuoteStub() {
+    const originalDexAgg = chain_config["monad-mainnet"].dexAgg;
+    const quoteCalls: Array<{
+        wallet: string;
+        tokenIn: string;
+        tokenOut: string;
+        amount: bigint;
+        slippage: bigint;
+        feeBps: bigint | undefined;
+        feeReceiver: address | undefined;
+    }> = [];
+
+    (chain_config["monad-mainnet"] as any).dexAgg = {
+        quote: async (
+            wallet: string,
+            tokenIn: string,
+            tokenOut: string,
+            amount: bigint,
+            slippage: bigint,
+            feeBps?: bigint,
+            feeReceiver?: address,
+        ) => {
+            quoteCalls.push({ wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver });
+            return {
+                to: "0x00000000000000000000000000000000000000e1" as address,
+                min_out: amount - 100n,
+                out: amount,
+                calldata: "0x1234",
+            };
+        },
+    };
+
+    return {
+        quoteCalls,
+        restore: () => {
+            (chain_config["monad-mainnet"] as any).dexAgg = originalDexAgg;
+        },
+    };
 }
 
 test("CToken.convertToShares applies the default share-drift buffer", async () => {
@@ -71,6 +111,39 @@ test("simple same-token zap expectedShares uses buffered convertToShares", async
     assert.equal(args[3], 9_998n);
 });
 
+test("real simple zap encodes WAD swapSafe slippage with fee expansion", async () => {
+    const { token, calls: shareCalls } = createBufferedToken();
+    const { zapper, calls: calldataCalls } = createZapper(4n);
+    const dex = installDexQuoteStub();
+
+    try {
+        await zapper.getSimpleZapCalldata(token, TOKEN, "0x00000000000000000000000000000000000000d2" as address, 10_000n, false, 50n, RECEIVER);
+    } finally {
+        dex.restore();
+    }
+
+    assert.deepEqual(dex.quoteCalls, [{
+        wallet: ZAPPER,
+        tokenIn: TOKEN,
+        tokenOut: "0x00000000000000000000000000000000000000d2",
+        amount: 10_000n,
+        slippage: 50n,
+        feeBps: 4n,
+        feeReceiver: RECEIVER,
+    }]);
+    assert.deepEqual(shareCalls, [{
+        assets: 9_900n,
+        bufferBps: LEVERAGE.SHARES_BUFFER_BPS,
+    }]);
+    const args = calldataCalls[0]?.args as any[];
+    assert.equal(calldataCalls[0]?.method, "swapAndDeposit");
+    assert.notEqual(args[2].slippage, 50n);
+    assert.equal(args[2].slippage, toContractSwapSlippage(50n, 4n));
+    assert.equal(args[2].target, "0x00000000000000000000000000000000000000e1");
+    assert.equal(args[2].call, "0x1234");
+    assert.equal(args[3], 9_898n);
+});
+
 test("native simple zap expectedShares uses buffered convertToShares", async () => {
     const { token, calls: shareCalls } = createBufferedToken();
     const { zapper, calls: calldataCalls } = createZapper();
@@ -90,21 +163,22 @@ test("native simple zap expectedShares uses buffered convertToShares", async () 
 test("Zapper.nativeZap wraps native input for native-simple wrapped-native deposits", async () => {
     const { token } = createBufferedToken();
     const { zapper, calls: calldataCalls } = createZapper();
-    const executeCalls: Array<{ calldata: unknown; overrides: Record<string, unknown> }> = [];
+    const oracleRouteCalls: Array<{ calldata: unknown; overrides: Record<string, unknown>; receiver: address }> = [];
 
     (token as any).isWrappedNative = true;
     (zapper as any).type = "native-simple";
-    (zapper as any).executeCallData = async (calldata: unknown, overrides: Record<string, unknown>) => {
-        executeCalls.push({ calldata, overrides });
+    (token as any).oracleRoute = async (calldata: unknown, overrides: Record<string, unknown>, receiver: address) => {
+        oracleRouteCalls.push({ calldata, overrides, receiver });
         return { hash: "0xnative" };
     };
 
     const tx = await zapper.nativeZap(token, 20_000n, false, RECEIVER);
 
     assert.deepEqual(tx, { hash: "0xnative" });
-    assert.deepEqual(executeCalls, [{
+    assert.deepEqual(oracleRouteCalls, [{
         calldata: "0xencoded",
-        overrides: { value: 20_000n },
+        overrides: { value: 20_000n, to: ZAPPER },
+        receiver: RECEIVER,
     }]);
     const args = calldataCalls[0]?.args as any[];
     assert.equal(args[1], true);
@@ -115,7 +189,7 @@ test("Zapper.nativeZap wraps native input for native-simple wrapped-native depos
 test("Zapper.simpleZap forwards native input value to the zapper call", async () => {
     const { token } = createBufferedToken();
     const { zapper } = createZapper();
-    const executeCalls: Array<{ calldata: unknown; overrides: Record<string, unknown> }> = [];
+    const oracleRouteCalls: Array<{ calldata: unknown; overrides: Record<string, unknown>; receiver: address }> = [];
 
     (zapper as any).getSimpleZapCalldata = async (
         _ctoken: unknown,
@@ -131,17 +205,39 @@ test("Zapper.simpleZap forwards native input value to the zapper call", async ()
         assert.equal(receiver, RECEIVER);
         return "0xencoded";
     };
-    (zapper as any).executeCallData = async (calldata: unknown, overrides: Record<string, unknown>) => {
-        executeCalls.push({ calldata, overrides });
+    (token as any).oracleRoute = async (calldata: unknown, overrides: Record<string, unknown>, receiver: address) => {
+        oracleRouteCalls.push({ calldata, overrides, receiver });
         return { hash: "0xsimple-native" };
     };
 
     const tx = await zapper.simpleZap(token, NATIVE_ADDRESS, TOKEN, 20_000n, false, 50n, RECEIVER);
 
     assert.deepEqual(tx, { hash: "0xsimple-native" });
-    assert.deepEqual(executeCalls, [{
+    assert.deepEqual(oracleRouteCalls, [{
         calldata: "0xencoded",
-        overrides: { value: 20_000n },
+        overrides: { value: 20_000n, to: ZAPPER },
+        receiver: RECEIVER,
+    }]);
+});
+
+test("Zapper.simpleZap routes ERC20 input through cToken oracleRoute without native value", async () => {
+    const { token } = createBufferedToken();
+    const { zapper } = createZapper();
+    const oracleRouteCalls: Array<{ calldata: unknown; overrides: Record<string, unknown>; receiver: address }> = [];
+
+    (zapper as any).getSimpleZapCalldata = async () => "0xencoded";
+    (token as any).oracleRoute = async (calldata: unknown, overrides: Record<string, unknown>, receiver: address) => {
+        oracleRouteCalls.push({ calldata, overrides, receiver });
+        return { hash: "0xsimple-erc20" };
+    };
+
+    const tx = await zapper.simpleZap(token, TOKEN, CTOKEN, 20_000n, true, 50n, RECEIVER);
+
+    assert.deepEqual(tx, { hash: "0xsimple-erc20" });
+    assert.deepEqual(oracleRouteCalls, [{
+        calldata: "0xencoded",
+        overrides: { to: ZAPPER },
+        receiver: RECEIVER,
     }]);
 });
 

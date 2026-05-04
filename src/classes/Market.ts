@@ -545,7 +545,7 @@ export class Market {
 
     async reloadMarketData() {
         const dynamic_data = await this.reader.getDynamicMarketData();
-        const dynamic = dynamic_data.find(m => m.address == this.address);
+        const dynamic = dynamic_data.find(m => m.address.toLowerCase() == this.address.toLowerCase());
         if(dynamic == undefined) {
             throw new Error(`Could not find dynamic data for market ${this.address}.`);
         }

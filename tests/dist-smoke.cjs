@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
 const sdk = require("../dist/index.js");
 
 const TOKEN_IN = "0x0000000000000000000000000000000000000001";
@@ -100,7 +102,16 @@ async function main() {
     assert.equal(typeof sdk.setupChain, "function", "dist should export setupChain");
     assert.equal(typeof sdk.Calldata, "function", "dist should export Calldata");
     assert.equal(typeof sdk.OptimizerReader, "function", "dist should export OptimizerReader");
+    assert.equal(typeof sdk.LendingOptimizer, "function", "dist should export LendingOptimizer");
+    assert.equal(typeof sdk.PositionManager, "function", "dist should export PositionManager");
     assert.equal(typeof sdk.KyberSwap, "function", "dist should export KyberSwap");
+    assert.equal(typeof sdk.Kuru, "function", "dist should export Kuru");
+    assert.equal(typeof sdk.MultiDexAgg, "function", "dist should export MultiDexAgg");
+    assert.equal(typeof sdk.leverage.calculateBorrowAmount, "function", "dist should export leverage namespace");
+    assert.equal(typeof sdk.borrow.calculateMaxBorrow, "function", "dist should export borrow namespace");
+    assert.equal(typeof sdk.collateral.calculateExchangeRate, "function", "dist should export collateral namespace");
+    assert.equal(typeof sdk.health.formatHealthFactor, "function", "dist should export health namespace");
+    assert.equal(typeof sdk.amounts.normalizeAmountString, "function", "dist should export amounts namespace");
 
     assert.equal(
         "optimalDeposit" in sdk.OptimizerReader.prototype,
@@ -111,6 +122,20 @@ async function main() {
         "optimalWithdrawal" in sdk.OptimizerReader.prototype,
         false,
         "dist should not expose removed OptimizerReader.optimalWithdrawal",
+    );
+    const optimizerReaderDist = readFileSync(
+        path.join(__dirname, "..", "dist", "classes", "OptimizerReader.js"),
+        "utf8",
+    );
+    assert.match(
+        optimizerReaderDist,
+        /function exchangeRate\(\) view returns \(uint256\)/,
+        "dist OptimizerReader fallback ABI should use view-only exchangeRate",
+    );
+    assert.doesNotMatch(
+        optimizerReaderDist,
+        /exchangeRateUpdated/,
+        "dist OptimizerReader fallback must not call non-view exchangeRateUpdated",
     );
 
     const calls = [];

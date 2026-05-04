@@ -4,6 +4,10 @@ import { Market } from "../src/classes/Market";
 import { aggregateMerklAprByToken } from "../src/helpers";
 import Decimal from "decimal.js";
 
+function assertDecimalString(actual: Decimal | undefined, expected: string, message: string) {
+    assert.equal(actual?.toString(), expected, message);
+}
+
 test("buildDeployDataIndex normalizes addresses and keeps the first deployment entry", () => {
     const index = (Market as any).buildDeployDataIndex({
         contracts: {
@@ -56,9 +60,9 @@ test("aggregateMerklAprByToken sums duplicate opportunities by the shared matchi
     ], "borrow");
 
     assert.equal(depositApy.size, 1);
-    assert.ok(depositApy.get("0xabc")?.eq(new Decimal(0.46)));
+    assertDecimalString(depositApy.get("0xabc"), "0.46", "deposit APY should sum duplicate token membership rows");
     assert.equal(borrowApy.size, 1);
-    assert.ok(borrowApy.get("0xabc")?.eq(new Decimal(0.12)));
+    assertDecimalString(borrowApy.get("0xabc"), "0.12", "borrow APY should sum identifier and membership matches");
 });
 
 test("buildYieldIndex keeps the first match for a token symbol", () => {
