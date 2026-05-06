@@ -472,6 +472,17 @@
   },
   {
     "type": "error",
+    "name": "SwapperLib__TokenPrice",
+    "inputs": [
+      {
+        "name": "inputToken",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "SwapperLib__UnknownCalldata",
     "inputs": []
   }
