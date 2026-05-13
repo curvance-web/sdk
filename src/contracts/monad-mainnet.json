@@ -253,6 +253,10 @@
       }
     }
   },
+  "Optimizers": {
+    "cAUSD+": "0x37Bf94D8Af2Fbbf562Da5a3f1b0787b3515D10dd"
+  },
+  "OptimizerReader": "0xCF884916f2F4d06C4187Cb600C76b6DE46F7BB3c",
   "ProtocolReader": "0x55C7c1fe1DACB014aD3b21951728B5E580662268",
   "CombinedAggregator-ezETH": "0xd5F84C4497621768f3F08b65ad7019BdF183b1fd",
   "CombinedAggregator-earnAUSD": "0xf80CC9965d260d7cD96E41b9734F031279dCDf2f",
