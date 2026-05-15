@@ -17,8 +17,7 @@ const ausd_address             = "0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a";
 const lend_optimizer           = contracts.Optimizers['cAUSD+'] as address;
 const ec_address               = "0x379D4a8FBc23A8Fd8c2b3738Dbf1fEBe9a64399c";
 const rebalancer_wallet        = "0xD21DC65f42fB039A1c403a38C18C2731211eCBC7";
-// New OptimizerReader with cap buffer + optimalRebalanceAt projection.
-const optimizer_reader_address = "0xc40d006435ea90E60e08D16066343E970652E3f4" as address;
+const optimizer_reader_address = contracts.OptimizerReader as address;
 // Slippage band (BPS) around each market's ideal allocation.
 const slippage_bps             = 100n;
 
@@ -28,40 +27,22 @@ async function main() {
     const seed_amount_bn = FormatConverter.decimalToBigInt(seed_amount, 6n);
 
     try {
-        // Setup perms & gas, remove market perms
-        {
-            await provider.send("anvil_setBalance", [ec_address, FormatConverter.decimalToBigInt(Decimal(10_000), 18n).toString()]);
-            await provider.send("anvil_setBalance", [rebalancer_wallet, FormatConverter.decimalToBigInt(Decimal(10_000), 18n).toString()]);
-        }
+        // // Deposit with my wallet
+        // {
+        //     const signer = await impersonate(me_address);
+        //     const ausd = new ERC20(signer, ausd_address);
+        //     const optimizer = contractSetup(signer, lend_optimizer, [
+        //         "function deposit(uint256 assets, address receiver) external returns (uint256 shares)"
+        //     ]) as Contract & {
+        //         deposit(assets: bigint, receiver: string): Promise<{ shares: bigint }>;
+        //     };
 
-        // Seed the wallet with aUSD
-        {
-            const signer = await impersonate(steal_money_from);
-            const ausd = new ERC20(signer, ausd_address);
-            const balance_before = await ausd.balanceOf(me_address);
-            console.log(`Seed Balance before: ${balance_before}`);
-
-            await ausd.rawTransfer(ec_address, 77777n);
-            await ausd.transfer(me_address, seed_amount);
-            console.log(`Seed Transferred ${seed_amount} aUSD (${seed_amount_bn} raw)`);
-        }
-
-        // Deposit with my wallet
-        {
-            const signer = await impersonate(me_address);
-            const ausd = new ERC20(signer, ausd_address);
-            const optimizer = contractSetup(signer, lend_optimizer, [
-                "function deposit(uint256 assets, address receiver) external returns (uint256 shares)"
-            ]) as Contract & {
-                deposit(assets: bigint, receiver: string): Promise<{ shares: bigint }>;
-            };
-
-            console.log(`AUSD balance before deposit: ${await ausd.balanceOf(me_address)}`);
-            await ausd.approve(lend_optimizer, null);
-            await optimizer.deposit(seed_amount_bn, me_address);
-            console.log(`Deposited ${seed_amount} aUSD into the optimizer`);
-            console.log(`AUSD balance after deposit: ${await ausd.balanceOf(me_address)}`);
-        }
+        //     console.log(`AUSD balance before deposit: ${await ausd.balanceOf(me_address)}`);
+        //     await ausd.approve(lend_optimizer, null);
+        //     await optimizer.deposit(seed_amount_bn, me_address);
+        //     console.log(`Deposited ${seed_amount} aUSD into the optimizer`);
+        //     console.log(`AUSD balance after deposit: ${await ausd.balanceOf(me_address)}`);
+        // }
 
         // Rebalance. optimalRebalance == optimalRebalanceAt(_, _, block.timestamp),
         // which is the safe default — forward projection adds no real benefit
@@ -78,7 +59,12 @@ async function main() {
             console.log(instructions.bounds);
 
             const optimizer = new LendingOptimizer(lend_optimizer, new ERC20(signer, ausd_address), provider, signer);
-            await optimizer.rebalance(instructions);
+            if(instructions.actions.length > 0) {
+                const tx = await optimizer.rebalance(instructions);
+                console.log("Rebalance transaction sent. Hash:", tx.hash);
+            } else {
+                console.log("No rebalance needed");
+            }
         }
     } catch (err) {
         console.error("Error during execution:", err);
