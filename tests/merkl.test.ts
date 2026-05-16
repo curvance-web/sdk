@@ -6,6 +6,7 @@ import {
     fetchMerklUserRewards,
     filterMerklOpportunitiesByChain,
 } from "../src/integrations/merkl";
+import type { MerklOpportunity } from "../src/integrations/merkl";
 import {
     aggregateMerklAprByToken,
     getBorrowCost,
@@ -18,6 +19,19 @@ import Decimal from "decimal.js";
 
 function assertDecimalString(actual: Decimal | undefined, expected: string, message: string) {
     assert.equal(actual?.toString(), expected, message);
+}
+
+function merklOpportunity(overrides: Partial<MerklOpportunity> & Pick<MerklOpportunity, "identifier">): MerklOpportunity {
+    const { identifier, ...rest } = overrides;
+
+    return {
+        name: identifier,
+        apr: 1,
+        identifier,
+        type: "lend",
+        tokens: [],
+        ...rest,
+    };
 }
 
 test("fetchMerklOpportunities forwards action and chainId in the request URL", async (t) => {
@@ -192,6 +206,133 @@ test("filterMerklOpportunitiesByChain preserves metadata-less rows from already 
     ]);
 });
 
+test("filterMerklOpportunitiesByChain uses explicit chain metadata in precedence order", () => {
+    const rows = filterMerklOpportunitiesByChain([
+        merklOpportunity({
+            identifier: "chain-object-wins",
+            chain: { id: 143, name: "Monad" },
+            chainId: 1,
+        }),
+        merklOpportunity({
+            identifier: "chain-id",
+            chainId: 143,
+            computeChainId: 1,
+        }),
+        merklOpportunity({
+            identifier: "compute-chain-id",
+            computeChainId: 143,
+            distributionChainId: 1,
+        }),
+        merklOpportunity({
+            identifier: "distribution-chain-id",
+            distributionChainId: 143,
+        }),
+        merklOpportunity({
+            identifier: "wrong-distribution-chain-id",
+            distributionChainId: 1,
+        }),
+        merklOpportunity({
+            identifier: "metadata-less",
+        }),
+    ], 143);
+
+    assert.deepEqual(rows.map((row) => row.identifier), [
+        "chain-object-wins",
+        "chain-id",
+        "compute-chain-id",
+        "distribution-chain-id",
+        "metadata-less",
+    ]);
+});
+
+test("fetchMerklOpportunities does not apply chain filtering when no chainId is requested", async (t) => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => [
+            {
+                name: "monad lend",
+                apr: 5,
+                action: "LEND",
+                identifier: "monad-lend",
+                type: "lend",
+                chain: { id: 143, name: "Monad" },
+                tokens: [],
+            },
+            {
+                name: "ethereum lend",
+                apr: 6,
+                action: "LEND",
+                identifier: "ethereum-lend",
+                type: "lend",
+                chain: { id: 1, name: "Ethereum" },
+                tokens: [],
+            },
+        ],
+    } as Response)) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    const rows = await fetchMerklOpportunities({ action: "LEND" });
+
+    assert.deepEqual(rows.map((row) => row.identifier), ["monad-lend", "ethereum-lend"]);
+});
+
+test("fetchMerklOpportunities drops malformed explicit chain metadata before filtering", async (t) => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => [
+            {
+                name: "legacy lend",
+                apr: 4,
+                action: "LEND",
+                identifier: "0x00000000000000000000000000000000000000a1",
+                type: "lend",
+                tokens: [],
+            },
+            {
+                name: "bad chain lend",
+                apr: 5,
+                action: "LEND",
+                identifier: "bad-chain-lend",
+                type: "lend",
+                chain: { id: "143", name: "Monad" },
+                tokens: [],
+            },
+            {
+                name: "monad lend",
+                apr: 6,
+                action: "LEND",
+                identifier: "monad-lend",
+                type: "lend",
+                chainId: 143,
+                computeChainId: 143,
+                distributionChainId: 143,
+                tokens: [],
+            },
+        ],
+    } as Response)) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    const rows = await fetchMerklOpportunities({ action: "LEND", chainId: 143 });
+
+    assert.deepEqual(rows.map((row) => row.identifier), [
+        "0x00000000000000000000000000000000000000a1",
+        "monad-lend",
+    ]);
+    assert.equal(rows[1]?.chainId, 143);
+    assert.equal(rows[1]?.computeChainId, 143);
+    assert.equal(rows[1]?.distributionChainId, 143);
+});
+
 test("fetchMerklOpportunities preserves identifier-only borrow rows", async (t) => {
     const originalFetch = globalThis.fetch;
 
@@ -321,6 +462,74 @@ test("fetchMerklUserRewards drops mixed-chain reward groups from successful resp
     assert.deepEqual(rows.map((row) => row.chain.id), [143]);
 });
 
+test("fetchMerklUserRewards normalizes reward rows before strict chain filtering", async (t) => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => [
+            {
+                chain: { id: 1, name: "Ethereum" },
+                rewards: [
+                    {
+                        distributionChainId: 1,
+                        root: "0xethroot",
+                        recipient: "0xrecipient",
+                        amount: "100",
+                        claimed: "0",
+                        token: {
+                            symbol: "ETH",
+                            address: "0x0000000000000000000000000000000000000001",
+                            chainId: 1,
+                            decimals: 18,
+                        },
+                    },
+                ],
+            },
+            {
+                chain: { id: 143, name: "Monad" },
+                rewards: [
+                    {
+                        distributionChainId: 143,
+                        root: "0xmonadroot",
+                        recipient: "0xrecipient",
+                        amount: "200",
+                        claimed: "25",
+                        token: {
+                            symbol: "MON",
+                            address: "0x0000000000000000000000000000000000000002",
+                            chainId: 143,
+                            decimals: 18,
+                        },
+                    },
+                    {
+                        distributionChainId: 143,
+                        root: "0xbadroot",
+                        recipient: "0xrecipient",
+                        amount: "300",
+                        claimed: "0",
+                        token: { symbol: "BROKEN" },
+                    },
+                ],
+            },
+        ],
+    } as Response)) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    const rows = await fetchMerklUserRewards({
+        wallet: "0x00000000000000000000000000000000000000aa",
+        chainId: 143,
+    });
+
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.chain.name, "Monad");
+    assert.equal(rows[0]?.rewards.length, 1);
+    assert.equal(rows[0]?.rewards[0]?.root, "0xmonadroot");
+});
+
 test("fetchMerklUserRewards degrades malformed successful bodies to no rewards", async (t) => {
     const originalFetch = globalThis.fetch;
 
@@ -438,6 +647,36 @@ test("aggregateMerklAprByToken rolls duplicate lend opportunities up by token me
     assert.equal(apyByToken.size, 2);
     assertDecimalString(apyByToken.get(WMON.toLowerCase()), "0.25", "WMON deposit APY should sum duplicate campaigns");
     assertDecimalString(apyByToken.get(AUSD.toLowerCase()), "0.25", "AUSD deposit APY should sum duplicate campaigns");
+});
+
+test("aggregateMerklAprByToken composes with chain-filtered Merkl opportunities", () => {
+    const WMON = "0x00000000000000000000000000000000000000a1";
+
+    const filtered = filterMerklOpportunitiesByChain([
+        merklOpportunity({
+            identifier: "monad-lend",
+            apr: 10,
+            chain: { id: 143, name: "Monad" },
+            tokens: [{ address: WMON, symbol: "WMON" }],
+        }),
+        merklOpportunity({
+            identifier: "legacy-lend",
+            apr: 5,
+            tokens: [{ address: WMON, symbol: "WMON" }],
+        }),
+        merklOpportunity({
+            identifier: "ethereum-lend",
+            apr: 100,
+            chainId: 1,
+            tokens: [{ address: WMON, symbol: "WMON" }],
+        }),
+    ], 143);
+
+    const apyByToken = aggregateMerklAprByToken(filtered, "deposit");
+
+    assert.deepEqual(filtered.map((row) => row.identifier), ["monad-lend", "legacy-lend"]);
+    assertDecimalString(apyByToken.get(WMON.toLowerCase()), "0.15", "wrong-chain APY should not be counted");
+    assert.equal(getMerklDepositIncentives(WMON, filtered).toString(), "0.15");
 });
 
 test("aggregateMerklAprByToken skips malformed rows instead of throwing during boot enrichment", () => {

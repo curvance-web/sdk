@@ -66,7 +66,7 @@ What it proves:
 - query-budget expectations for boot and targeted refresh paths
 - fee-policy routing and Decimal↔bigint conversion correctness
 - `Market.getSnapshots` concurrent dispatch and `applyState` partial-refresh preservation
-- DEX aggregator fee-aware slippage expansion (KyberSwap and Kuru expand inside quoteAction when fee BPS is active)
+- DEX aggregator fee-aware slippage expansion (KyberSwap expands inside quoteAction when fee BPS is active)
 
 What it does not prove:
 

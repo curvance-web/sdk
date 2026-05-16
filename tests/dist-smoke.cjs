@@ -105,8 +105,8 @@ async function main() {
     assert.equal(typeof sdk.LendingOptimizer, "function", "dist should export LendingOptimizer");
     assert.equal(typeof sdk.PositionManager, "function", "dist should export PositionManager");
     assert.equal(typeof sdk.KyberSwap, "function", "dist should export KyberSwap");
-    assert.equal(typeof sdk.Kuru, "function", "dist should export Kuru");
     assert.equal(typeof sdk.MultiDexAgg, "function", "dist should export MultiDexAgg");
+    assert.equal("Kuru" in sdk, false, "dist should not export deprecated Kuru support");
     assert.equal(typeof sdk.leverage.calculateBorrowAmount, "function", "dist should export leverage namespace");
     assert.equal(typeof sdk.borrow.calculateMaxBorrow, "function", "dist should export borrow namespace");
     assert.equal(typeof sdk.collateral.calculateExchangeRate, "function", "dist should export collateral namespace");

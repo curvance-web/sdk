@@ -148,8 +148,6 @@ export function amplifyContractSlippage(
  * so the on-chain behavior is uniform. Currently used by:
  *
  *  - `KyberSwap.quoteAction` (explicit `currency_in` + `isInBps` params)
- *  - `Kuru.quoteAction` (referrer-style fee deduction, per Kuru docs
- *    mirroring KyberSwap's currency_in semantics)
  *
  * An aggregator that paid fees out-of-band (e.g., signed RFQ with fill-
  * price already netted) would NOT use this helper — its `_swapSafe` sees

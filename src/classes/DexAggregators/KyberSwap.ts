@@ -468,7 +468,7 @@ export class KyberSwap implements IDexAgg {
         const min_out = amountOut * (10000n - slippage) / 10000n;
 
         // Case-insensitive router comparison via validateRouterAddress — also
-        // enforces address format/checksum. Matches Kuru's router gate.
+        // enforces address format/checksum.
         const validatedRouter = validateRouterAddress(build_data.data.routerAddress, this.router, 'KyberSwap');
 
         // Validate that the API actually embedded the fee params we requested.

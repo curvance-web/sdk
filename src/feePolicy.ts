@@ -77,10 +77,9 @@ import { chain_config } from "./chains";
  *   query it. The classifier callback pattern generalizes to this — a
  *   `getUserVolume(address)` callback that the policy uses to pick a tier.
  *
- * - **Per-aggregator routing fees.** Currently both KyberSwap and Kuru use the
- *   same fee policy. If routing economics differ (e.g., Kuru's referrerFeeBps
- *   has different rebate semantics), the policy interface could be extended
- *   to take an aggregator name and return aggregator-specific bps.
+ * - **Per-aggregator routing fees.** Current adapters use the same fee policy.
+ *   If routing economics differ, the policy interface could be extended to take
+ *   an aggregator name and return aggregator-specific bps.
  *
  * - **Leverage-tiered fees (if reversed from current decision).** The current
  *   design matches perp convention (flat bps on notional). If product later
@@ -125,7 +124,7 @@ export interface FeePolicy {
 export const CURVANCE_FEE_BPS = 4n;
 
 /** Curvance DAO fee receiver — same wallet used for protocol interest fees
- *  and existing Kuru aggregator referrer fees.  Must match
+ *  and current aggregator routing fees.  Must match
  *  centralRegistry.daoAddress() — the on-chain checker validates
  *  dynamically per-swap.  If DAO permissions transfer on-chain without
  *  updating this constant, every swap reverts. */

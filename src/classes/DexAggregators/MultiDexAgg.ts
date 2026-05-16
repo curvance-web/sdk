@@ -35,7 +35,7 @@ type QuoteValueSelector = (quote: Quote) => bigint;
  *   new MultiDexAgg([new KyberSwap()])
  *
  *   // Multi:
- *   new MultiDexAgg([new KyberSwap(), new Kuru()])
+ *   new MultiDexAgg([new KyberSwap(), anotherAggregator])
  */
 export class MultiDexAgg implements IDexAgg {
     private aggregators: IDexAgg[];

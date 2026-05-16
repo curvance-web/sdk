@@ -439,11 +439,11 @@ import { amplifyContractSlippage, toContractSwapSlippage } from "curvance"
 // user's raw `slippage` budget (reserved for variable DEX impact + drift).
 amplifyContractSlippage(baseSlippageBps, leverageDelta, bpsToAmplify)
 
-// Used by DEX aggregator adapters (KyberSwap, Kuru, etc.) in `quoteAction` to
+// Used by DEX aggregator adapters in `quoteAction` to
 // compute the WAD-BPS slippage tolerance for the `Swap.slippage` struct
 // field consumed by on-chain `_swapSafe`. When an adapter's fee model is
 // represented as value loss in the swap calldata (for example Kyber's
-// currency_in fee or Kuru's referrer-fee path), pass `feeBps` so `_swapSafe`
+// currency_in fee), pass `feeBps` so `_swapSafe`
 // does not treat deterministic fee loss as user slippage. Adapters whose
 // fees are not observable as swap value loss should omit `feeBps` / pass 0n.
 toContractSwapSlippage(userSlippageBps, feeBps?)
