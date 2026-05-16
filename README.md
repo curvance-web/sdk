@@ -682,12 +682,12 @@ import { LEVERAGE } from 'curvance';
 LEVERAGE.MAX_LEVERAGE_FACTOR          // Decimal(0.98)
 // Cap applied to the theoretical max leverage span. Reserves ~2% of the
 // equity-fraction slippage budget for deterministic loss channels
-// (CURVANCE_FEE_BPS, pool-fee variance, Redstone drift, share rounding)
+// (CURVANCE_FEE_BPS, pool-fee variance, oracle drift, share rounding)
 // that would otherwise push post-op LTV above collRatio at the boundary.
 
 LEVERAGE.LEVERAGE_UP_BUFFER_BPS       // 10n
 // Flat BPS buffer added to leverage-up slippage for share-rounding + fresh
-// Redstone price drift between snapshot RPC and tx broadcast. NOT amplified
+// Oracle price drift between snapshot RPC and tx broadcast. NOT amplified
 // by (L-1); the contract's equity-fraction denominator handles amplification.
 
 LEVERAGE.DELEVERAGE_OVERHEAD_BPS      // 60n
@@ -718,7 +718,6 @@ LEVERAGE.LEVERAGE_UP_VAULT_DRIFT_BPS  // 30n
 |---|---|
 | [ethers v6](https://www.npmjs.com/package/ethers) | Typed contract interactions, providers, and signer handling |
 | [decimal.js](https://www.npmjs.com/package/decimal.js) | Arbitrary-precision math for all token amounts, prices, and rates |
-| [@redstone-finance/sdk](https://www.npmjs.com/package/@redstone-finance/sdk) | Price feed writes bundled into multicalls for pull-oracle adaptors |
 
 ## ❯ Pre-Publish Checklist
 

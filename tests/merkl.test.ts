@@ -4,6 +4,7 @@ import {
     fetchMerklCampaignsBySymbol,
     fetchMerklOpportunities,
     fetchMerklUserRewards,
+    filterMerklOpportunitiesByChain,
 } from "../src/integrations/merkl";
 import {
     aggregateMerklAprByToken,
@@ -119,6 +120,78 @@ test("fetchMerklOpportunities filters malformed successful rows before returning
     assert.equal(rows[0]?.rewardsRecord?.breakdowns?.length, 1);
 });
 
+test("fetchMerklOpportunities keeps chain-filtered rows without metadata and drops explicit wrong-chain rows", async (t) => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => [
+            {
+                name: "legacy lend",
+                apr: 4,
+                action: "LEND",
+                identifier: "0x00000000000000000000000000000000000000a1",
+                type: "lend",
+                tokens: [],
+            },
+            {
+                name: "monad lend",
+                apr: 5,
+                action: "LEND",
+                identifier: "monad-lend",
+                type: "lend",
+                chain: { id: 143, name: "Monad" },
+                tokens: [{ address: "0x00000000000000000000000000000000000000a2" }],
+            },
+            {
+                name: "ethereum lend",
+                apr: 6,
+                action: "LEND",
+                identifier: "ethereum-lend",
+                type: "lend",
+                computeChainId: 1,
+                tokens: [{ address: "0x00000000000000000000000000000000000000a3" }],
+            },
+        ],
+    } as Response)) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    const rows = await fetchMerklOpportunities({ action: "LEND", chainId: 143 });
+
+    assert.deepEqual(rows.map((row) => row.identifier), [
+        "0x00000000000000000000000000000000000000a1",
+        "monad-lend",
+    ]);
+    assert.equal(rows[1]?.chain?.id, 143);
+});
+
+test("filterMerklOpportunitiesByChain preserves metadata-less rows from already chain-scoped fetches", () => {
+    const rows = filterMerklOpportunitiesByChain([
+        {
+            name: "legacy",
+            apr: 1,
+            identifier: "0x00000000000000000000000000000000000000a1",
+            type: "lend",
+            tokens: [],
+        },
+        {
+            name: "wrong",
+            apr: 1,
+            identifier: "wrong",
+            type: "lend",
+            chainId: 1,
+            tokens: [],
+        },
+    ], 143);
+
+    assert.deepEqual(rows.map((row) => row.identifier), [
+        "0x00000000000000000000000000000000000000a1",
+    ]);
+});
+
 test("fetchMerklOpportunities preserves identifier-only borrow rows", async (t) => {
     const originalFetch = globalThis.fetch;
 
@@ -217,6 +290,35 @@ test("fetchMerklUserRewards filters malformed successful rows before returning t
     assert.equal(rows[0]?.chain.id, 143);
     assert.equal(rows[0]?.rewards.length, 1);
     assert.equal(rows[0]?.rewards[0]?.breakdowns?.length, 1);
+});
+
+test("fetchMerklUserRewards drops mixed-chain reward groups from successful responses", async (t) => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => [
+            {
+                chain: { id: 143, name: "Monad" },
+                rewards: [],
+            },
+            {
+                chain: { id: 1, name: "Ethereum" },
+                rewards: [],
+            },
+        ],
+    } as Response)) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    const rows = await fetchMerklUserRewards({
+        wallet: "0x00000000000000000000000000000000000000aa",
+        chainId: 143,
+    });
+
+    assert.deepEqual(rows.map((row) => row.chain.id), [143]);
 });
 
 test("fetchMerklUserRewards degrades malformed successful bodies to no rewards", async (t) => {

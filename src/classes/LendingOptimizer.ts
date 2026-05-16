@@ -7,6 +7,7 @@ import { Calldata } from "./Calldata";
 import { ERC20 } from "./ERC20";
 import FormatConverter from "./FormatConverter";
 import abi from "../abis/LendingOptimizer.json";
+import type { AllocationBound, ReallocationAction } from "./OptimizerReader";
 
 function getSetupConfig(): SetupConfigSnapshot | undefined {
     return (require("../setup") as typeof import("../setup")).setup_config;
@@ -34,6 +35,12 @@ export interface ILendingOptimizer {
     "deposit(uint256,address)"(assets: bigint, receiver: address): Promise<TransactionResponse>;
     "withdraw(uint256,address,address)"(assets: bigint, receiver: address, owner: address): Promise<TransactionResponse>;
     "redeem(uint256,address,address)"(shares: bigint, receiver: address, owner: address): Promise<TransactionResponse>;
+    rebalance(actions: ReallocationAction[], bounds: AllocationBound[]): Promise<TransactionResponse>;
+}
+
+export interface OptimizerRebalance {
+    actions: ReallocationAction[];
+    bounds: AllocationBound[];
 }
 
 export class LendingOptimizer extends Calldata<ILendingOptimizer> {
@@ -171,6 +178,16 @@ export class LendingOptimizer extends Calldata<ILendingOptimizer> {
         const calldata = this.contract.interface.encodeFunctionData(
             "redeem(uint256,address,address)",
             [shares, receiver, owner],
+        ) as bytes;
+        return this.executeCallData(calldata);
+    }
+
+    async rebalance(
+        rebalance: OptimizerRebalance,
+    ): Promise<TransactionResponse> {
+        const calldata = this.contract.interface.encodeFunctionData(
+            "rebalance",
+            [rebalance.actions, rebalance.bounds],
         ) as bytes;
         return this.executeCallData(calldata);
     }

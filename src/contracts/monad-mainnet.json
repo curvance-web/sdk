@@ -1,6 +1,7 @@
 {
   "CentralRegistry": "0x1310f352f1389969Ece6741671c4B919523912fF",
   "OracleManager": "0x32faD39e79FAc67f80d1C86CbD1598043e52CDb6",
+  "ProtocolManagerDeployment": "0x1482192DeB828a870f7E9B99d75D1DaFda973e4c",
   "adaptors": {
     "ChainlinkAdaptor": "0xACfE3fCcae79445836E03c5359BB96bd352b9C00",
     "RedstoneClassicAdaptor": "0x0fA602b3e748438A3F1599206Ed6DC497ab3331E",
@@ -11,9 +12,9 @@
     "KyberSwapChecker": "0xc63ac1e79c540DE6516679C97Bb00462fa6e15F7"
   },
   "zappers": {
-    "nativeVaultZapper": "0x792451D679542B660E8a2284d458Ed1b5657dE88",
-    "vaultZapper": "0x53634af626c728Cd857b807bA290F70d5B656A6D",
-    "simpleZapper": "0xc148ff6ac9DbEBc287f923E2ECd62D7dbC34160d"
+    "nativeVaultZapper": "0xF562745Ac9bf3466d5eD829819a27Ef0324EF407",
+    "vaultZapper": "0x8DA05a1Ad927fFB0A6B0E045b11b94e8d2256366",
+    "simpleZapper": "0x7b01E1D9c403aAAF7d960202Fee913F48C43E53c"
   },
   "VaultAggregator-AUSD-sAUSD": "0x73Af3E1848636D4DE6A61050D5487d6f09A7A1Be",
   "StaticPriceAggregator-loAZND": "0x6eCb16faf9b0c0F7098204e0FE685D2960b4C0Ba",
@@ -236,11 +237,30 @@
         "WBTC": "0xdB3e888c3b50771821226d30Ab6eC14eB5ba85bA"
       },
       "WBTC-DynamicIRM": "0x95B961B9aD06dB25831FcdA3c7A79b1EB7c3AFA8"
+    },
+    "savUSD | USDC": {
+      "address": "0x38104e87Eb96ce5ef1C23a06878dB0D657B4a699",
+      "plugins": {
+        "simplePositionManager": "0x7B918FF5EDc44B29ced4d3dc52Fb8b859025325c"
+      },
+      "irms": {
+        "savUSD": "0xa6424210c18C34035204fbd7F44Dcafb04053082",
+        "USDC": "0x11EE1eDee565c216f595D329A59863E360DCeB42"
+      },
+      "tokens": {
+        "savUSD": "0x3afB9A1cC0d2b0D62502B84B070601fF0DC84363",
+        "USDC": "0x9891178A1178E4C740Fa61Fd6e30A9D92D897590"
+      }
     }
   },
+  "Optimizers": {
+    "cAUSD+": "0x37Bf94D8Af2Fbbf562Da5a3f1b0787b3515D10dd"
+  },
+  "OptimizerReader": "0x8830939231Fa37098F0a02E4DCCb7224Fd2De057",
   "ProtocolReader": "0x55C7c1fe1DACB014aD3b21951728B5E580662268",
   "CombinedAggregator-ezETH": "0xd5F84C4497621768f3F08b65ad7019BdF183b1fd",
   "CombinedAggregator-earnAUSD": "0xf80CC9965d260d7cD96E41b9734F031279dCDf2f",
+  "CombinedAggregator-savUSD": "0x7e65E8CF0A49587dd9eCeca8e0585E26c0F1F09c",
   "DAOTimelock": "0x2677738657F27e1A3591E00AD7E5a78807688C08",
   "VaultAggregator-USDC-YZM": "0x7cB60D0Ca3B3dd08bA2aE5DF6686beAd289b1cF4",
   "VaultAggregator-AUSD-vUSD": "0x084BC7bE1326Ee1FD5387a4A48fD6999A79BFa8b"

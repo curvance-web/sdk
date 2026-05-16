@@ -82,6 +82,10 @@ export type MerklOpportunity = {
     action?: 'LEND' | 'BORROW' | string;
     identifier: string;
     type: string;
+    chain?: MerklChainInfo;
+    chainId?: number;
+    computeChainId?: number;
+    distributionChainId?: number;
     tokens: { address: string; symbol: string }[];
     rewardsRecord?: {
         id?: string;
@@ -395,6 +399,11 @@ function normalizeMerklOpportunity(value: unknown): MerklOpportunity | null {
             .filter((token): token is { address: string; symbol: string } => token != null)
         : [];
 
+    const chain = value.chain != undefined ? normalizeChainInfo(value.chain) : undefined;
+    if (value.chain != undefined && chain == null) {
+        return null;
+    }
+
     const opportunity: MerklOpportunity = {
         name: value.name,
         apr: value.apr,
@@ -404,6 +413,18 @@ function normalizeMerklOpportunity(value: unknown): MerklOpportunity | null {
     };
     if (isString(value.action)) {
         opportunity.action = value.action;
+    }
+    if (chain != undefined) {
+        opportunity.chain = chain;
+    }
+    if (isFiniteNumber(value.chainId)) {
+        opportunity.chainId = value.chainId;
+    }
+    if (isFiniteNumber(value.computeChainId)) {
+        opportunity.computeChainId = value.computeChainId;
+    }
+    if (isFiniteNumber(value.distributionChainId)) {
+        opportunity.distributionChainId = value.distributionChainId;
     }
     if (isRecord(value.rewardsRecord)) {
         const rewardsRecord: NonNullable<MerklOpportunity["rewardsRecord"]> = {};
@@ -421,6 +442,27 @@ function normalizeMerklOpportunity(value: unknown): MerklOpportunity | null {
     return opportunity;
 }
 
+function getOpportunityChainId(opportunity: MerklOpportunity): number | undefined {
+    return opportunity.chain?.id
+        ?? opportunity.chainId
+        ?? opportunity.computeChainId
+        ?? opportunity.distributionChainId;
+}
+
+export function filterMerklOpportunitiesByChain(
+    opportunities: MerklOpportunity[],
+    chainId?: number,
+): MerklOpportunity[] {
+    if (chainId == undefined) {
+        return opportunities;
+    }
+
+    return opportunities.filter((opportunity) => {
+        const opportunityChainId = getOpportunityChainId(opportunity);
+        return opportunityChainId == undefined || opportunityChainId === chainId;
+    });
+}
+
 function normalizeMerklOpportunities(value: unknown): MerklOpportunity[] {
     if (!Array.isArray(value)) {
         return [];
@@ -429,6 +471,17 @@ function normalizeMerklOpportunities(value: unknown): MerklOpportunity[] {
     return value
         .map(normalizeMerklOpportunity)
         .filter((opportunity): opportunity is MerklOpportunity => opportunity != null);
+}
+
+export function filterMerklUserRewardsByChain(
+    rewards: MerklUserRewardsResponse,
+    chainId?: number,
+): MerklUserRewardsResponse {
+    if (chainId == undefined) {
+        return rewards;
+    }
+
+    return rewards.filter(({ chain }) => chain.id === chainId);
 }
 
 export async function fetchMerklUserRewards({
@@ -444,7 +497,10 @@ export async function fetchMerklUserRewards({
         throw new Error('Failed to fetch Merkl rewards');
     }
 
-    return normalizeMerklUserRewardsResponse(await response.json());
+    return filterMerklUserRewardsByChain(
+        normalizeMerklUserRewardsResponse(await response.json()),
+        chainId,
+    );
 }
 
 type FetchCampaignsParams = FetchOptions & {
@@ -492,5 +548,8 @@ export async function fetchMerklOpportunities({
         throw new Error('Failed to fetch Merkl opportunities');
     }
 
-    return normalizeMerklOpportunities(await response.json());
+    return filterMerklOpportunitiesByChain(
+        normalizeMerklOpportunities(await response.json()),
+        chainId,
+    );
 }

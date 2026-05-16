@@ -1,6 +1,10 @@
 {
   "name": "curvance",
-  "version": "5.1.3",
+  "version": "5.1.9",
+  "packageManager": "npm@11.14.1",
+  "engines": {
+    "npm": ">=11.14.1 <12"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -45,7 +49,6 @@
     "test:optimizer": "ts-node tests/optimizer.test.ts"
   },
   "dependencies": {
-    "@redstone-finance/sdk": "0.9.0",
     "decimal.js": "10.6.0",
     "ethers": "6.16.0"
   },
