@@ -45,7 +45,6 @@
     "test:optimizer": "ts-node tests/optimizer.test.ts"
   },
   "dependencies": {
-    "@redstone-finance/sdk": "0.9.0",
     "decimal.js": "10.6.0",
     "ethers": "6.16.0"
   },

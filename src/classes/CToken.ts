@@ -7,7 +7,6 @@ import { Calldata } from "./Calldata";
 import Decimal from "decimal.js";
 import base_ctoken_abi from '../abis/BaseCToken.json';
 import { address, bytes, curvance_read_provider, curvance_signer, Percentage, TokenInput, USD, USD_WAD } from "../types";
-import { Redstone } from "./Redstone";
 import { Zapper, ZapperTypes, zapperTypeToName } from "./Zapper";
 import { PositionManager, PositionManagerTypes } from "./PositionManager";
 import { BorrowableCToken } from "./BorrowableCToken";
@@ -34,9 +33,9 @@ function ceilDiv(numerator: bigint, denominator: bigint): bigint {
  *
  * Single-oracle architecture (permanent design)
  * ---------------------------------------------
- * Curvance uses single-adaptor oracle configs only (Redstone Core/Classic
- * via BaseOracleAdaptor, which ignores the getLower flag — see line 78 of
- * BaseOracleAdaptor.sol). Dual-feed mode was deprecated in favor of the
+ * Curvance uses single-adaptor oracle configs only. The adaptor path ignores
+ * the getLower flag — see line 78 of BaseOracleAdaptor.sol. Dual-feed mode
+ * was deprecated in favor of the
  * price-guard system and orderflow MEV tech, and is not coming back.
  * This means MarketManager._statusOf returns symmetric prices for
  * collateral (queries with getLower=true) and debt (getLower=false), so
@@ -64,7 +63,7 @@ function ceilDiv(numerator: bigint, denominator: bigint): bigint {
  * Leverage UP: under single-oracle, the contract sees zero forced loss
  * for a perfect swap. The only real sources of difference between
  * snapshot-time prices and execution-time prices are: (a) wei-level share
- * rounding, (b) Redstone update drift between the snapshot RPC and the
+ * rounding, (b) oracle price drift between the snapshot RPC and the
  * tx broadcast block. Both are small constants in absolute terms, NOT
  * leverage-scaled. A small flat buffer suffices.
  *
@@ -88,8 +87,7 @@ export const LEVERAGE = {
      *      for the same market)
      *    - `CURVANCE_FEE_BPS` (deterministic, amplified by (L-1); at L=10
      *      eats ~36bps of equity-fraction)
-     *    - Oracle drift between preview snapshot and Redstone payload at
-     *      tx inclusion
+     *    - Oracle drift between preview snapshot and tx inclusion
      *    - Share rounding (wei-level)
      *
      *  History: 0.99 → 0.995 when caching improved precision (pre-fee era).
@@ -103,7 +101,7 @@ export const LEVERAGE = {
     MAX_LEVERAGE_FACTOR: Decimal(0.98),
     /** Flat BPS buffer added to leverage-up DEX/swapSafe slippage tolerance.
      *  Under single-oracle, the only forced loss at the swap level comes from
-     *  wei-level share rounding plus possible Redstone price drift between
+     *  wei-level share rounding plus possible oracle price drift between
      *  snapshot RPC and tx broadcast block. Both are small constants.
      *
      *  Fee handling: KyberSwap.quoteAction expands action.slippage by feeBps
@@ -1466,7 +1464,7 @@ export class CToken extends Calldata<ICToken> {
      * Compute slippage BPS for the contract's checkSlippage modifier when
      * leveraging up. Under Curvance's permanent single-oracle architecture
      * with fresh state from _getLeverageSnapshot, the only forced equity
-     * loss comes from wei-level share rounding plus possible Redstone price
+     * loss comes from wei-level share rounding plus possible oracle price
      * drift between snapshot RPC and tx broadcast — both small constants
      * in absolute terms. We add a small flat buffer; the contract's
      * equity-fraction denominator amplifies it by (L-1)x automatically.
@@ -1474,7 +1472,7 @@ export class CToken extends Calldata<ICToken> {
      * unaffected — that's the layer that bounds MEV extraction.
      *
      * Applied uniformly to simple AND vault/native-vault leverage-up paths.
-     * Simple path uses the buffer for share-rounding + Redstone drift as
+     * Simple path uses the buffer for share-rounding + oracle drift as
      * described above. Vault paths inherit the flat 10 bps through the
      * shared `slippage` variable before the per-branch
      * `amplifyContractSlippage(..., LEVERAGE_UP_VAULT_DRIFT_BPS)` expansion;
@@ -2401,46 +2399,6 @@ export class CToken extends Calldata<ICToken> {
         return this.convertSharesToUsdSync(tokenAmount);
     }
 
-    buildMultiCallAction(calldata: bytes, target: address = this.address) {
-        return {
-            target,
-            isPriceUpdate: false,
-            data: calldata
-        } as MulticallAction;
-    }
-
-    private hasNonZeroNativeValueOverride(override: { [key: string]: any }) {
-        const value = override.value;
-        if (value == null) {
-            return false;
-        }
-
-        if (typeof value === "bigint") {
-            return value > 0n;
-        }
-
-        if (typeof value === "number") {
-            return value > 0;
-        }
-
-        if (typeof value === "string") {
-            return BigInt(value) > 0n;
-        }
-
-        return true;
-    }
-
-    private assertOracleMulticallSupportsValue(priceUpdates: MulticallAction[], override: { [key: string]: any }) {
-        if (priceUpdates.length === 0 || !this.hasNonZeroNativeValueOverride(override)) {
-            return;
-        }
-
-        throw new Error(
-            "Native gas-token zaps cannot be combined with oracle price-update multicalls. " +
-            "Use the wrapped-native zap path or retry when no oracle update is required.",
-        );
-    }
-
     private async _checkPositionManagerApproval(manager: PositionManager) {
         const isApproved = await this.isPluginApproved(manager.type, 'positionManager');
         if (!isApproved) {
@@ -2588,15 +2546,6 @@ export class CToken extends Calldata<ICToken> {
         reloadAccount: address | null = null,
     ): Promise<TransactionResponse> {
         const signer = this.requireSigner();
-        const price_updates = await this.getPriceUpdates();
-        this.assertOracleMulticallSupportsValue(price_updates, override);
-
-        if(price_updates.length > 0) {
-            const actionTarget = (override.to ?? this.address) as address;
-            const token_action = this.buildMultiCallAction(calldata, actionTarget);
-            calldata = this.getCallData("multicall", [[...price_updates, token_action]]);
-        }
-
         const tx = await this.executeCallData(calldata, override);
         if (typeof tx.wait === "function") {
             await tx.wait();
@@ -2610,50 +2559,6 @@ export class CToken extends Calldata<ICToken> {
     }
 
     async simulateOracleRoute(calldata: bytes, override: { [key: string]: any } = {}): Promise<{ success: boolean; error?: string }> {
-        const price_updates = await this.getPriceUpdates();
-        this.assertOracleMulticallSupportsValue(price_updates, override);
-
-        if(price_updates.length > 0) {
-            const actionTarget = (override.to ?? this.address) as address;
-            const token_action = this.buildMultiCallAction(calldata, actionTarget);
-            calldata = this.getCallData("multicall", [[...price_updates, token_action]]);
-        }
-
         return this.simulateCallData(calldata, override);
-    }
-
-    private getRedstonePriceUpdateTokens(): CToken[] {
-        const candidates = (this.market?.tokens?.length ? this.market.tokens : [this]) as CToken[];
-        const seenAssets = new Set<string>();
-        const tokens: CToken[] = [];
-
-        for (const token of candidates) {
-            if (!token.adapters?.includes(AdaptorTypes.REDSTONE_CORE)) {
-                continue;
-            }
-
-            let assetAddress: address;
-            try {
-                assetAddress = token.getAsset(false);
-            } catch {
-                assetAddress = (token as any).cache?.asset?.address ?? token.address;
-            }
-
-            const key = assetAddress.toLowerCase();
-            if (seenAssets.has(key)) {
-                continue;
-            }
-
-            seenAssets.add(key);
-            tokens.push(token);
-        }
-
-        return tokens;
-    }
-
-    async getPriceUpdates(): Promise<MulticallAction[]> {
-        return Promise.all(
-            this.getRedstonePriceUpdateTokens().map((token) => Redstone.buildMultiCallAction(token)),
-        );
     }
 }
