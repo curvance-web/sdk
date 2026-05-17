@@ -5,6 +5,7 @@ import { createChainFallbackProviders, createChainPrimaryProvider, getChainRpcCo
 
 export const mainnet: ChainConfig = {
     chainId: 143,
+    environment: "production-mainnet",
     dexAgg: new KyberSwap(),
     rpc: getChainRpcConfig("monad-mainnet"),
     provider: createChainPrimaryProvider("monad-mainnet"),

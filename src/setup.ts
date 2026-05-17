@@ -6,13 +6,17 @@ import { OracleManager } from "./classes/OracleManager";
 import { getActiveRetryConfig, getRetryableProviderTarget, wrapProviderWithRetries } from "./retry-provider";
 import { chain_config } from "./chains";
 import { Api } from "./classes/Api";
+import type { MilestoneResponse } from "./classes/Api";
 import { validateApiUrl } from "./validation";
-import { FeePolicy, defaultFeePolicyForChain } from "./feePolicy";
+import { FeePolicy, NO_FEE_POLICY, defaultFeePolicyForChain } from "./feePolicy";
 import type IDexAgg from "./classes/DexAggregators/IDexAgg";
+import type { DexAggContext } from "./classes/DexAggregators/IDexAgg";
+import { deepFreeze, DeepReadonly } from "./immutability";
 
 export interface SetupConfigSnapshot {
     chain: ChainRpcPrefix;
-    contracts: ReturnType<typeof getContractAddresses>;
+    chainId: number;
+    contracts: DeepReadonly<ReturnType<typeof getContractAddresses>>;
     readProvider: curvance_read_provider;
     signer: curvance_signer | null;
     account: address | null;
@@ -35,7 +39,7 @@ const successful_setup_results = new Map<number, {
 
 export interface SetupChainOptions {
     /** Optional fee policy for SDK-initiated DEX swaps (zaps + leverage).
-     *  Defaults to the chain's live Curvance fee policy when required. */
+     *  Defaults to the chain's setup-resolved Curvance fee policy. */
     feePolicy?: FeePolicy;
     /** Optional dedicated account for user-specific reads when no signer is available. */
     account?: address | null;
@@ -44,10 +48,13 @@ export interface SetupChainOptions {
 }
 
 export interface SetupChainResult {
+    chain: ChainRpcPrefix;
+    chainId: number;
+    setupConfigSnapshot: Readonly<SetupConfigSnapshot>;
     markets: Market[];
     reader: ProtocolReader;
     dexAgg: IDexAgg;
-    global_milestone: any | null;
+    global_milestone: MilestoneResponse | null;
 }
 
 function createSetupConfig(
@@ -56,18 +63,19 @@ function createSetupConfig(
     signer: curvance_signer | null,
     account: address | null,
     api_url: string,
-    options: SetupChainOptions,
+    feePolicy: FeePolicy,
 ): SetupConfigSnapshot {
-    return {
+    return Object.freeze({
         chain,
+        chainId: chain_config[chain].chainId,
         readProvider,
         signer,
         account,
         provider: signer ?? readProvider,
-        contracts: getContractAddresses(chain),
+        contracts: deepFreeze(getContractAddresses(chain)),
         api_url,
-        feePolicy: options.feePolicy ?? defaultFeePolicyForChain(chain),
-    };
+        feePolicy,
+    }) as SetupConfigSnapshot;
 }
 
 function validateSetupConfig(config: SetupConfigSnapshot) {
@@ -76,6 +84,17 @@ function validateSetupConfig(config: SetupConfigSnapshot) {
     } else if (!("OracleManager" in config.contracts)) {
         throw new Error(`Chain configuration for ${config.chain} is missing OracleManager address.`);
     }
+
+    const policyChain = config.feePolicy.chain;
+    if (policyChain != undefined && policyChain !== "any" && policyChain !== config.chain) {
+        throw new Error(
+            `Fee policy for ${policyChain} cannot be used with setupChain('${config.chain}').`,
+        );
+    }
+}
+
+function bindDexAggContext(dexAgg: IDexAgg, context: DexAggContext): IDexAgg {
+    return dexAgg.withContext?.(context) ?? dexAgg;
 }
 
 async function validateProviderChain(chain: ChainRpcPrefix, provider: curvance_read_provider, label: string) {
@@ -220,22 +239,36 @@ export async function setupChain(
         }
         const account = requestedAccount ?? signerAccount;
 
-        const nextSetupConfig = createSetupConfig(
+        let nextSetupConfig = createSetupConfig(
             chain,
             readProvider,
             signer,
             account,
             api_url,
-            options,
+            options.feePolicy ?? NO_FEE_POLICY,
         );
         validateSetupConfig(nextSetupConfig);
 
-        const { milestones, incentives } = await Api.getRewards(nextSetupConfig);
         const reader = new ProtocolReader(
             nextSetupConfig.contracts.ProtocolReader as address,
             nextSetupConfig.readProvider,
             nextSetupConfig.chain,
         );
+        const feePolicy = options.feePolicy ?? defaultFeePolicyForChain(
+            chain,
+            await reader.getDaoAddress(),
+        );
+        nextSetupConfig = createSetupConfig(
+            chain,
+            readProvider,
+            signer,
+            account,
+            api_url,
+            feePolicy,
+        );
+        validateSetupConfig(nextSetupConfig);
+
+        const { milestones, incentives } = await Api.getRewards(nextSetupConfig);
         const oracle_manager = new OracleManager(
             nextSetupConfig.contracts.OracleManager as address,
             nextSetupConfig.readProvider,
@@ -250,6 +283,16 @@ export async function setupChain(
             incentives,
             nextSetupConfig,
         );
+        const dexAgg = bindDexAggContext(chain_config[chain].dexAgg, {
+            markets,
+            feePolicy: nextSetupConfig.feePolicy,
+        });
+        for (const market of markets) {
+            market.dexAgg = dexAgg;
+            for (const token of market.tokens ?? []) {
+                token.refreshRouteCapabilities?.();
+            }
+        }
 
         pending_setup_invocations.delete(setupInvocation);
         successful_setup_results.set(setupInvocation, {
@@ -259,9 +302,12 @@ export async function setupChain(
         publishLatestSuccessfulSetup();
 
         return {
+            chain,
+            chainId: nextSetupConfig.chainId,
+            setupConfigSnapshot: nextSetupConfig,
             markets,
             reader,
-            dexAgg: chain_config[chain].dexAgg,
+            dexAgg,
             global_milestone: milestones['global'] ?? null
         };
     } catch (error) {

@@ -3,6 +3,7 @@ import test from "node:test";
 import Decimal from "decimal.js";
 import { Api } from "../src/classes/Api";
 import { Market } from "../src/classes/Market";
+import * as setupModule from "../src/setup";
 
 const merklModule = require("../src/integrations/merkl");
 
@@ -15,6 +16,7 @@ const TOKEN_C = "0x00000000000000000000000000000000000000c3";
 
 const originalFetchNativeYields = Api.fetchNativeYields;
 const originalFetchMerklOpportunities = merklModule.fetchMerklOpportunities;
+const originalSetupConfig = (setupModule as any).setup_config;
 
 function assertDecimalString(actual: Decimal | undefined, expected: string, message: string) {
     assert.equal(actual?.toString(), expected, message);
@@ -110,8 +112,8 @@ function createUserMarket(marketAddress: string, tokenAddress: string, userAsset
     };
 }
 
-function createSetup() {
-    return {
+function createSetup(overrides: Record<string, any> = {}) {
+    const setup = {
         chain: "monad-mainnet",
         readProvider: {} as any,
         signer: null,
@@ -129,11 +131,18 @@ function createSetup() {
             },
         },
     };
+
+    return {
+        ...setup,
+        ...overrides,
+        contracts: overrides.contracts ?? setup.contracts,
+    };
 }
 
 test.afterEach(() => {
     Api.fetchNativeYields = originalFetchNativeYields;
     merklModule.fetchMerklOpportunities = originalFetchMerklOpportunities;
+    (setupModule as any).setup_config = originalSetupConfig;
 });
 
 test("Market.getAll joins dynamic and user payloads by address during boot", async () => {
@@ -238,6 +247,89 @@ test("Market.getAll joins token rows by address within each market", async () =>
     assert.equal((markets[0]?.tokens[1] as any).cache.userAssetBalance, 22n);
 });
 
+test("Market.getAll explicit read providers do not inherit ambient signer or account", async () => {
+    Api.fetchNativeYields = async () => [];
+    merklModule.fetchMerklOpportunities = async () => [];
+
+    const defaultReadProvider = { id: "default" } as any;
+    const explicitReadProvider = { id: "explicit" } as any;
+    const globalSigner = {
+        address: "0x0000000000000000000000000000000000000abc",
+        provider: defaultReadProvider,
+    } as any;
+    let capturedAccount: string | null | undefined;
+
+    (setupModule as any).setup_config = createSetup({
+        readProvider: defaultReadProvider,
+        signer: globalSigner,
+        account: ACCOUNT,
+        provider: globalSigner,
+    });
+
+    const reader = {
+        getAllMarketData: async (account: string | null = null) => {
+            capturedAccount = account;
+            return {
+                staticMarket: [createStaticMarket(MARKET_A, TOKEN_A)],
+                dynamicMarket: [createDynamicMarket(MARKET_A, TOKEN_A, 111n)],
+                userData: {
+                    locks: [],
+                    markets: [createUserMarket(MARKET_A, TOKEN_A, 11n)],
+                },
+            };
+        },
+    } as any;
+
+    const markets = await Market.getAll(reader, {} as any, explicitReadProvider);
+
+    assert.equal(capturedAccount, null);
+    assert.equal(markets.length, 1);
+    assert.equal(markets[0]?.provider, explicitReadProvider);
+    assert.equal(markets[0]?.signer, null);
+    assert.equal(markets[0]?.account, null);
+});
+
+test("Market.getAll default context still captures ambient signer and account", async () => {
+    Api.fetchNativeYields = async () => [];
+    merklModule.fetchMerklOpportunities = async () => [];
+
+    const defaultReadProvider = { id: "default" } as any;
+    const globalSigner = {
+        address: "0x0000000000000000000000000000000000000abc",
+        provider: defaultReadProvider,
+    } as any;
+    let capturedAccount: string | null | undefined;
+
+    (setupModule as any).setup_config = createSetup({
+        readProvider: defaultReadProvider,
+        signer: globalSigner,
+        account: ACCOUNT,
+        provider: globalSigner,
+    });
+
+    const reader = {
+        getAllMarketData: async (account: string | null = null) => {
+            capturedAccount = account;
+            return {
+                staticMarket: [createStaticMarket(MARKET_A, TOKEN_A)],
+                dynamicMarket: [createDynamicMarket(MARKET_A, TOKEN_A, 111n)],
+                userData: {
+                    locks: [],
+                    markets: [createUserMarket(MARKET_A, TOKEN_A, 11n)],
+                },
+            };
+        },
+    } as any;
+
+    const markets = await Market.getAll(reader, {} as any);
+
+    assert.equal(capturedAccount, ACCOUNT);
+    assert.equal(markets.length, 1);
+    assert.equal(markets[0]?.provider, defaultReadProvider);
+    assert.equal(markets[0]?.signer, globalSigner);
+    assert.equal(markets[0]?.account, ACCOUNT);
+});
+
 test("Market.getAll fails clearly when token rows drift within a market", async () => {
     Api.fetchNativeYields = async () => [];
     merklModule.fetchMerklOpportunities = async () => [];
@@ -313,6 +405,150 @@ test("Market.getAll fails clearly when a static market is missing dynamic state"
             createSetup() as any,
         ),
         /Missing dynamic market data for 0x00000000000000000000000000000000000000a1 during Market\.getAll boot/i,
+    );
+});
+
+test("Market.getAll fails production boot when deploy metadata is missing", async () => {
+    Api.fetchNativeYields = async () => [];
+    merklModule.fetchMerklOpportunities = async () => [];
+
+    const reader = {
+        getAllMarketData: async () => ({
+            staticMarket: [createStaticMarket(MARKET_A, TOKEN_A)],
+            dynamicMarket: [createDynamicMarket(MARKET_A, TOKEN_A, 111n)],
+            userData: {
+                locks: [],
+                markets: [createUserMarket(MARKET_A, TOKEN_A, 11n)],
+            },
+        }),
+    } as any;
+
+    await assert.rejects(
+        () => Market.getAll(
+            reader,
+            {} as any,
+            {} as any,
+            null,
+            ACCOUNT as any,
+            {},
+            {},
+            createSetup({ contracts: { markets: {} } }) as any,
+        ),
+        /Missing deployment metadata for market .* during monad-mainnet production setup/i,
+    );
+});
+
+test("Market.getAll rejects duplicate market identity rows before boot", async () => {
+    Api.fetchNativeYields = async () => [];
+    merklModule.fetchMerklOpportunities = async () => [];
+
+    const cases = [
+        {
+            name: "static",
+            staticMarket: [
+                createStaticMarket(MARKET_A, TOKEN_A),
+                createStaticMarket(MARKET_A, TOKEN_A),
+            ],
+            dynamicMarket: [createDynamicMarket(MARKET_A, TOKEN_A, 111n)],
+            userMarkets: [createUserMarket(MARKET_A, TOKEN_A, 11n)],
+            pattern: /Duplicate static market address/i,
+        },
+        {
+            name: "dynamic",
+            staticMarket: [createStaticMarket(MARKET_A, TOKEN_A)],
+            dynamicMarket: [
+                createDynamicMarket(MARKET_A, TOKEN_A, 111n),
+                createDynamicMarket(MARKET_A, TOKEN_A, 222n),
+            ],
+            userMarkets: [createUserMarket(MARKET_A, TOKEN_A, 11n)],
+            pattern: /Duplicate dynamic market address/i,
+        },
+        {
+            name: "user",
+            staticMarket: [createStaticMarket(MARKET_A, TOKEN_A)],
+            dynamicMarket: [createDynamicMarket(MARKET_A, TOKEN_A, 111n)],
+            userMarkets: [
+                createUserMarket(MARKET_A, TOKEN_A, 11n),
+                createUserMarket(MARKET_A, TOKEN_A, 22n),
+            ],
+            pattern: /Duplicate user market address/i,
+        },
+    ];
+
+    for (const entry of cases) {
+        const reader = {
+            getAllMarketData: async () => ({
+                staticMarket: entry.staticMarket,
+                dynamicMarket: entry.dynamicMarket,
+                userData: {
+                    locks: [],
+                    markets: entry.userMarkets,
+                },
+            }),
+        } as any;
+
+        await assert.rejects(
+            () => Market.getAll(
+                reader,
+                {} as any,
+                {} as any,
+                null,
+                ACCOUNT as any,
+                {},
+                {},
+                createSetup() as any,
+            ),
+            entry.pattern,
+            entry.name,
+        );
+    }
+});
+
+test("Market.getAll rejects duplicate token rows inside one market", async () => {
+    Api.fetchNativeYields = async () => [];
+    merklModule.fetchMerklOpportunities = async () => [];
+
+    const staticMarket = createStaticMarket(MARKET_A, TOKEN_A);
+    (staticMarket as any).tokens = [
+        createStaticMarket(MARKET_A, TOKEN_A).tokens[0],
+        createStaticMarket(MARKET_A, TOKEN_A).tokens[0],
+    ];
+
+    const dynamicMarket = createDynamicMarket(MARKET_A, TOKEN_A, 111n);
+    (dynamicMarket as any).tokens = [
+        createDynamicMarket(MARKET_A, TOKEN_A, 111n).tokens[0],
+        createDynamicMarket(MARKET_A, TOKEN_B, 222n).tokens[0],
+    ];
+
+    const userMarket = createUserMarket(MARKET_A, TOKEN_A, 11n);
+    (userMarket as any).tokens = [
+        createUserMarket(MARKET_A, TOKEN_A, 11n).tokens[0],
+        createUserMarket(MARKET_A, TOKEN_B, 22n).tokens[0],
+    ];
+
+    const reader = {
+        getAllMarketData: async () => ({
+            staticMarket: [staticMarket],
+            dynamicMarket: [dynamicMarket],
+            userData: {
+                locks: [],
+                markets: [userMarket],
+            },
+        }),
+    } as any;
+
+    await assert.rejects(
+        () => Market.getAll(
+            reader,
+            {} as any,
+            {} as any,
+            null,
+            ACCOUNT as any,
+            {},
+            {},
+            createSetup() as any,
+        ),
+        /Duplicate static token row in market .* address/i,
     );
 });
 
@@ -423,6 +659,49 @@ test("Market.getAll forwards chainId to Merkl and aggregates duplicate opportuni
     ]);
     assertDecimalString(token.incentiveSupplyApy, "0.46", "boot should attach summed supply incentive APY");
     assertDecimalString(token.incentiveBorrowApy, "0.12", "boot should attach summed borrow incentive APY");
+});
+
+test("Market.getAll scopes native-yield USDC suppression to Monad", async () => {
+    merklModule.fetchMerklOpportunities = async () => [];
+    Api.fetchNativeYields = async () => [{ symbol: "USDC", apy: 5 }];
+
+    const staticMarket = createStaticMarket(MARKET_A, TOKEN_A);
+    (staticMarket.tokens[0] as any).asset.symbol = "USDC";
+
+    const reader = {
+        getAllMarketData: async () => ({
+            staticMarket: [staticMarket],
+            dynamicMarket: [createDynamicMarket(MARKET_A, TOKEN_A, 111n)],
+            userData: {
+                locks: [],
+                markets: [createUserMarket(MARKET_A, TOKEN_A, 11n)],
+            },
+        }),
+    } as any;
+
+    const monadMarkets = await Market.getAll(
+        reader,
+        {} as any,
+        {} as any,
+        null,
+        ACCOUNT as any,
+        {},
+        {},
+        createSetup({ chain: "monad-mainnet" }) as any,
+    );
+    const arbMarkets = await Market.getAll(
+        reader,
+        {} as any,
+        {} as any,
+        null,
+        ACCOUNT as any,
+        {},
+        {},
+        createSetup({ chain: "arb-sepolia" }) as any,
+    );
+
+    assertDecimalString((monadMarkets[0]?.tokens[0] as any).nativeApy, "0", "Monad USDC native yield remains suppressed");
+    assertDecimalString((arbMarkets[0]?.tokens[0] as any).nativeApy, "0.05", "Non-Monad USDC native yield must not inherit Monad suppression");
 });
 
 test("Market.hypotheticalLiquidityOf routes through ProtocolReader with the market address", async () => {

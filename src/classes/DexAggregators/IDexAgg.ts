@@ -1,6 +1,8 @@
 import { address, bytes, curvance_read_provider } from "../../types";
 import { ZapToken } from "../CToken";
 import { Swap } from "../Zapper";
+import type { FeePolicy } from "../../feePolicy";
+import type { Market } from "../Market";
 
 export type QuoteArgs = [
     wallet: string,
@@ -20,9 +22,15 @@ export type Quote = {
     raw?: any;
 };
 
+export type DexAggContext = {
+    markets: readonly Market[];
+    feePolicy: FeePolicy;
+};
+
 export default interface IDexAgg {
     dao: address;
     router: address;
+    withContext?(context: DexAggContext): IDexAgg;
     getAvailableTokens(provider: curvance_read_provider, query: string | null, account?: address | null): Promise<ZapToken[]>;
     quoteAction(...args: QuoteArgs): Promise<{
         action: Swap;

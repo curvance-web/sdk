@@ -91,6 +91,23 @@ function normalizeMarketKey(market: string): string {
     return market.toLowerCase();
 }
 
+function normalizeChainNetwork(chain: string): string {
+    return chain.trim().toLowerCase().replace(/[\s_]+/g, "-");
+}
+
+function acceptedMilestoneChainNetworks(chain: string): Set<string> {
+    const normalized = normalizeChainNetwork(chain);
+    const aliases = new Set([normalized]);
+
+    if (normalized === "monad-mainnet") {
+        aliases.add("monad");
+    } else if (normalized === "arb-sepolia") {
+        aliases.add("arbitrum-sepolia");
+    }
+
+    return aliases;
+}
+
 function isNativeYieldRow(value: unknown): value is { symbol: string; apy: number } {
     if (typeof value !== "object" || value == null) {
         return false;
@@ -190,7 +207,12 @@ export class Api {
             };
         }
 
+        const milestoneChainNetworks = acceptedMilestoneChainNetworks(chain);
         for(const milestone of rewards.milestones.filter(isMilestoneResponse)) {
+            if (!milestoneChainNetworks.has(normalizeChainNetwork(milestone.chain_network))) {
+                continue;
+            }
+
             milestones[normalizeMarketKey(milestone.market)] = milestone;
         }
 

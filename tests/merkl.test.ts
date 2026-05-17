@@ -462,6 +462,72 @@ test("fetchMerklUserRewards drops mixed-chain reward groups from successful resp
     assert.deepEqual(rows.map((row) => row.chain.id), [143]);
 });
 
+test("fetchMerklUserRewards drops nested reward rows with mismatched chain metadata", async (t) => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => [
+            {
+                chain: { id: 143, name: "Monad" },
+                rewards: [
+                    {
+                        distributionChainId: 143,
+                        root: "0xmonadroot",
+                        recipient: "0xrecipient",
+                        amount: "100",
+                        claimed: "0",
+                        token: {
+                            symbol: "MON",
+                            address: "0x0000000000000000000000000000000000000001",
+                            chainId: 143,
+                            decimals: 18,
+                        },
+                    },
+                    {
+                        distributionChainId: 1,
+                        root: "0xwrongdistribution",
+                        recipient: "0xrecipient",
+                        amount: "200",
+                        claimed: "0",
+                        token: {
+                            symbol: "MON",
+                            address: "0x0000000000000000000000000000000000000002",
+                            chainId: 143,
+                            decimals: 18,
+                        },
+                    },
+                    {
+                        distributionChainId: 143,
+                        root: "0xwrongtoken",
+                        recipient: "0xrecipient",
+                        amount: "300",
+                        claimed: "0",
+                        token: {
+                            symbol: "ETH",
+                            address: "0x0000000000000000000000000000000000000003",
+                            chainId: 1,
+                            decimals: 18,
+                        },
+                    },
+                ],
+            },
+        ],
+    } as Response)) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    const rows = await fetchMerklUserRewards({
+        wallet: "0x00000000000000000000000000000000000000aa",
+        chainId: 143,
+    });
+
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0]?.rewards.map((reward) => reward.root), ["0xmonadroot"]);
+});
+
 test("fetchMerklUserRewards normalizes reward rows before strict chain filtering", async (t) => {
     const originalFetch = globalThis.fetch;
 
@@ -548,6 +614,96 @@ test("fetchMerklUserRewards degrades malformed successful bodies to no rewards",
     }), []);
 });
 
+test("fetchMerklUserRewards omits chainId instead of sending chainId=undefined", async (t) => {
+    const originalFetch = globalThis.fetch;
+    let requestedUrl: string | null = null;
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+        requestedUrl =
+            typeof input === "string"
+                ? input
+                : input instanceof URL
+                    ? input.toString()
+                    : input.url;
+
+        return {
+            ok: true,
+            json: async () => [],
+        } as Response;
+    }) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    assert.deepEqual(await fetchMerklUserRewards({
+        wallet: "0x00000000000000000000000000000000000000aa",
+    }), []);
+
+    assert.notEqual(requestedUrl, null);
+    const url = new URL(requestedUrl!);
+    assert.equal(url.searchParams.has("chainId"), false);
+    assert.equal(url.toString().includes("undefined"), false);
+});
+
+test("fetchMerklCampaignsBySymbol scopes requests by protocol and chain", async (t) => {
+    const originalFetch = globalThis.fetch;
+    let requestedUrl: string | null = null;
+
+    globalThis.fetch = (async (url: string) => {
+        requestedUrl = url;
+        return {
+            ok: true,
+            json: async () => [],
+        } as Response;
+    }) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    assert.deepEqual(
+        await fetchMerklCampaignsBySymbol({ tokenSymbol: "USDC", chainId: 143 }),
+        [],
+    );
+
+    assert.notEqual(requestedUrl, null);
+    const url = new URL(requestedUrl!);
+    assert.equal(url.searchParams.get("mainProtocolId"), "curvance");
+    assert.equal(url.searchParams.get("tokenSymbol"), "USDC");
+    assert.equal(url.searchParams.get("chainId"), "143");
+    assert.equal(url.toString().includes("undefined"), false);
+});
+
+test("fetchMerklCampaignsBySymbol omits chainId for explicit all-chain lookups", async (t) => {
+    const originalFetch = globalThis.fetch;
+    let requestedUrl: string | null = null;
+
+    globalThis.fetch = (async (url: string) => {
+        requestedUrl = url;
+        return {
+            ok: true,
+            json: async () => [],
+        } as Response;
+    }) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    assert.deepEqual(
+        await fetchMerklCampaignsBySymbol({ tokenSymbol: "USDC" }),
+        [],
+    );
+
+    assert.notEqual(requestedUrl, null);
+    const url = new URL(requestedUrl!);
+    assert.equal(url.searchParams.get("mainProtocolId"), "curvance");
+    assert.equal(url.searchParams.get("tokenSymbol"), "USDC");
+    assert.equal(url.searchParams.has("chainId"), false);
+    assert.equal(url.toString().includes("undefined"), false);
+});
+
 test("fetchMerklCampaignsBySymbol filters malformed successful campaign rows", async (t) => {
     const originalFetch = globalThis.fetch;
 
@@ -600,6 +756,63 @@ test("fetchMerklCampaignsBySymbol filters malformed successful campaign rows", a
 
     assert.equal(campaigns.length, 1);
     assert.equal(campaigns[0]?.id, "campaign-a");
+});
+
+test("fetchMerklCampaignsBySymbol filters same-symbol campaigns by chain metadata", async (t) => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => [
+            {
+                id: "monad-campaign",
+                campaignId: "monad-campaign",
+                computeChainId: 143,
+                distributionChainId: 143,
+                chain: { id: 143, name: "Monad" },
+                rewardToken: {
+                    symbol: "MON",
+                    address: "0x0000000000000000000000000000000000000001",
+                    chainId: 143,
+                    decimals: 18,
+                },
+            },
+            {
+                id: "ethereum-campaign",
+                campaignId: "ethereum-campaign",
+                computeChainId: 1,
+                distributionChainId: 1,
+                chain: { id: 1, name: "Ethereum" },
+                rewardToken: {
+                    symbol: "MON",
+                    address: "0x0000000000000000000000000000000000000002",
+                    chainId: 1,
+                    decimals: 18,
+                },
+            },
+            {
+                id: "mixed-chain-campaign",
+                campaignId: "mixed-chain-campaign",
+                computeChainId: 143,
+                distributionChainId: 143,
+                chain: { id: 143, name: "Monad" },
+                rewardToken: {
+                    symbol: "MON",
+                    address: "0x0000000000000000000000000000000000000003",
+                    chainId: 1,
+                    decimals: 18,
+                },
+            },
+        ],
+    } as Response)) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    const campaigns = await fetchMerklCampaignsBySymbol({ tokenSymbol: "MON", chainId: 143 });
+
+    assert.deepEqual(campaigns.map((campaign) => campaign.id), ["monad-campaign"]);
 });
 
 test("fetchMerklCampaignsBySymbol degrades malformed successful bodies to no campaigns", async (t) => {

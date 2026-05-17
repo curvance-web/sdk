@@ -1,4 +1,4 @@
-import { aggregateMerklAprByToken, BPS, ChangeRate, contractSetup, EMPTY_ADDRESS, getRateSeconds, requireAccount, toBigInt, toDecimal, UINT256_MAX, WAD, WAD_DECIMAL } from "../helpers";
+import { aggregateMerklAprByToken, BPS, ChainRpcPrefix, ChangeRate, contractSetup, EMPTY_ADDRESS, getRateSeconds, requireAccount, toBigInt, toDecimal, UINT256_MAX, WAD, WAD_DECIMAL } from "../helpers";
 import { Contract } from "ethers";
 import {
     DynamicMarketData,
@@ -22,6 +22,8 @@ import FormatConverter from "./FormatConverter";
 import { Api, IncentiveResponse, Incentives, MilestoneResponse, Milestones } from "./Api";
 import { chain_config } from "../chains";
 import type { PositionManagerTypes } from "./PositionManager";
+import { validateAddress } from "../validation";
+import type IDexAgg from "./DexAggregators/IDexAgg";
 
 export type MarketToken = CToken | BorrowableCToken;
 export type PluginTypes = 'zapper' | 'positionManager';
@@ -91,6 +93,7 @@ export class Market {
     oracle_manager: OracleManager;
     reader: ProtocolReader;
     setup: SetupConfigSnapshot;
+    dexAgg?: IDexAgg;
     cache: { static: StaticMarketData, dynamic: DynamicMarketData, user: UserMarket, deploy: DeployData };
     milestone: MilestoneResponse | null = null;
     incentives: Array<IncentiveResponse> = [];
@@ -134,6 +137,39 @@ export class Market {
 
     private getAccountOrThrow(): address {
         return requireAccount(this.account, this.signer);
+    }
+
+    private assertTokenBelongsToMarket(token: CToken | null | undefined, label: string) {
+        if (token == null) {
+            return;
+        }
+
+        const tokenMarket = (token as CToken & { market?: Market }).market;
+        if (tokenMarket == undefined) {
+            return;
+        }
+
+        if (tokenMarket === this) {
+            return;
+        }
+
+        const tokenChain = tokenMarket.setup?.chain;
+        const marketChain = this.setup?.chain;
+        const sameMarket = tokenMarket.address?.toLowerCase() === this.address.toLowerCase();
+        const sameChain = tokenChain != null && marketChain != null && tokenChain === marketChain;
+        const tokenReaderKey = tokenMarket.reader?.batchKey ?? null;
+        const readerKey = this.reader?.batchKey ?? null;
+        const sameReaderDeployment =
+            tokenMarket.reader === this.reader ||
+            (tokenReaderKey != null && tokenReaderKey === readerKey);
+
+        if (!sameMarket || !sameChain || !sameReaderDeployment) {
+            throw new Error(
+                `${label} token ${token.address} belongs to market ${tokenMarket.address} ` +
+                `on ${tokenChain ?? "unknown"}, not market ${this.address} on ${marketChain ?? "unknown"} ` +
+                `with the same reader deployment.`
+            );
+        }
     }
 
     assertRefreshAccountCompatible(account: address, allowSignerMismatch = false) {
@@ -456,7 +492,17 @@ export class Market {
             );
         }
 
-        const rowsByAddress = new Map(rows.map((row) => [row.address.toLowerCase(), row]));
+        const rowsByAddress = new Map<string, T>();
+        for (const row of rows) {
+            const key = row.address.toLowerCase();
+            if (rowsByAddress.has(key)) {
+                throw new Error(
+                    `Duplicate ${label} token data for ${row.address} in market ${this.address} during refresh.`
+                );
+            }
+            rowsByAddress.set(key, row);
+        }
+
         for (const token of this.tokens) {
             if (!rowsByAddress.has(token.address.toLowerCase())) {
                 throw new Error(`Missing ${label} token data for ${token.address} in market ${this.address} during refresh.`);
@@ -495,11 +541,28 @@ export class Market {
         market: Market,
         label: string,
     ): T {
-        const row = new Map(rows.map((entry) => [entry.address.toLowerCase(), entry])).get(market.address.toLowerCase());
+        const row = this.buildRefreshMarketRowIndex(rows, label).get(market.address.toLowerCase());
         if (row == undefined) {
             throw new Error(`Could not reload ${label} data for market ${market.address}.`);
         }
         return row;
+    }
+
+    private static buildRefreshMarketRowIndex<T extends { address: address }>(
+        rows: T[],
+        label: string,
+    ): Map<string, T> {
+        const index = new Map<string, T>();
+
+        for (const row of rows) {
+            const key = row.address.toLowerCase();
+            if (index.has(key)) {
+                throw new Error(`Duplicate ${label} market data for ${row.address} during refresh.`);
+            }
+            index.set(key, row);
+        }
+
+        return index;
     }
 
     applyState(dynamicData: DynamicMarketData, userData?: UserMarket) {
@@ -609,8 +672,8 @@ export class Market {
         for(const { reader, markets: groupedMarkets } of this.groupByReaderDeployment(markets)) {
             const addresses = groupedMarkets.map((market) => market.address);
             const { dynamicMarkets, userMarkets } = await reader.getMarketStates(addresses, account);
-            const dynamicByAddress = new Map(dynamicMarkets.map((market) => [market.address.toLowerCase(), market]));
-            const userByAddress = new Map(userMarkets.map((market) => [market.address.toLowerCase(), market]));
+            const dynamicByAddress = this.buildRefreshMarketRowIndex(dynamicMarkets, "dynamic");
+            const userByAddress = this.buildRefreshMarketRowIndex(userMarkets, "user");
 
             for(const market of groupedMarkets) {
                 const dynamic = dynamicByAddress.get(market.address.toLowerCase());
@@ -647,7 +710,7 @@ export class Market {
         for(const { reader, markets: groupedMarkets } of this.groupByReaderDeployment(markets)) {
             const addresses = groupedMarkets.map((market) => market.address);
             const userMarkets = await reader.getMarketSummaries(addresses, account);
-            const userByAddress = new Map(userMarkets.map((market) => [market.address.toLowerCase(), market]));
+            const userByAddress = this.buildRefreshMarketRowIndex(userMarkets, "user summary");
 
             for(const market of groupedMarkets) {
                 const user = userByAddress.get(market.address.toLowerCase());
@@ -671,20 +734,25 @@ export class Market {
 
     private static buildDeployDataIndex(setup: SetupConfigSnapshot): Map<string, DeployData> {
         const index = new Map<string, DeployData>();
-        const deployments = setup.contracts.markets as Record<string, any>;
+        const deployments = setup.contracts.markets as unknown as Record<string, any>;
 
         for (const [name, data] of Object.entries(deployments)) {
             if (typeof data !== 'object' || data == null || typeof data.address !== 'string') {
                 continue;
             }
 
-            const key = data.address.toLowerCase();
-            if (!index.has(key)) {
-                index.set(key, {
-                    name,
-                    plugins: 'plugins' in data ? data.plugins as { [key: string]: address } : {},
-                });
+            const key = validateAddress(data.address, `deployment market ${name}`).toLowerCase();
+            const existing = index.get(key);
+            if (existing != undefined) {
+                throw new Error(
+                    `Duplicate deployment market address ${data.address} for ${name}; ` +
+                    `already used by ${existing.name}.`,
+                );
             }
+            index.set(key, {
+                name,
+                plugins: 'plugins' in data ? data.plugins as { [key: string]: address } : {},
+            });
         }
 
         return index;
@@ -695,16 +763,40 @@ export class Market {
 
         for (const yieldEntry of yields) {
             const key = yieldEntry.symbol.toUpperCase();
-            if (!index.has(key)) {
-                index.set(key, yieldEntry);
+            if (index.has(key)) {
+                throw new Error(`Duplicate native-yield symbol ${yieldEntry.symbol}.`);
             }
+            index.set(key, yieldEntry);
         }
 
         return index;
     }
 
-    private static buildMarketPayloadIndex<T extends { address: address }>(entries: T[]): Map<string, T> {
-        return new Map(entries.map((entry) => [entry.address.toLowerCase(), entry]));
+    private static shouldSuppressNativeYield(yieldEntry: NativeYield, chain: ChainRpcPrefix): boolean {
+        // DeFiLlama currently returns a YZM vault yield row labeled as USDC on Monad.
+        // Keep that workaround scoped to the source/chain where it is known to apply.
+        return chain === "monad-mainnet" && yieldEntry.symbol.toUpperCase() === "USDC";
+    }
+
+    private static buildMarketPayloadIndex<T extends { address: address }>(
+        entries: T[],
+        label: string,
+    ): Map<string, T> {
+        const index = new Map<string, T>();
+
+        for (const entry of entries) {
+            const key = validateAddress(entry.address, `${label} address`).toLowerCase();
+            const existing = index.get(key);
+            if (existing != undefined) {
+                throw new Error(
+                    `Duplicate ${label} address ${entry.address}; ` +
+                    `already saw ${existing.address}.`,
+                );
+            }
+            index.set(key, entry);
+        }
+
+        return index;
     }
 
     private static requireTokenRow<T extends { address: address }>(
@@ -735,8 +827,15 @@ export class Market {
             );
         }
 
-        const dynamicByAddress = this.buildMarketPayloadIndex(dynamicData.tokens);
-        const userByAddress = this.buildMarketPayloadIndex(userData.tokens);
+        this.buildMarketPayloadIndex(staticData.tokens, `static token row in market ${staticData.address}`);
+        const dynamicByAddress = this.buildMarketPayloadIndex(
+            dynamicData.tokens,
+            `dynamic token row in market ${staticData.address}`,
+        );
+        const userByAddress = this.buildMarketPayloadIndex(
+            userData.tokens,
+            `user token row in market ${staticData.address}`,
+        );
 
         return staticData.tokens.map((staticToken) => ({
             ...staticToken,
@@ -755,6 +854,9 @@ export class Market {
      * @returns Supply, borrow & earn rates
      */
     async previewAssetImpact(user: address, collateral_ctoken: CToken, debt_ctoken: BorrowableCToken, deposit_amount: TokenInput, borrow_amount: TokenInput, rate_change: ChangeRate) {
+        this.assertTokenBelongsToMarket(collateral_ctoken, "Collateral");
+        this.assertTokenBelongsToMarket(debt_ctoken, "Debt");
+
         const amount_in = toBigInt(deposit_amount, collateral_ctoken.asset.decimals);
         const amount_out = toBigInt(borrow_amount, debt_ctoken.asset.decimals);
 
@@ -813,6 +915,9 @@ export class Market {
         currentLeverage: Decimal
     ) {
         // Full deleverage always closes to zero debt → infinite position health aka null.
+        this.assertTokenBelongsToMarket(deposit_ctoken, "Deposit");
+        this.assertTokenBelongsToMarket(borrow_ctoken, "Borrow");
+
         if (newLeverage.equals(1)) {
             return null;
         }
@@ -821,7 +926,7 @@ export class Market {
         const repayCollateralAssets = preview.collateralAssetReduction;
         let { collateralAssetReduction } = preview;
         if (preview.feeBps > 0n) {
-            collateralAssetReduction = collateralAssetReduction * 10000n / (10000n - preview.feeBps);
+            collateralAssetReduction = collateralAssetReduction * BPS / (BPS - preview.feeBps);
         }
         const repayUsd = deposit_ctoken.convertTokensToUsd(repayCollateralAssets, true);
         const repayTokens = borrow_ctoken.convertUsdToTokens(repayUsd, true);
@@ -843,6 +948,9 @@ export class Market {
         depositAssets?: bigint,
         positionManagerType?: PositionManagerTypes,
     ) {
+        this.assertTokenBelongsToMarket(deposit_ctoken, "Deposit");
+        this.assertTokenBelongsToMarket(borrow_ctoken, "Borrow");
+
         if ((depositAssets ?? 0n) > 0n) {
             return this.previewPositionHealthDepositAndLeverage(
                 deposit_ctoken,
@@ -872,6 +980,9 @@ export class Market {
         depositAssets: bigint,
         positionManagerType?: PositionManagerTypes,
     ) {
+        this.assertTokenBelongsToMarket(deposit_ctoken, "Deposit");
+        this.assertTokenBelongsToMarket(borrow_ctoken, "Borrow");
+
         const preview = deposit_ctoken.previewDepositAndLeverage(
             newLeverage,
             borrow_ctoken,
@@ -909,6 +1020,9 @@ export class Market {
         debt_amount: TokenInput = Decimal(0),
         bufferTime: bigint = 0n
     ) {
+        this.assertTokenBelongsToMarket(deposit_ctoken, "Deposit");
+        this.assertTokenBelongsToMarket(borrow_ctoken, "Borrow");
+
         const user = this.getAccountOrThrow();
 
         // Pass underlying asset amounts — NOT shares.
@@ -954,6 +1068,8 @@ export class Market {
      * @returns The new position health
      */
     async previewPositionHealthRedeem(ctoken: CToken, amount: TokenInput) {
+        this.assertTokenBelongsToMarket(ctoken, "Redeem");
+
         const user = this.getAccountOrThrow();
         const redeemShares = ctoken.convertTokenInputToShares(amount);
         const redeemAssets = FormatConverter.decimalToBigInt(amount, ctoken.asset.decimals);
@@ -999,6 +1115,8 @@ export class Market {
      * @returns The new position health
      */
     async previewPositionHealthBorrow(token: BorrowableCToken, amount: TokenInput) {
+        this.assertTokenBelongsToMarket(token, "Borrow");
+
         const user = this.getAccountOrThrow();
         const data = await this.reader.getPositionHealth(
             this.address,
@@ -1026,6 +1144,8 @@ export class Market {
      * @returns The new position health
      */
     async previewPositionHealthRepay(token: BorrowableCToken, amount: TokenInput) {
+        this.assertTokenBelongsToMarket(token, "Repay");
+
         const user = this.getAccountOrThrow();
         const repayAssets = amount.eq(0)
             ? UINT256_MAX
@@ -1093,11 +1213,33 @@ export class Market {
      * @returns An object mapping market addresses to their cooldown expiration dates OR null if its not in cooldown
      */
     async multiHoldExpiresAt(markets: Market[]) {
-        const account = this.getAccountOrThrow();
         if(markets.length == 0) {
             throw new Error("You can't fetch expirations for no markets.");
         }
 
+        for (const market of markets) {
+            const marketReaderKey = market.reader?.batchKey ?? null;
+            const readerKey = this.reader?.batchKey ?? null;
+            const sameReaderDeployment =
+                market.reader === this.reader ||
+                (marketReaderKey != null && marketReaderKey === readerKey);
+
+            if (market.setup?.chain != null && market.setup.chain !== this.setup?.chain) {
+                throw new Error(
+                    `Cannot batch cooldowns across chains: base=${this.setup?.chain ?? "unknown"} ` +
+                    `market=${market.setup.chain}.`
+                );
+            }
+
+            if (!sameReaderDeployment) {
+                throw new Error(
+                    `Cannot batch cooldowns across different ProtocolReader deployments: ` +
+                    `base=${this.reader?.address ?? "unknown"} market=${market.reader?.address ?? "unknown"}.`
+                );
+            }
+        }
+
+        const account = this.getAccountOrThrow();
         const marketAddresses = markets.map(market => market.address);
         const cooldownTimestamps = await this.reader.marketMultiCooldown(marketAddresses, account);
 
@@ -1131,15 +1273,21 @@ export class Market {
         setup?: SetupConfigSnapshot,
     ) {
         const resolvedSetup = setup ?? resolveDefaultSetupConfig("Market.getAll");
-        const resolvedProvider = provider ?? resolvedSetup.readProvider;
-        const resolvedSigner = signer === undefined ? resolvedSetup.signer : signer;
-        const resolvedAccount = account === undefined ? resolvedSetup.account : account;
+        const hasExplicitProvider = provider != null;
+        const resolvedProvider = hasExplicitProvider ? provider : resolvedSetup.readProvider;
+        const resolvedSigner = signer === undefined
+            ? hasExplicitProvider ? null : resolvedSetup.signer
+            : signer;
+        const resolvedAccount = account === undefined
+            ? hasExplicitProvider ? null : resolvedSetup.account
+            : account;
         const chainId = chain_config[resolvedSetup.chain]?.chainId;
 
         const all_data = await reader.getAllMarketData(resolvedAccount);
-        // Filter out USDC — DeFiLlama incorrectly returns YZM vault yield labeled as USDC
         const [yields, merklLendOpps, merklBorrowOpps] = await Promise.all([
-            Api.fetchNativeYields(resolvedSetup).then(y => y.filter(y => y.symbol.toUpperCase() !== 'USDC')),
+            Api.fetchNativeYields(resolvedSetup).then(y => (
+                y.filter(yieldEntry => !this.shouldSuppressNativeYield(yieldEntry, resolvedSetup.chain))
+            )),
             fetchMerklOpportunities({ action: 'LEND', chainId }).catch(() => [] as MerklOpportunity[]),
             fetchMerklOpportunities({ action: 'BORROW', chainId }).catch(() => [] as MerklOpportunity[]),
         ]);
@@ -1153,8 +1301,9 @@ export class Market {
         const lendOppApyByToken = aggregateMerklAprByToken(merklLendOpps, "deposit");
         const borrowOppApyByToken = aggregateMerklAprByToken(merklBorrowOpps, "borrow");
         const yieldIndex = this.buildYieldIndex(yields);
-        const dynamicByAddress = this.buildMarketPayloadIndex(all_data.dynamicMarket);
-        const userByAddress = this.buildMarketPayloadIndex(all_data.userData.markets);
+        this.buildMarketPayloadIndex(all_data.staticMarket, "static market");
+        const dynamicByAddress = this.buildMarketPayloadIndex(all_data.dynamicMarket, "dynamic market");
+        const userByAddress = this.buildMarketPayloadIndex(all_data.userData.markets, "user market");
 
         let markets: Market[] = [];
         for(const staticData of all_data.staticMarket) {
@@ -1164,6 +1313,12 @@ export class Market {
             const userData = userByAddress.get(market_address.toLowerCase());
 
             if(deploy_data == undefined) {
+                if (chain_config[resolvedSetup.chain]?.environment === "production-mainnet") {
+                    throw new Error(
+                        `Missing deployment metadata for market ${market_address} during ` +
+                        `${resolvedSetup.chain} production setup.`,
+                    );
+                }
                 console.warn(`Could not find deploy data for market: ${market_address}, skipping...`);
                 continue;
             }
@@ -1212,7 +1367,7 @@ export class Market {
 
                 const api_yield = yieldIndex.get(token.asset.symbol.toUpperCase());
                 if(api_yield != undefined) {
-                    token.nativeApy = new Decimal(api_yield.apy / 100);
+                    token.nativeApy = new Decimal(api_yield.apy).div(100);
                 }
             }
 

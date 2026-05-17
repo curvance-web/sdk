@@ -14,10 +14,10 @@ $ npm install --save curvance
 
 Chain identifiers use Alchemy-style prefixes:
 
-| Chain | Identifier |
-|---|---|
-| Monad Mainnet | `monad-mainnet` |
-| Arbitrum Sepolia | `arb-sepolia` |
+| Chain | Identifier | Support |
+|---|---|---|
+| Monad Mainnet | `monad-mainnet` | Production mainnet; setup/read, rewards, Kyber-backed simple zaps/leverage where configured |
+| Arbitrum Sepolia | `arb-sepolia` | Testnet read/setup surface; DEX routes fail closed through `UnsupportedDexAgg` |
 
 ## ❯ Quick Start
 
@@ -26,7 +26,8 @@ import { setupChain } from "curvance";
 import { ethers } from "ethers";
 
 const wallet = new ethers.Wallet(privateKey, provider);
-const { markets, reader, dexAgg, global_milestone } = await setupChain("monad-mainnet", wallet);
+const { chain, chainId, setupConfigSnapshot, markets, reader, dexAgg, global_milestone } =
+    await setupChain("monad-mainnet", wallet);
 ```
 
 `setupChain` signature:
@@ -37,17 +38,25 @@ setupChain(
     provider: curvance_provider | null = null,   // signer (wallet) OR read-only provider; null → SDK default
     api_url: string = "https://api.curvance.com",
     options: {
-        feePolicy?: FeePolicy;                    // zap/leverage fee routing (default: NO_FEE_POLICY)
+        feePolicy?: FeePolicy;                    // default is setup-resolved: 4 bps to CentralRegistry.daoAddress()
         account?: address | null;                 // user address for user-specific reads without a signer
         readProvider?: curvance_read_provider | null;  // explicit override for read transport
     } = {}
 ): Promise<{
+    chain: ChainRpcPrefix,
+    chainId: number,
+    setupConfigSnapshot: Readonly<SetupConfigSnapshot>,
     markets: Market[],
     reader: ProtocolReader,
     dexAgg: IDexAgg,
     global_milestone: MilestoneResponse | null
 }>
 ```
+
+`setupChain()` still publishes a single active setup for compatibility helpers
+such as `getActiveUserMarkets()` and snapshot calls without explicit `markets`.
+Multichain-safe code should pass explicit `markets`, `reader`, provider,
+account, or setup context instead of relying on the latest singleton.
 
 ### RPC routing
 
@@ -528,12 +537,32 @@ import {
 
 The SDK supports configurable fees applied at the DEX aggregator layer for swaps. Fees are denominated in BPS of the swap input and charged on leverage, deleverage, deposit+leverage, and zap operations.
 
+For standard Curvance app/front-end usage, omit `options.feePolicy` and let
+`setupChain()` build the default Curvance fee policy:
+
 ```ts
-import { flatFeePolicy, NO_FEE_POLICY } from "curvance"
+const { markets } = await setupChain("monad-mainnet", wallet)
+```
+
+The default policy charges `CURVANCE_FEE_BPS` and resolves the fee receiver from
+`CentralRegistry.daoAddress()` once during setup. App consumers should not
+hardcode or pin a DAO fee receiver locally. Pass `options.feePolicy` only for an
+intentional custom integration override.
+
+```ts
+import {
+    CURVANCE_FEE_BPS,
+    flatFeePolicy,
+    NO_FEE_POLICY,
+    setupChain,
+} from "curvance"
+
+const defaultSetup = await setupChain("monad-mainnet", wallet)
 
 const feePolicy = flatFeePolicy({
-    bps: 10n,                          // 0.1% default fee
-    feeReceiver: "0xYourAddress",
+    // Custom policies still must use a checker-compatible receiver.
+    bps: CURVANCE_FEE_BPS,
+    feeReceiver: defaultSetup.setupConfigSnapshot.feePolicy.feeReceiver,
     chain: "monad-mainnet",
     stableToStableBps: 2n,             // optional lower fee for stable↔stable swaps
 })
@@ -546,6 +575,8 @@ The SDK automatically returns 0 bps for native ↔ wrapped-native swaps and same
 ```ts
 // FeePolicy interface — implement your own
 interface FeePolicy {
+    // "any" marks chain-agnostic no-op policies; chain-bound policies must match setupChain.
+    chain?: "monad-mainnet" | "arb-sepolia" | "any";
     feeReceiver: address;
     getFeeBps(ctx: FeePolicyContext): bigint;
 }
@@ -568,14 +599,18 @@ interface FeePolicyContext {
 ```ts
 import { fetchMerklOpportunities, fetchMerklUserRewards, fetchMerklCampaignsBySymbol } from "curvance"
 
-// All active opportunities (APR, token, type)
-const opportunities = await fetchMerklOpportunities()
+// Active opportunities for a production display path (APR, token, type)
+const opportunities = await fetchMerklOpportunities({ chainId: 143 })
 
 // Pending rewards for a user
 const rewards = await fetchMerklUserRewards({ wallet: address, chainId: 143 })
 
-// Campaigns for a specific token
-const campaigns = await fetchMerklCampaignsBySymbol({ tokenSymbol: "USDC" })
+// Campaigns for a specific token on one chain
+const campaigns = await fetchMerklCampaignsBySymbol({ tokenSymbol: "USDC", chainId: 143 })
+
+// Chainless Merkl calls are all-chain utilities. Filter explicitly before
+// using them in production multichain display paths.
+const allChainOpportunities = await fetchMerklOpportunities({})
 ```
 
 ### Portfolio snapshots
@@ -583,9 +618,11 @@ const campaigns = await fetchMerklCampaignsBySymbol({ tokenSymbol: "USDC" })
 ```ts
 import { takePortfolioSnapshot, snapshotMarket } from "curvance"
 
-// Full portfolio across all markets
+// Full portfolio across the current active-chain markets
 const snapshot = await takePortfolioSnapshot(account)
 // Returns: { account, chain, timestamp, totalDepositsUSD, totalDebtUSD, netUSD, dailyEarnings, dailyCost, markets[] }
+// Each market row includes { chain, chainId }. Mixed-chain snapshots require:
+// takePortfolioSnapshot(account, { markets, allowMixedChains: true })
 
 // Single market
 const marketSnapshot = snapshotMarket(market)

@@ -7,6 +7,7 @@ import { NativeToken } from "../src/classes/NativeToken";
 import { OracleManager } from "../src/classes/OracleManager";
 import { OptimizerReader } from "../src/classes/OptimizerReader";
 import { ProtocolReader } from "../src/classes/ProtocolReader";
+import { LendingOptimizer } from "../src/classes/LendingOptimizer";
 import * as helpers from "../src/helpers";
 import * as setupModule from "../src/setup";
 
@@ -14,6 +15,7 @@ const TOKEN = "0x00000000000000000000000000000000000000a1";
 const ORACLE_A = "0x00000000000000000000000000000000000000b1";
 const ORACLE_B = "0x00000000000000000000000000000000000000b2";
 const READER = "0x00000000000000000000000000000000000000c1";
+const OPTIMIZER = "0x00000000000000000000000000000000000000d1";
 
 const originalOracleManagerGetPrice = OracleManager.prototype.getPrice;
 const originalSetupConfig = (setupModule as any).setup_config;
@@ -118,6 +120,182 @@ test("ERC20 explicit detached read providers do not inherit the global setup sig
         () => token.approve(ORACLE_B as any, null),
         /Provider is not a signer/i,
     );
+});
+
+test("LendingOptimizer explicit detached read providers do not inherit the global setup signer", async () => {
+    const defaultReadProvider = { id: "default" } as any;
+    const explicitReadProvider = { id: "explicit" } as any;
+    const globalSigner = {
+        address: "0x0000000000000000000000000000000000000abc",
+        provider: defaultReadProvider,
+        sendTransaction: async () => {
+            throw new Error("global setup signer should not be used");
+        },
+    } as any;
+
+    setSetupConfig(ORACLE_A, defaultReadProvider);
+    (setupModule as any).setup_config.signer = globalSigner;
+
+    const asset = new ERC20(
+        explicitReadProvider,
+        TOKEN as any,
+        {
+            decimals: 18n,
+            symbol: "TOK",
+        } as any,
+        ORACLE_A as any,
+    );
+    const optimizer = new LendingOptimizer(OPTIMIZER as any, asset, explicitReadProvider);
+
+    assert.equal(optimizer.provider, explicitReadProvider);
+    assert.equal(optimizer.signer, null);
+    await assert.rejects(
+        () => optimizer.deposit(1 as any),
+        /Provider is not a signer/i,
+    );
+});
+
+test("LendingOptimizer default context still captures the current setup signer", () => {
+    const defaultReadProvider = { id: "default" } as any;
+    const globalSigner = {
+        address: "0x0000000000000000000000000000000000000abc",
+        provider: defaultReadProvider,
+    } as any;
+
+    setSetupConfig(ORACLE_A, defaultReadProvider);
+    (setupModule as any).setup_config.signer = globalSigner;
+
+    const asset = new ERC20(
+        defaultReadProvider,
+        TOKEN as any,
+        {
+            decimals: 18n,
+            symbol: "TOK",
+        } as any,
+        ORACLE_A as any,
+    );
+    const optimizer = new LendingOptimizer(OPTIMIZER as any, asset);
+
+    assert.equal(optimizer.provider, defaultReadProvider);
+    assert.equal(optimizer.signer, globalSigner);
+});
+
+test("LendingOptimizer defaults to an asset-bound provider after setup context moves", () => {
+    const oldReadProvider = { id: "old-chain" } as any;
+    const newReadProvider = { id: "new-chain" } as any;
+    const newGlobalSigner = {
+        address: "0x0000000000000000000000000000000000000abc",
+        provider: newReadProvider,
+    } as any;
+
+    const asset = new ERC20(
+        oldReadProvider,
+        TOKEN as any,
+        {
+            decimals: 18n,
+            symbol: "TOK",
+        } as any,
+        ORACLE_A as any,
+    );
+
+    setSetupConfig(ORACLE_B, newReadProvider);
+    (setupModule as any).setup_config.signer = newGlobalSigner;
+
+    const optimizer = new LendingOptimizer(OPTIMIZER as any, asset);
+
+    assert.equal(optimizer.provider, oldReadProvider);
+    assert.equal(optimizer.signer, null);
+});
+
+test("LendingOptimizer defaults to an asset-bound signer after setup context moves", async () => {
+    const oldReadProvider = { id: "old-chain" } as any;
+    const newReadProvider = { id: "new-chain" } as any;
+    const sent: Array<{ to: string; data: string }> = [];
+    const oldSigner = {
+        address: "0x0000000000000000000000000000000000000abc",
+        provider: oldReadProvider,
+        sendTransaction: async (tx: { to: string; data: string }) => {
+            sent.push(tx);
+            return { hash: "0xold" };
+        },
+    } as any;
+    const newGlobalSigner = {
+        address: "0x0000000000000000000000000000000000000def",
+        provider: newReadProvider,
+        sendTransaction: async () => {
+            throw new Error("moved global setup signer should not be used");
+        },
+    } as any;
+    const asset = {
+        provider: oldReadProvider,
+        signer: oldSigner,
+        decimals: 0n,
+        symbol: "TOK",
+        allowance: async (owner: string, spender: string) => {
+            assert.equal(owner, oldSigner.address);
+            assert.equal(spender, OPTIMIZER);
+            return 10n;
+        },
+    };
+
+    setSetupConfig(ORACLE_B, newReadProvider);
+    (setupModule as any).setup_config.signer = newGlobalSigner;
+
+    const optimizer = new LendingOptimizer(OPTIMIZER as any, asset as any);
+    const tx = await optimizer.deposit(1 as any);
+
+    assert.equal(optimizer.provider, oldReadProvider);
+    assert.equal(optimizer.signer, oldSigner);
+    assert.deepEqual(tx, { hash: "0xold" });
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.to, OPTIMIZER);
+});
+
+test("LendingOptimizer explicit read providers still use explicit signers", async () => {
+    const defaultReadProvider = { id: "default" } as any;
+    const explicitReadProvider = { id: "explicit" } as any;
+    const globalSigner = {
+        address: "0x0000000000000000000000000000000000000abc",
+        provider: defaultReadProvider,
+        sendTransaction: async () => {
+            throw new Error("global setup signer should not be used");
+        },
+    } as any;
+    const sent: Array<{ to: string; data: string }> = [];
+    const explicitSigner = {
+        address: "0x0000000000000000000000000000000000000def",
+        sendTransaction: async (tx: { to: string; data: string }) => {
+            sent.push(tx);
+            return { hash: "0xexplicit" };
+        },
+    } as any;
+
+    setSetupConfig(ORACLE_A, defaultReadProvider);
+    (setupModule as any).setup_config.signer = globalSigner;
+
+    const asset = {
+        decimals: 0n,
+        symbol: "TOK",
+        allowance: async (owner: string, spender: string) => {
+            assert.equal(owner, explicitSigner.address);
+            assert.equal(spender, OPTIMIZER);
+            return 10n;
+        },
+    };
+    const optimizer = new LendingOptimizer(
+        OPTIMIZER as any,
+        asset as any,
+        explicitReadProvider,
+        explicitSigner,
+    );
+
+    const tx = await optimizer.deposit(1 as any);
+
+    assert.equal(optimizer.provider, explicitReadProvider);
+    assert.equal(optimizer.signer, explicitSigner);
+    assert.deepEqual(tx, { hash: "0xexplicit" });
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.to, OPTIMIZER);
 });
 
 test("NativeToken explicit detached read providers do not inherit the global setup account", async () => {

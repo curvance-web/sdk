@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import Decimal from 'decimal.js';
 import { Interface } from 'ethers';
 import { CToken, BorrowableCToken, ERC20, FormatConverter, NATIVE_ADDRESS } from '../src';
+import { OracleManager } from '../src/classes/OracleManager';
+import * as setupModule from '../src/setup';
 
 /**
  * Unit tests pinning the USD-valuation semantics of CToken getters after the
@@ -32,6 +34,7 @@ import { CToken, BorrowableCToken, ERC20, FormatConverter, NATIVE_ADDRESS } from
 
 const ADDR = '0x0000000000000000000000000000000000000001';
 const ORACLE_MANAGER = '0x0000000000000000000000000000000000000abc';
+const AMBIENT_ORACLE_MANAGER = '0x0000000000000000000000000000000000000bad';
 const DEX_ROUTER = '0x0000000000000000000000000000000000000def';
 const ZAP_ASSET = '0x00000000000000000000000000000000000000f1';
 
@@ -62,15 +65,39 @@ const originalErc20Allowance = ERC20.prototype.allowance;
 const originalErc20Approve = ERC20.prototype.approve;
 const originalErc20FetchSymbol = ERC20.prototype.fetchSymbol;
 const originalErc20DecimalsDescriptor = Object.getOwnPropertyDescriptor(ERC20.prototype, 'decimals');
+const originalOracleManagerGetPrice = OracleManager.prototype.getPrice;
+const originalSetupConfig = (setupModule as any).setup_config;
 
 afterEach(() => {
     ERC20.prototype.allowance = originalErc20Allowance;
     ERC20.prototype.approve = originalErc20Approve;
     ERC20.prototype.fetchSymbol = originalErc20FetchSymbol;
+    OracleManager.prototype.getPrice = originalOracleManagerGetPrice;
+    (setupModule as any).setup_config = originalSetupConfig;
     if (originalErc20DecimalsDescriptor) {
         Object.defineProperty(ERC20.prototype, 'decimals', originalErc20DecimalsDescriptor);
     }
 });
+
+function setAmbientSetupConfig(oracleManager: string) {
+    const readProvider = { id: `ambient-${oracleManager}` };
+    (setupModule as any).setup_config = {
+        chain: 'arb-sepolia',
+        chainId: 421614,
+        contracts: {
+            OracleManager: oracleManager,
+        },
+        readProvider,
+        signer: null,
+        account: null,
+        provider: readProvider,
+        api_url: 'https://api.curvance.test',
+        feePolicy: {
+            getFeeBps: () => 0n,
+            feeReceiver: undefined,
+        },
+    };
+}
 
 function makeDefaultCache(): MockCache {
     return {
@@ -418,6 +445,31 @@ describe('Approval preflights â€” single-path execution', () => {
                 amount: '1.25',
             },
         ]);
+    });
+
+    test('simple-zap approval token prices through the market OracleManager instead of ambient setup', async () => {
+        const token = createExecutionToken();
+        const observedOracleManagers: string[] = [];
+        const instructions = {
+            type: 'simple',
+            inputToken: INPUT_TOKEN,
+            slippage: new Decimal('0.005'),
+        } as const;
+
+        setAmbientSetupConfig(AMBIENT_ORACLE_MANAGER);
+        OracleManager.prototype.getPrice = async function (asset) {
+            observedOracleManagers.push(this.address);
+            assert.equal(asset, INPUT_TOKEN);
+            return 123n;
+        };
+
+        const approvalTarget = await (token as any).resolveZapApprovalTarget(instructions);
+        const price = await approvalTarget.token.getPrice(false, true, false);
+
+        assert.equal(price, 123n);
+        assert.equal(approvalTarget.token.address, INPUT_TOKEN);
+        assert.equal(approvalTarget.spender, SIMPLE_ZAPPER);
+        assert.deepEqual(observedOracleManagers, [ADDR]);
     });
 
     test('deposit blocks submission when underlying allowance is missing', async () => {

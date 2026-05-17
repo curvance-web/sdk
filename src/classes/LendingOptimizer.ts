@@ -60,8 +60,13 @@ export class LendingOptimizer extends Calldata<ILendingOptimizer> {
         const legacySigner = provider != null && "address" in provider
             ? provider as curvance_signer
             : null;
+        const defaultReadProvider = resolveDefaultReadProvider();
+        const assetProvider = (asset as ERC20 & { provider?: curvance_read_provider }).provider;
+        const assetSigner = provider == null && assetProvider != null
+            ? (asset as ERC20 & { signer?: curvance_signer | null }).signer ?? null
+            : null;
         const resolvedProvider = provider == null
-            ? resolveDefaultReadProvider()
+            ? assetProvider ?? defaultReadProvider
             : legacySigner == null
                 ? provider as curvance_read_provider
                 : resolveReadProvider(provider, `LendingOptimizer ${address}`);
@@ -74,7 +79,8 @@ export class LendingOptimizer extends Calldata<ILendingOptimizer> {
         }
 
         this.provider = resolvedProvider;
-        this.signer = signer ?? legacySigner ?? resolveDefaultSigner();
+        const canInheritDefaultSigner = provider == null && (assetProvider == null || assetProvider === defaultReadProvider);
+        this.signer = signer ?? legacySigner ?? assetSigner ?? (canInheritDefaultSigner ? resolveDefaultSigner() : null);
         this.address = address;
         this.asset = asset;
         this.contract = contractSetup<ILendingOptimizer>(resolvedProvider, address, abi);

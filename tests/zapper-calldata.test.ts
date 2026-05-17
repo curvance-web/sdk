@@ -27,11 +27,12 @@ function createBufferedToken() {
     return { token, calls };
 }
 
-function createZapper(feeBps: bigint = 0n) {
+function createZapper(feeBps: bigint = 0n, dexAgg: any = chain_config["monad-mainnet"].dexAgg) {
     const calls: Array<{ method: string; args: unknown[] }> = [];
     const zapper = Object.create(Zapper.prototype) as Zapper;
     (zapper as any).address = ZAPPER;
     (zapper as any).signer = { address: RECEIVER };
+    (zapper as any).dexAgg = dexAgg;
     (zapper as any).setup = {
         chain: "monad-mainnet",
         feePolicy: {
@@ -113,8 +114,8 @@ test("simple same-token zap expectedShares uses buffered convertToShares", async
 
 test("real simple zap encodes WAD swapSafe slippage with fee expansion", async () => {
     const { token, calls: shareCalls } = createBufferedToken();
-    const { zapper, calls: calldataCalls } = createZapper(4n);
     const dex = installDexQuoteStub();
+    const { zapper, calls: calldataCalls } = createZapper(4n);
 
     try {
         await zapper.getSimpleZapCalldata(token, TOKEN, "0x00000000000000000000000000000000000000d2" as address, 10_000n, false, 50n, RECEIVER);
@@ -142,6 +143,95 @@ test("real simple zap encodes WAD swapSafe slippage with fee expansion", async (
     assert.equal(args[2].target, "0x00000000000000000000000000000000000000e1");
     assert.equal(args[2].call, "0x1234");
     assert.equal(args[3], 9_898n);
+});
+
+test("CToken.getZapper binds simple zap quotes to the market DEX aggregator", async () => {
+    const { token, calls: shareCalls } = createBufferedToken();
+    const originalDexAgg = chain_config["monad-mainnet"].dexAgg;
+    const marketQuoteCalls: Array<{
+        wallet: string;
+        tokenIn: string;
+        tokenOut: string;
+        amount: bigint;
+        slippage: bigint;
+        feeBps: bigint | undefined;
+        feeReceiver: address | undefined;
+    }> = [];
+    const marketDexAgg = {
+        quote: async (
+            wallet: string,
+            tokenIn: string,
+            tokenOut: string,
+            amount: bigint,
+            slippage: bigint,
+            feeBps?: bigint,
+            feeReceiver?: address,
+        ) => {
+            marketQuoteCalls.push({ wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver });
+            return {
+                to: "0x00000000000000000000000000000000000000e2" as address,
+                min_out: amount - 200n,
+                out: amount,
+                calldata: "0x5678",
+            };
+        },
+    };
+
+    (chain_config["monad-mainnet"] as any).dexAgg = {
+        quote: async () => {
+            throw new Error("chain singleton DEX aggregator should not be used");
+        },
+    };
+    (token as any).market = {
+        signer: { address: RECEIVER },
+        dexAgg: marketDexAgg,
+        setup: {
+            chain: "monad-mainnet",
+            contracts: {
+                zappers: {
+                    simpleZapper: ZAPPER,
+                },
+            },
+            feePolicy: {
+                getFeeBps: () => 4n,
+                feeReceiver: RECEIVER,
+            },
+        },
+    };
+    (token as any).getCallData = () => "0xtoken";
+
+    try {
+        const zapper = token.getZapper("simple");
+        assert.ok(zapper);
+
+        const calldata = await zapper.getSimpleZapCalldata(
+            token,
+            TOKEN,
+            "0x00000000000000000000000000000000000000d2" as address,
+            10_000n,
+            false,
+            50n,
+            RECEIVER,
+        );
+
+        assert.match(calldata, /^0x/);
+    } finally {
+        (chain_config["monad-mainnet"] as any).dexAgg = originalDexAgg;
+    }
+
+    assert.deepEqual(marketQuoteCalls, [{
+        wallet: ZAPPER,
+        tokenIn: TOKEN,
+        tokenOut: "0x00000000000000000000000000000000000000d2",
+        amount: 10_000n,
+        slippage: 50n,
+        feeBps: 4n,
+        feeReceiver: RECEIVER,
+    }]);
+    assert.deepEqual(shareCalls, [{
+        assets: 9_800n,
+        bufferBps: LEVERAGE.SHARES_BUFFER_BPS,
+    }]);
 });
 
 test("native simple zap expectedShares uses buffered convertToShares", async () => {

@@ -284,12 +284,18 @@ describe('Market position health units', () => {
             assert.equal((await market.expiresAt(ACCOUNT as any))?.getTime(), 2_000_200_000);
 
             (market as any).reader = {
+                address: '0x0000000000000000000000000000000000000c01',
+                batchKey: 'unit-cooldown-reader',
                 marketMultiCooldown: async () => [
                     2_000_200n,
                     1_999_999n,
                     cooldownLength,
                 ],
             };
+            (active as any).reader = market.reader;
+            (expired as any).reader = market.reader;
+            (sentinel as any).reader = market.reader;
+
             const result = await market.multiHoldExpiresAt([active, expired, sentinel]);
             assert.equal(result[active.address]?.getTime(), 2_000_200_000);
             assert.equal(result[expired.address], null);

@@ -8,6 +8,7 @@ import { ChainRpcConfig } from "./rpc";
 
 export type ChainConfig = {
     chainId: number;
+    environment: ChainEnvironment;
     dexAgg: IDexAgg;
     rpc: ChainRpcConfig;
     provider: JsonRpcProvider;
@@ -18,6 +19,8 @@ export type ChainConfig = {
     native_vaults: { name: string; contract: address }[];
     vaults: { name: string; contract: address; underlying: address }[];
 }
+
+export type ChainEnvironment = "production-mainnet" | "testnet" | "local";
 
 export const chain_config: Record<ChainRpcPrefix, ChainConfig> = {
     'monad-mainnet': monad_mainnet,

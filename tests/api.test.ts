@@ -131,6 +131,86 @@ test("Api.getRewards filters malformed reward rows from successful responses", a
     assert.equal(rewards.incentives[normalizedMarket]?.[0]?.image, "stars-rewards");
 });
 
+test("Api.getRewards filters milestones by requested chain metadata", async () => {
+    const monadMarket = "0x00000000000000000000000000000000000000AA";
+    const wrongChainMarket = "0x00000000000000000000000000000000000000BB";
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => ({
+            milestones: [
+                {
+                    market: monadMarket,
+                    tvl: 1,
+                    multiplier: 2,
+                    fail_multiplier: 0,
+                    chain_network: "Monad Mainnet",
+                    start_date: "2026-01-01",
+                    end_date: "2026-01-02",
+                    duration_in_days: 1,
+                },
+                {
+                    market: "global",
+                    tvl: 2,
+                    multiplier: 3,
+                    fail_multiplier: 0,
+                    chain_network: "monad",
+                    start_date: "2026-01-01",
+                    end_date: "2026-01-02",
+                    duration_in_days: 1,
+                },
+                {
+                    market: wrongChainMarket,
+                    tvl: 3,
+                    multiplier: 4,
+                    fail_multiplier: 0,
+                    chain_network: "Arbitrum Sepolia",
+                    start_date: "2026-01-01",
+                    end_date: "2026-01-02",
+                    duration_in_days: 1,
+                },
+            ],
+            incentives: [],
+        }),
+    })) as unknown as typeof fetch;
+
+    const rewards = await Api.getRewards({
+        chain: "monad-mainnet",
+        api_url: "https://api.curvance.test",
+    } as any);
+
+    assert.deepEqual(new Set(Object.keys(rewards.milestones)), new Set(["global", monadMarket.toLowerCase()]));
+    assert.equal(rewards.milestones[monadMarket.toLowerCase()]?.chain_network, "Monad Mainnet");
+    assert.equal(rewards.milestones.global?.chain_network, "monad");
+    assert.equal(rewards.milestones[wrongChainMarket.toLowerCase()], undefined);
+});
+
+test("Api.getRewards accepts Arbitrum Sepolia milestone aliases", async () => {
+    const market = "0x00000000000000000000000000000000000000CC";
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => ({
+            milestones: [{
+                market,
+                tvl: 1,
+                multiplier: 2,
+                fail_multiplier: 0,
+                chain_network: "Arbitrum Sepolia",
+                start_date: "2026-01-01",
+                end_date: "2026-01-02",
+                duration_in_days: 1,
+            }],
+            incentives: [],
+        }),
+    })) as unknown as typeof fetch;
+
+    const rewards = await Api.getRewards({
+        chain: "arb-sepolia",
+        api_url: "https://api.curvance.test",
+    } as any);
+
+    assert.deepEqual(Object.keys(rewards.milestones), [market.toLowerCase()]);
+});
+
 test("Api.getRewards degrades non-OK responses even when the body is valid-shaped", async () => {
     const market = "0x00000000000000000000000000000000000000AA";
     globalThis.fetch = (async () => ({

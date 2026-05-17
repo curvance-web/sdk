@@ -56,6 +56,7 @@ function createSimpleExecutionHarness({
     collateralAssetPrice = WAD,
     debtAssetPrice = WAD,
     selectedDebtTokenBalance,
+    useMarketDexAgg = false,
 }: {
     feeByOperation?: Partial<Record<'leverage-up' | 'deposit-and-leverage' | 'leverage-down', bigint>>;
     maxLeverage?: Decimal;
@@ -71,6 +72,7 @@ function createSimpleExecutionHarness({
     collateralAssetPrice?: bigint;
     debtAssetPrice?: bigint;
     selectedDebtTokenBalance?: bigint;
+    useMarketDexAgg?: boolean;
 } = {}) {
     const feeCalls: FeePolicyContext[] = [];
     const quoteCalls: Array<{
@@ -143,33 +145,43 @@ function createSimpleExecutionHarness({
         },
     };
 
-    const chainConfig = {
-        dexAgg: {
-            async quoteAction(
-                managerAddress: string,
-                inputToken: string,
-                outputToken: string,
-                inputAmount: bigint,
-                slippage: bigint,
-                feeBps: bigint,
-                feeReceiver?: string,
-            ) {
-                quoteCalls.push({
-                    manager: managerAddress,
-                    inputToken,
-                    outputToken,
-                    inputAmount,
-                    slippage,
-                    feeBps,
-                    feeReceiver,
-                });
-                return {
-                    action: { route: 'simple', inputAmount },
-                    quote: { min_out: 1_000n },
-                };
-            },
+    const quoteDexAgg = {
+        async quoteAction(
+            managerAddress: string,
+            inputToken: string,
+            outputToken: string,
+            inputAmount: bigint,
+            slippage: bigint,
+            feeBps: bigint,
+            feeReceiver?: string,
+        ) {
+            quoteCalls.push({
+                manager: managerAddress,
+                inputToken,
+                outputToken,
+                inputAmount,
+                slippage,
+                feeBps,
+                feeReceiver,
+            });
+            return {
+                action: { route: 'simple', inputAmount },
+                quote: { min_out: 1_000n },
+            };
         },
     };
+    const chainConfig = {
+        dexAgg: useMarketDexAgg
+            ? {
+                async quoteAction() {
+                    throw new Error('chain singleton DEX aggregator should not be used');
+                },
+            }
+            : quoteDexAgg,
+    };
+    if (useMarketDexAgg) {
+        (market as any).dexAgg = quoteDexAgg;
+    }
 
     (token as any).market = market;
     (token as any).cache = {
@@ -647,6 +659,18 @@ describe('CToken simple leverage execution', () => {
         );
     });
 
+    test('leverageUp uses the market-bound DEX aggregator instead of the chain singleton', async () => {
+        const { token, borrow, quoteCalls, leverageCalls } = createSimpleExecutionHarness({
+            useMarketDexAgg: true,
+        });
+
+        const tx = await token.leverageUp(borrow, Decimal(2), 'simple', Decimal(0.01));
+
+        assert.deepEqual(tx, { hash: '0xleverage' });
+        assert.deepEqual(quoteCalls.map((call) => call.inputToken), [DEBT]);
+        assert.equal(leverageCalls.length, 1);
+    });
+
     test('direct leverageUp does not require cToken delegate approval to the position manager', async () => {
         const { token, borrow } = createSimpleExecutionHarness();
 
@@ -736,6 +760,18 @@ describe('CToken simple leverage execution', () => {
                 amplifyContractSlippage(110n, Decimal('0.6'), 37n),
             ),
         );
+    });
+
+    test('depositAndLeverage uses the market-bound DEX aggregator instead of the chain singleton', async () => {
+        const { token, borrow, quoteCalls, depositCalls } = createSimpleExecutionHarness({
+            useMarketDexAgg: true,
+        });
+
+        const tx = await token.depositAndLeverage(Decimal(10), borrow, Decimal('1.60'), 'simple', Decimal(0.01));
+
+        assert.deepEqual(tx, { hash: '0xdeposit' });
+        assert.deepEqual(quoteCalls.map((call) => call.inputToken), [DEBT]);
+        assert.equal(depositCalls.length, 1);
     });
 
     test('direct depositAndLeverage does not require cToken delegate approval to the position manager', async () => {
@@ -883,6 +919,24 @@ describe('CToken simple leverage execution', () => {
         );
 
         assert.deepEqual(tx, { hash: '0xdeleverage' });
+        assert.equal(deleverageCalls.length, 1);
+    });
+
+    test('leverageDown uses the market-bound DEX aggregator instead of the chain singleton', async () => {
+        const { token, borrow, quoteCalls, deleverageCalls } = createSimpleExecutionHarness({
+            useMarketDexAgg: true,
+        });
+
+        const tx = await token.leverageDown(
+            borrow,
+            Decimal('1.6666666667'),
+            Decimal('1.5'),
+            'simple',
+            Decimal(0.01),
+        );
+
+        assert.deepEqual(tx, { hash: '0xdeleverage' });
+        assert.deepEqual(quoteCalls.map((call) => call.inputToken), [COLLATERAL]);
         assert.equal(deleverageCalls.length, 1);
     });
 

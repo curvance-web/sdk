@@ -61,7 +61,40 @@ export class PositionManager extends Calldata<IPositionManager> {
         return deposit_ctoken.convertToShares(amount);
     }
 
+    private static assertVaultExpectedSharesTokensMatch(deposit_ctoken: CToken, borrow_ctoken: CToken) {
+        const depositMarket = (deposit_ctoken as CToken & { market?: any }).market;
+        const borrowMarket = (borrow_ctoken as CToken & { market?: any }).market;
+
+        if (depositMarket == undefined || borrowMarket == undefined) {
+            return;
+        }
+
+        if (depositMarket === borrowMarket) {
+            return;
+        }
+
+        const depositChain = depositMarket.setup?.chain;
+        const borrowChain = borrowMarket.setup?.chain;
+        const sameMarket = depositMarket.address?.toLowerCase() === borrowMarket.address?.toLowerCase();
+        const sameChain = depositChain != null && borrowChain != null && depositChain === borrowChain;
+        const depositReaderKey = depositMarket.reader?.batchKey ?? null;
+        const borrowReaderKey = borrowMarket.reader?.batchKey ?? null;
+        const sameReaderDeployment =
+            depositMarket.reader === borrowMarket.reader ||
+            (depositReaderKey != null && depositReaderKey === borrowReaderKey);
+
+        if (!sameMarket || !sameChain || !sameReaderDeployment) {
+            throw new Error(
+                `Vault expected shares for deposit token ${deposit_ctoken.address} on ` +
+                `${depositChain ?? "unknown"} market ${depositMarket.address ?? "unknown"} cannot use ` +
+                `borrow token ${borrow_ctoken.address} from ${borrowChain ?? "unknown"} ` +
+                `market ${borrowMarket.address ?? "unknown"} with a different reader deployment.`
+            );
+        }
+    }
+
     static async getVaultExpectedShares(deposit_ctoken: CToken, borrow_ctoken: CToken, borrow_amount: TokenInput) {
+        PositionManager.assertVaultExpectedSharesTokensMatch(deposit_ctoken, borrow_ctoken);
         const borrow_amount_as_bn = FormatConverter.decimalToBigInt(borrow_amount, borrow_ctoken.asset.decimals);
         return deposit_ctoken.getExpectedVaultShares(borrow_amount_as_bn);
     }

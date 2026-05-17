@@ -5,6 +5,7 @@ import { createChainFallbackProviders, createChainPrimaryProvider, getChainRpcCo
 
 export const testnet: ChainConfig = {
     chainId: 421614,
+    environment: "testnet",
     dexAgg: new UnsupportedDexAgg("arb-sepolia"),
     rpc: getChainRpcConfig("arb-sepolia"),
     provider: createChainPrimaryProvider("arb-sepolia"),

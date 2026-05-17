@@ -1003,3 +1003,75 @@ test("maxRedemptionOf defaults bufferTime to 0n when not provided", async () => 
     assert.equal(result.maxUncollateralizedShares, 111n);
     assert.equal(result.errorCodeHit, false);
 });
+
+test("token reader guard allows same un-namespaced reader instance", async () => {
+    const reader = createReader();
+    setReaderKeys(reader, MARKET, null);
+    reader.contract = {
+        maxRedemptionOf: async () => [777n, 222n, false],
+    } as any;
+    const ctoken = {
+        address: TOKEN,
+        market: {
+            address: MARKET,
+            reader,
+            setup: { chain: "monad-mainnet" },
+        },
+    } as any;
+
+    const result = await reader.maxRedemptionOf(ACCOUNT as any, ctoken, 180n);
+
+    assert.equal(result.maxCollateralizedShares, 777n);
+    assert.equal(result.maxUncollateralizedShares, 222n);
+});
+
+test("token reader guard allows distinct reader objects only when their deployment key matches", async () => {
+    const reader = createReader();
+    const tokenReader = createReader();
+    setReaderKeys(reader, MARKET, "monad-mainnet");
+    setReaderKeys(tokenReader, MARKET, "monad-mainnet");
+    reader.contract = {
+        maxRedemptionOf: async () => [333n, 111n, false],
+    } as any;
+    const ctoken = {
+        address: TOKEN,
+        market: {
+            address: MARKET,
+            reader: tokenReader,
+            setup: { chain: "monad-mainnet" },
+        },
+    } as any;
+
+    const result = await reader.maxRedemptionOf(ACCOUNT as any, ctoken, 60n);
+
+    assert.equal(result.maxCollateralizedShares, 333n);
+    assert.equal(result.maxUncollateralizedShares, 111n);
+});
+
+test("token reader guard fails closed for same-address un-namespaced reader clones", async () => {
+    const reader = createReader();
+    const foreignReader = createReader();
+    setReaderKeys(reader, MARKET, null);
+    setReaderKeys(foreignReader, MARKET, null);
+    let contractCalled = false;
+    reader.contract = {
+        maxRedemptionOf: async () => {
+            contractCalled = true;
+            throw new Error("reader guard should run before RPC");
+        },
+    } as any;
+    const ctoken = {
+        address: TOKEN,
+        market: {
+            address: MARKET_B,
+            reader: foreignReader,
+            setup: { chain: "arb-sepolia" },
+        },
+    } as any;
+
+    await assert.rejects(
+        () => reader.maxRedemptionOf(ACCOUNT as any, ctoken, 180n),
+        /ProtocolReader .* cannot read redemption token .* from market .* on arb-sepolia/i,
+    );
+    assert.equal(contractCalled, false);
+});

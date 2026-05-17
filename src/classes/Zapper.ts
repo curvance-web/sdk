@@ -6,6 +6,7 @@ import { Calldata } from "./Calldata";
 import abi from '../abis/SimpleZapper.json';
 import { Zappers } from "./Market";
 import { type SetupConfigSnapshot } from "../setup";
+import type IDexAgg from "./DexAggregators/IDexAgg";
 
 export interface Swap {
     inputToken: address,
@@ -41,29 +42,52 @@ export class Zapper extends Calldata<IZapper> {
     address: address;
     type: ZapperTypes;
     setup: SetupConfigSnapshot;
+    dexAgg: IDexAgg;
 
-    constructor(address: address, signer: curvance_signer, type: ZapperTypes, setup: SetupConfigSnapshot) {
+    constructor(address: address, signer: curvance_signer, type: ZapperTypes, setup: SetupConfigSnapshot, dexAgg?: IDexAgg) {
         super();
         this.address = address;
         this.signer = signer;
         this.type = type;
         this.setup = setup;
+        this.dexAgg = dexAgg ?? getChainConfig(setup.chain).dexAgg;
         this.contract = contractSetup<IZapper>(signer, address, abi);
     }
 
+    private assertCTokenBelongsToSetup(ctoken: CToken) {
+        const tokenMarket = (ctoken as CToken & { market?: { address?: address; setup?: SetupConfigSnapshot } }).market;
+        if (tokenMarket == undefined) {
+            return;
+        }
+
+        const tokenChain = tokenMarket.setup?.chain;
+        if (tokenMarket.setup === this.setup) {
+            return;
+        }
+
+        throw new Error(
+            `${this.type} Zapper on ${this.setup.chain} cannot build calldata for token ${ctoken.address} ` +
+            `from market ${tokenMarket.address ?? "unknown"} on ${tokenChain ?? "unknown"} ` +
+            `without the same setup snapshot.`
+        );
+    }
+
     async nativeZap(ctoken: CToken, amount: bigint, collateralize: boolean, receiver: address = this.signer.address as address) {
+        this.assertCTokenBelongsToSetup(ctoken);
         const wrapped = this.type === 'native-simple' || ctoken.isWrappedNative;
         const calldata = await this.getNativeZapCalldata(ctoken, amount, collateralize, wrapped, receiver);
         return ctoken.oracleRoute(calldata, { value: amount, to: this.address }, receiver);
     }
 
     async simpleZap(ctoken: CToken, inputToken: address, outputToken: address,  amount: bigint, collateralize: boolean, slippage: bigint, receiver: address = this.signer.address as address) {
+        this.assertCTokenBelongsToSetup(ctoken);
         const calldata = await this.getSimpleZapCalldata(ctoken, inputToken, outputToken, amount, collateralize, slippage, receiver);
         const isNative = inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
         return ctoken.oracleRoute(calldata, isNative ? { value: amount, to: this.address } : { to: this.address }, receiver);
     }
 
     async getSimpleZapCalldata(ctoken: CToken, inputToken: address, outputToken: address, amount: bigint, collateralize: boolean, slippage: bigint, receiver: address = this.signer.address as address) {
+        this.assertCTokenBelongsToSetup(ctoken);
         const isNative = inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
         const config = getChainConfig(this.setup.chain);
 
@@ -113,7 +137,7 @@ export class Zapper extends Calldata<IZapper> {
         });
         const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
 
-        const quote = await config.dexAgg.quote(this.address, swapInputToken, outputToken, amount, slippage, feeBps, feeReceiver);
+        const quote = await this.dexAgg.quote(this.address, swapInputToken, outputToken, amount, slippage, feeBps, feeReceiver);
 
         const swap: Swap = {
             inputToken: isNative ? NATIVE_ADDRESS : inputToken,
@@ -137,6 +161,7 @@ export class Zapper extends Calldata<IZapper> {
     }
 
     async getVaultZapCalldata(ctoken: CToken, amount: bigint, collateralize: boolean, wrapped: boolean = false, receiver: address = this.signer.address as address) {
+        this.assertCTokenBelongsToSetup(ctoken);
         const { underlying_address, expected_shares } = await this.getZapVaultData(ctoken, amount);
 
         const swap: Swap = {
@@ -159,6 +184,7 @@ export class Zapper extends Calldata<IZapper> {
     }
 
     async getZapVaultData(ctoken: CToken, amount: bigint) {
+        this.assertCTokenBelongsToSetup(ctoken);
         const vault = await ctoken.getUnderlyingVault();
         const vault_underlying = await vault.fetchAsset(false);
         const expected_shares = await ctoken.getExpectedVaultShares(amount);
@@ -170,6 +196,7 @@ export class Zapper extends Calldata<IZapper> {
     }
 
     async getNativeZapCalldata(ctoken: CToken, amount: bigint, collateralize: boolean, wrapped: boolean = false, receiver: address = this.signer.address as address) {
+        this.assertCTokenBelongsToSetup(ctoken);
         const vaultAssets = (ctoken.isVault || ctoken.isNativeVault)
             ? await ctoken.getExpectedVaultShares(amount)
             : amount;

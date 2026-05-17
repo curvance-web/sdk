@@ -1,5 +1,5 @@
 import { Contract, TransactionResponse } from "ethers";
-import { contractSetup, BPS, ChangeRate, getRateSeconds, requireAccount, requireSigner, WAD, getChainConfig, EMPTY_ADDRESS, toDecimal, SECONDS_PER_YEAR, toBps, NATIVE_ADDRESS, UINT256_MAX, amplifyContractSlippage } from "../helpers";
+import { contractSetup, BPS, BPS_DECIMAL, ChangeRate, getRateSeconds, requireAccount, requireSigner, WAD, getChainConfig, EMPTY_ADDRESS, toDecimal, SECONDS_PER_YEAR, toBps, NATIVE_ADDRESS, UINT256_MAX, amplifyContractSlippage } from "../helpers";
 import { AdaptorTypes, DynamicMarketToken, StaticMarketToken, UserMarketToken } from "./ProtocolReader";
 import { ERC20 } from "./ERC20";
 import { Market, PluginTypes } from "./Market";
@@ -328,19 +328,38 @@ export class CToken extends Calldata<ICToken> {
         this.isVault = chainSettings.vaults.some(vault => vault.contract.toLowerCase() == assetAddr);
         this.isWrappedNative = chainSettings.wrapped_native.toLowerCase() == assetAddr;
 
+        this.refreshRouteCapabilities();
+    }
+
+    refreshRouteCapabilities() {
+        this.zapTypes = [];
+        this.leverageTypes = [];
+
         if(EXCLUDED_ZAP_SYMBOLS.has(this.asset.symbol)) {
             return;
         }
 
-        if(this.isNativeVault) this.zapTypes.push('native-vault');
-        if("nativeVaultPositionManager" in this.market.plugins && this.isNativeVault) this.leverageTypes.push('native-vault');
-        if(this.isWrappedNative) this.zapTypes.push('native-simple');
+        const zappers = this.setup.contracts.zappers;
+        const nativeVaultZapper = zappers?.nativeVaultZapper;
+        const vaultZapper = zappers?.vaultZapper;
+        const simpleZapper = zappers?.simpleZapper;
+        const supportsNativeVaultZaps = typeof nativeVaultZapper === 'string'
+            && nativeVaultZapper.toLowerCase() !== EMPTY_ADDRESS.toLowerCase();
+        const supportsVaultZaps = typeof vaultZapper === 'string'
+            && vaultZapper.toLowerCase() !== EMPTY_ADDRESS.toLowerCase();
+        const supportsSimpleZaps = typeof simpleZapper === 'string'
+            && simpleZapper.toLowerCase() !== EMPTY_ADDRESS.toLowerCase()
+            && this.hasExecutableDexRoute;
 
-        if(this.isVault) this.zapTypes.push('vault');
+        if(supportsNativeVaultZaps && this.isNativeVault) this.zapTypes.push('native-vault');
+        if("nativeVaultPositionManager" in this.market.plugins && this.isNativeVault) this.leverageTypes.push('native-vault');
+        if(supportsSimpleZaps && this.isWrappedNative) this.zapTypes.push('native-simple');
+
+        if(supportsVaultZaps && this.isVault) this.zapTypes.push('vault');
         if("vaultPositionManager" in this.market.plugins && this.isVault) this.leverageTypes.push('vault');
 
-        if("simplePositionManager" in this.market.plugins) this.leverageTypes.push('simple');
-        this.zapTypes.push('simple');
+        if(supportsSimpleZaps && "simplePositionManager" in this.market.plugins) this.leverageTypes.push('simple');
+        if(supportsSimpleZaps) this.zapTypes.push('simple');
     }
 
     private getUserCacheFreshness(): UserCacheFreshness {
@@ -379,12 +398,47 @@ export class CToken extends Calldata<ICToken> {
     private get setup() { return this.market.setup; }
     private get currentChain() { return this.setup.chain; }
     private get currentChainConfig() { return getChainConfig(this.currentChain); }
+    private get currentDexAgg() { return this.market.dexAgg ?? this.currentChainConfig.dexAgg; }
+    private get hasExecutableDexRoute() { return this.currentDexAgg.router.toLowerCase() !== EMPTY_ADDRESS.toLowerCase(); }
     protected requireSigner() { return requireSigner(this.signer); }
     protected getAccountOrThrow(account: address | null = null) {
         return requireAccount(account ?? this.account, this.signer);
     }
     protected getWriteContract() {
         return contractSetup<ICToken>(this.requireSigner(), this.address, base_ctoken_abi);
+    }
+
+    private assertBorrowTokenBelongsToMarket(borrow: BorrowableCToken | null | undefined, label: string = "Borrow") {
+        if (borrow == null) {
+            return;
+        }
+
+        const borrowMarket = (borrow as BorrowableCToken & { market?: Market }).market;
+        if (borrowMarket == undefined) {
+            return;
+        }
+
+        if (borrowMarket === this.market) {
+            return;
+        }
+
+        const borrowChain = borrowMarket.setup?.chain;
+        const collateralChain = this.market.setup?.chain;
+        const sameMarket = borrowMarket.address?.toLowerCase() === this.market.address.toLowerCase();
+        const sameChain = borrowChain != null && collateralChain != null && borrowChain === collateralChain;
+        const borrowReaderKey = borrowMarket.reader?.batchKey ?? null;
+        const collateralReaderKey = this.market.reader?.batchKey ?? null;
+        const sameReaderDeployment =
+            borrowMarket.reader === this.market.reader ||
+            (borrowReaderKey != null && borrowReaderKey === collateralReaderKey);
+
+        if (!sameMarket || !sameChain || !sameReaderDeployment) {
+            throw new Error(
+                `${label} token ${borrow.address} belongs to market ${borrowMarket.address} ` +
+                `on ${borrowChain ?? "unknown"}, not market ${this.market.address} on ${collateralChain ?? "unknown"} ` +
+                `with the same reader deployment.`
+            );
+        }
     }
 
     private getZapType(zap: ZapperInstructions): ZapperTypes {
@@ -417,7 +471,13 @@ export class CToken extends Calldata<ICToken> {
                     return 18n;
                 }
 
-                const inputErc20 = new ERC20(this.provider, zap.inputToken, undefined, undefined, this.signer);
+                const inputErc20 = new ERC20(
+                    this.provider,
+                    zap.inputToken,
+                    undefined,
+                    this.setup.contracts.OracleManager as address,
+                    this.signer,
+                );
                 return inputErc20.decimals ?? await inputErc20.contract.decimals();
         }
     }
@@ -430,6 +490,7 @@ export class CToken extends Calldata<ICToken> {
         borrow: BorrowableCToken,
         type: "vault" | "native-vault",
     ) {
+        this.assertBorrowTokenBelongsToMarket(borrow);
         const expectedAsset = type === "native-vault"
             ? this.currentChainConfig.wrapped_native
             : await this.getVaultAsset(false);
@@ -555,7 +616,7 @@ export class CToken extends Calldata<ICToken> {
         const shares = this.totalSupply === 0n || this.totalAssets === 0n
             ? assets
             : (assets * this.totalSupply) / this.totalAssets;
-        return bufferBps > 0n ? shares * (10000n - bufferBps) / 10000n : shares;
+        return bufferBps > 0n ? shares * (BPS - bufferBps) / BPS : shares;
     }
 
     private getMarketLeverageState(leverageState?: LeverageStateOverride) {
@@ -815,7 +876,7 @@ export class CToken extends Calldata<ICToken> {
         // into Curvance shares. Buffer the inner preview so exchange-rate drift
         // between quote time and inclusion cannot trip the outer expectedShares
         // check on otherwise-valid deposits/leverage/zaps.
-        const vaultShares = vaultSharesRaw * (10000n - LEVERAGE.SHARES_BUFFER_BPS) / 10000n;
+        const vaultShares = vaultSharesRaw * (BPS - LEVERAGE.SHARES_BUFFER_BPS) / BPS;
         return this.convertToShares(vaultShares);
     }
 
@@ -934,7 +995,7 @@ export class CToken extends Calldata<ICToken> {
             return null;
         }
 
-        return new Zapper(zap_contract, signer, type, this.setup);
+        return new Zapper(zap_contract, signer, type, this.setup, this.currentDexAgg);
     }
 
     async isZapAssetApproved(instructions: ZapperInstructions, amount: bigint) {
@@ -1019,7 +1080,13 @@ export class CToken extends Calldata<ICToken> {
 
     async getAllowance(check_contract: address, underlying = true) {
         const signer = this.requireSigner();
-        const erc20 = new ERC20(this.provider, underlying ? this.asset.address : this.address, undefined, undefined, this.signer);
+        const erc20 = new ERC20(
+            this.provider,
+            underlying ? this.asset.address : this.address,
+            undefined,
+            this.setup.contracts.OracleManager as address,
+            this.signer,
+        );
         const allowance = await erc20.allowance(signer.address as address, check_contract);
         return allowance;
     }
@@ -1030,13 +1097,25 @@ export class CToken extends Calldata<ICToken> {
      * @returns tx
      */
     async approveUnderlying(amount: TokenInput | null = null, target: address | null = null) {
-        const erc20 = new ERC20(this.provider, this.asset.address, undefined, undefined, this.signer);
+        const erc20 = new ERC20(
+            this.provider,
+            this.asset.address,
+            undefined,
+            this.setup.contracts.OracleManager as address,
+            this.signer,
+        );
         const tx = await erc20.approve(target ? target : this.address, amount);
         return tx;
     }
 
     async approve(amount: TokenInput | null = null, spender: address) {
-        const erc20 = new ERC20(this.provider, this.address, undefined, undefined, this.signer);
+        const erc20 = new ERC20(
+            this.provider,
+            this.address,
+            undefined,
+            this.setup.contracts.OracleManager as address,
+            this.signer,
+        );
         const tx = await erc20.approve(spender, amount);
         return tx;
     }
@@ -1208,7 +1287,13 @@ export class CToken extends Calldata<ICToken> {
                     this.account,
                 );
             } else {
-                asset = new ERC20(this.provider, zap.inputToken, undefined, undefined, this.signer);
+                asset = new ERC20(
+                    this.provider,
+                    zap.inputToken,
+                    undefined,
+                    this.setup.contracts.OracleManager as address,
+                    this.signer,
+                );
             }
         } else {
             switch (zap) {
@@ -1345,7 +1430,7 @@ export class CToken extends Calldata<ICToken> {
 
     async convertToShares(assets: bigint, bufferBps: bigint = LEVERAGE.SHARES_BUFFER_BPS) {
         const shares = await this.contract.convertToShares(assets);
-        return bufferBps > 0n ? shares * (10000n - bufferBps) / 10000n : shares;
+        return bufferBps > 0n ? shares * (BPS - bufferBps) / BPS : shares;
     }
 
     async maxRedemption(): Promise<TokenInput>;
@@ -1432,8 +1517,8 @@ export class CToken extends Calldata<ICToken> {
             tokens_exclude.push(vault_asset.address.toLocaleLowerCase());
         }
 
-        if(this.zapTypes.includes('simple') && this.currentChainConfig.dexAgg.router !== EMPTY_ADDRESS) {
-            let dexAggSearch = await this.currentChainConfig.dexAgg.getAvailableTokens(this.provider, search, this.account);
+        if(this.zapTypes.includes('simple') && this.hasExecutableDexRoute) {
+            let dexAggSearch = await this.currentDexAgg.getAvailableTokens(this.provider, search, this.account);
             tokens = tokens.concat(dexAggSearch.filter(token => !tokens_exclude.includes(token.interface.address.toLocaleLowerCase())));
 
             // Add native MON as a zap option for any token with a simple zapper
@@ -1487,6 +1572,7 @@ export class CToken extends Calldata<ICToken> {
      * for full deleverage swap sizing).
      */
     private async _getLeverageSnapshot(borrow: BorrowableCToken) {
+        this.assertBorrowTokenBelongsToMarket(borrow);
         const snapshot = await this.market.reader.getLeverageSnapshot(
             this.getAccountOrThrow(), this.address, borrow.address, 120n
         );
@@ -1530,12 +1616,14 @@ export class CToken extends Calldata<ICToken> {
     }
 
     private assertSimpleLeverageSwapAssetsDiffer(borrow: BorrowableCToken) {
+        this.assertBorrowTokenBelongsToMarket(borrow);
         if (borrow.asset.address.toLowerCase() === this.asset.address.toLowerCase()) {
             throw new Error("Simple leverage requires distinct collateral and borrow assets.");
         }
     }
 
     private async assertLeverageBorrowCapacity(borrow: BorrowableCToken, borrowAssets: bigint) {
+        this.assertBorrowTokenBelongsToMarket(borrow);
         if (borrowAssets === 0n) {
             return;
         }
@@ -1558,6 +1646,7 @@ export class CToken extends Calldata<ICToken> {
         selectedDebtAssets: bigint,
         requiredDebtReductionUsd: USD,
     ) {
+        this.assertBorrowTokenBelongsToMarket(borrow);
         if (requiredDebtReductionUsd.lte(0)) {
             return;
         }
@@ -1598,6 +1687,7 @@ export class CToken extends Calldata<ICToken> {
         positionManagerType,
         leverageState,
     }: ResolveLeverageUpPreviewParams): LeverageUpPreview {
+        this.assertBorrowTokenBelongsToMarket(borrow);
         const currentState = this.getMarketLeverageState(leverageState);
         const currentLeverage = currentState.currentLeverage ?? Decimal(1);
         const currentCollateralInUsd = currentState.currentCollateralInUsd;
@@ -1649,7 +1739,7 @@ export class CToken extends Calldata<ICToken> {
                 targetLeverage: resolvedTargetLeverage,
             })
             : 0n;
-        const feeAssets = borrowAmount.mul(Decimal(Number(feeBps))).div(Decimal(10000));
+        const feeAssets = borrowAmount.mul(Decimal(Number(feeBps))).div(BPS_DECIMAL);
         const feeUsd = feeAssets.mul(borrowPrice);
         const collateralIncreaseFromBorrow = Decimal.max(debtIncrease.sub(feeUsd), Decimal(0));
         const collateralIncrease = depositInUsd.add(collateralIncreaseFromBorrow);
@@ -1721,6 +1811,7 @@ export class CToken extends Calldata<ICToken> {
         borrow?: BorrowableCToken,
         leverageState?: LeverageStateOverride,
     ) {
+        this.assertBorrowTokenBelongsToMarket(borrow);
         if(newLeverage.gte(currentLeverage)) {
             throw new Error("New leverage must be less than current leverage");
         }
@@ -1759,7 +1850,7 @@ export class CToken extends Calldata<ICToken> {
             currentLeverage,
             targetLeverage: newLeverage,
         }) : 0n;
-        const feeUsd = collateralAssetReductionUsd.mul(Decimal(Number(feeBps))).div(Decimal(10000));
+        const feeUsd = collateralAssetReductionUsd.mul(Decimal(Number(feeBps))).div(BPS_DECIMAL);
         const feeAssets = this.getPrice(true).gt(0)
             ? feeUsd.div(this.getPrice(true))
             : Decimal(0);
@@ -1786,6 +1877,7 @@ export class CToken extends Calldata<ICToken> {
         simulate: boolean = false
     ): Promise<any> {
         try {
+            this.assertBorrowTokenBelongsToMarket(borrow);
             this.requireSigner();
             const manager = this.getPositionManager(type);
             if (type === 'vault' || type === 'native-vault') {
@@ -1817,7 +1909,7 @@ export class CToken extends Calldata<ICToken> {
                 case 'simple': {
                     const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
 
-                    const { action, quote } = await this.currentChainConfig.dexAgg.quoteAction(
+                    const { action, quote } = await this.currentDexAgg.quoteAction(
                         manager.address,
                         borrow.asset.address,
                         this.asset.address,
@@ -1908,6 +2000,7 @@ export class CToken extends Calldata<ICToken> {
         simulate: boolean = false
     ): Promise<any> {
         try {
+            this.assertBorrowTokenBelongsToMarket(borrowToken);
             if(newLeverage.gte(currentLeverage)) {
                 if (simulate) return { success: false, error: "New leverage must be less than current leverage" };
                 throw new Error("New leverage must be less than current leverage");
@@ -1915,7 +2008,6 @@ export class CToken extends Calldata<ICToken> {
 
             this.requireSigner();
 
-            const config = this.currentChainConfig;
             const slippage = toBps(slippage_);
             const manager = this.getPositionManager(type);
             if (type === 'simple') {
@@ -1977,7 +2069,7 @@ export class CToken extends Calldata<ICToken> {
                         // Additive approximation is accurate to sub-bp at typical
                         // fee+overhead magnitudes (< 100 bps combined).
                         const overheadBps = LEVERAGE.DELEVERAGE_OVERHEAD_BPS + feeBps;
-                        swapCollateral = ceilDiv(debtInCollateral * (10000n + overheadBps), 10000n);
+                        swapCollateral = ceilDiv(debtInCollateral * (BPS + overheadBps), BPS);
 
                         if (swapCollateral > maxTokenCollateral) {
                             const error = "Selected collateral token does not have enough posted collateral to fully deleverage.";
@@ -1999,7 +2091,7 @@ export class CToken extends Calldata<ICToken> {
                             // from input before swapping, so without compensation
                             // the swap underdelivers and actual leverage is slightly
                             // higher than target.
-                            swapCollateral = ceilDiv(swapCollateral * 10000n, 10000n - feeBps);
+                            swapCollateral = ceilDiv(swapCollateral * BPS, BPS - feeBps);
                         }
                     }
 
@@ -2011,7 +2103,7 @@ export class CToken extends Calldata<ICToken> {
                         throw new Error(error);
                     }
 
-                    const { action, quote } = await config.dexAgg.quoteAction(
+                    const { action, quote } = await this.currentDexAgg.quoteAction(
                         manager.address,
                         this.asset.address,
                         borrowToken.asset.address,
@@ -2092,6 +2184,7 @@ export class CToken extends Calldata<ICToken> {
         simulate: boolean = false
     ): Promise<any> {
         try {
+            this.assertBorrowTokenBelongsToMarket(borrow);
             if(multiplier.lte(Decimal(1))) {
                 if (simulate) return { success: false, error: "Multiplier must be greater than 1" };
                 throw new Error("Multiplier must be greater than 1");
@@ -2133,7 +2226,7 @@ export class CToken extends Calldata<ICToken> {
                 case 'simple': {
                     const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
 
-                    const { action, quote } = await this.currentChainConfig.dexAgg.quoteAction(
+                    const { action, quote } = await this.currentDexAgg.quoteAction(
                         manager.address,
                         borrow.asset.address,
                         this.asset.address,
@@ -2553,7 +2646,13 @@ export class CToken extends Calldata<ICToken> {
                 }
 
                 return {
-                    token: new ERC20(this.provider, instructions.inputToken, undefined, undefined, this.signer),
+                    token: new ERC20(
+                        this.provider,
+                        instructions.inputToken,
+                        undefined,
+                        this.setup.contracts.OracleManager as address,
+                        this.signer,
+                    ),
                     spender,
                     spenderLabel: `${zapType} Zapper`,
                 };

@@ -1,7 +1,12 @@
 const assert = require("node:assert/strict");
-const { readFileSync } = require("node:fs");
+const { existsSync, mkdtempSync, readFileSync, rmSync } = require("node:fs");
+const { tmpdir } = require("node:os");
+const { execFileSync } = require("node:child_process");
 const path = require("node:path");
 const sdk = require("../dist/index.js");
+const { Api } = require("../dist/classes/Api.js");
+const { Market } = require("../dist/classes/Market.js");
+const repoRoot = path.join(__dirname, "..");
 
 const TOKEN_IN = "0x0000000000000000000000000000000000000001";
 const TOKEN_OUT = "0x0000000000000000000000000000000000000002";
@@ -83,6 +88,47 @@ async function withMockedKyberFetch(kyber, calldata, run) {
     }
 }
 
+function npmPackInvocation(packDir) {
+    const npmCliCandidates = [
+        process.env.npm_execpath,
+        path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"),
+    ].filter(Boolean);
+    const npmCli = npmCliCandidates.find((candidate) => existsSync(candidate));
+
+    if (npmCli) {
+        return {
+            command: process.execPath,
+            args: [npmCli, "pack", "--json", "--ignore-scripts", "--pack-destination", packDir],
+        };
+    }
+
+    return {
+        command: "npm",
+        args: ["pack", "--json", "--ignore-scripts", "--pack-destination", packDir],
+    };
+}
+
+function readPackedFiles() {
+    const packDir = mkdtempSync(path.join(tmpdir(), "curvance-sdk-pack-"));
+
+    try {
+        const invocation = npmPackInvocation(packDir);
+        const output = execFileSync(
+            invocation.command,
+            invocation.args,
+            {
+                cwd: repoRoot,
+                encoding: "utf8",
+                stdio: ["ignore", "pipe", "pipe"],
+            },
+        );
+        const [pack] = JSON.parse(output);
+        return new Set(pack.files.map((file) => file.path.replace(/\\/g, "/")));
+    } finally {
+        rmSync(packDir, { recursive: true, force: true });
+    }
+}
+
 class SignerBackedCalldata extends sdk.Calldata {
     constructor(signer) {
         super();
@@ -99,11 +145,21 @@ class SignerBackedCalldata extends sdk.Calldata {
 }
 
 async function main() {
+    const packedFiles = readPackedFiles();
+    assert.ok(packedFiles.has("dist/index.js"), "package tarball should include built root entry");
+    assert.ok(packedFiles.has("README.md"), "package tarball should include README");
+    assert.equal(
+        [...packedFiles].some((file) => /(^|\/)Kuru\.(js|d\.ts|js\.map|d\.ts\.map)$/.test(file)),
+        false,
+        "package tarball must not include stale deprecated Kuru artifacts",
+    );
+
     assert.equal(typeof sdk.setupChain, "function", "dist should export setupChain");
     assert.equal(typeof sdk.Calldata, "function", "dist should export Calldata");
     assert.equal(typeof sdk.OptimizerReader, "function", "dist should export OptimizerReader");
     assert.equal(typeof sdk.LendingOptimizer, "function", "dist should export LendingOptimizer");
     assert.equal(typeof sdk.PositionManager, "function", "dist should export PositionManager");
+    assert.equal(typeof sdk.Api, "function", "dist should export Api reward helpers and types");
     assert.equal(typeof sdk.KyberSwap, "function", "dist should export KyberSwap");
     assert.equal(typeof sdk.MultiDexAgg, "function", "dist should export MultiDexAgg");
     assert.equal("Kuru" in sdk, false, "dist should not export deprecated Kuru support");
@@ -112,6 +168,27 @@ async function main() {
     assert.equal(typeof sdk.collateral.calculateExchangeRate, "function", "dist should export collateral namespace");
     assert.equal(typeof sdk.health.formatHealthFactor, "function", "dist should export health namespace");
     assert.equal(typeof sdk.amounts.normalizeAmountString, "function", "dist should export amounts namespace");
+
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    try {
+        Api.getRewards = async () => ({ milestones: {}, incentives: {} });
+        Market.getAll = async (_reader, _oracleManager, _provider, _signer, _account, _milestones, _incentives, setup) => [
+            { setup },
+        ];
+
+        const setupResult = await sdk.setupChain("arb-sepolia", null, "https://api.dist-smoke.example");
+        assert.equal(setupResult.chain, "arb-sepolia");
+        assert.equal(setupResult.chainId, 421614);
+        assert.equal(setupResult.setupConfigSnapshot.chain, "arb-sepolia");
+        assert.equal(setupResult.setupConfigSnapshot.chainId, 421614);
+        assert.equal(Object.isFrozen(setupResult.setupConfigSnapshot), true);
+        assert.equal(Object.isFrozen(setupResult.setupConfigSnapshot.contracts), true);
+        assert.equal(setupResult.markets[0].setup, setupResult.setupConfigSnapshot);
+    } finally {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    }
 
     assert.equal(
         "optimalDeposit" in sdk.OptimizerReader.prototype,

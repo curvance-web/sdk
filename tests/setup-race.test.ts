@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import Decimal from "decimal.js";
 import { JsonRpcProvider } from "ethers";
 import { Api } from "../src/classes/Api";
+import { ERC20 } from "../src/classes/ERC20";
+import { LendingOptimizer } from "../src/classes/LendingOptimizer";
 import { Market } from "../src/classes/Market";
-import { getChainRpcConfig } from "../src/chains";
-import { CURVANCE_DAO_FEE_RECEIVER, CURVANCE_FEE_BPS } from "../src/feePolicy";
+import { PositionManager } from "../src/classes/PositionManager";
+import { ProtocolReader } from "../src/classes/ProtocolReader";
+import { chain_config, getChainRpcConfig } from "../src/chains";
+import { UnsupportedDexAgg } from "../src/classes/DexAggregators/UnsupportedDexAgg";
+import { MultiDexAgg } from "../src/classes/DexAggregators/MultiDexAgg";
+import { Zapper } from "../src/classes/Zapper";
+import { CURVANCE_FEE_BPS, flatFeePolicy } from "../src/feePolicy";
+import { EMPTY_ADDRESS, getContractAddresses, NATIVE_ADDRESS } from "../src/helpers";
+import { takePortfolioSnapshot } from "../src/integrations/snapshot";
 import {
     configureRetries,
     DEFAULT_RETRY_CONFIG,
@@ -13,7 +23,53 @@ import {
     resetRpcDebugState,
     wrapProviderWithRetries,
 } from "../src/retry-provider";
-import { all_markets, setup_config, setupChain } from "../src/setup";
+import {
+    all_markets,
+    refreshActiveUserMarkets,
+    refreshActiveUserMarketSummaries,
+    setup_config,
+    setupChain,
+} from "../src/setup";
+import type { address, bytes } from "../src/types";
+import {
+    ARB_SEPOLIA_BOOT_FIXTURE,
+    BOOT_DAO_ADDRESS,
+    MONAD_MAINNET_BOOT_FIXTURE,
+    createBootDynamicMarket,
+    createBootStaticMarket,
+    createBootUserMarket,
+    createDecimalsReadProvider,
+    installSetupChainBootHarness,
+} from "./support/setup-chain-boot-harness";
+
+const DECIMALS_SELECTOR = "0x313ce567";
+const MONAD_TEST_TOKEN = "0x0000000000000000000000000000000000000101" as address;
+const MONAD_TEST_OUTPUT_TOKEN = "0x0000000000000000000000000000000000000102" as address;
+const ARB_TEST_TOKEN = "0x0000000000000000000000000000000000000202" as address;
+const OPTIMIZER_TEST_ADDRESS = "0x0000000000000000000000000000000000000303" as address;
+const {
+    account: ARB_ACCOUNT,
+    stableMarket: ARB_STABLE_MARKET,
+    usdcCToken: ARB_USDC_CTOKEN,
+    ausdCToken: ARB_AUSD_CTOKEN,
+    unknownMarket: ARB_UNKNOWN_MARKET,
+    unknownToken: ARB_UNKNOWN_TOKEN,
+} = ARB_SEPOLIA_BOOT_FIXTURE;
+const {
+    account: MONAD_ACCOUNT,
+    market: MONAD_MARKET,
+    wmonCToken: MONAD_WMON_CTOKEN,
+    usdcCToken: MONAD_USDC_CTOKEN,
+    wrappedNative: MONAD_WRAPPED_NATIVE,
+    usdcAsset: MONAD_USDC_ASSET,
+} = MONAD_MAINNET_BOOT_FIXTURE;
+
+const BOOT_DAO_FEE_RECEIVER = BOOT_DAO_ADDRESS;
+const originalGetDaoAddress = ProtocolReader.prototype.getDaoAddress;
+ProtocolReader.prototype.getDaoAddress = async () => BOOT_DAO_FEE_RECEIVER;
+test.after(() => {
+    ProtocolReader.prototype.getDaoAddress = originalGetDaoAddress;
+});
 
 function defer<T>() {
     let resolve!: (value: T) => void;
@@ -24,6 +80,50 @@ function defer<T>() {
     });
 
     return { promise, resolve, reject };
+}
+
+function ignoreMutationError(run: () => void) {
+    try {
+        run();
+    } catch {
+        // Frozen objects throw in strict mode; silent failure is also acceptable.
+    }
+}
+
+function createZapMarket(name: string, symbol: string, tokenAddress: address) {
+    return {
+        name,
+        symbol,
+        setup: null,
+        tokens: [
+            {
+                name,
+                symbol,
+                getAsset: () => ({
+                    address: tokenAddress,
+                    symbol,
+                }),
+            },
+        ],
+    };
+}
+
+function createDecimalsProvider(decimals: bigint = 18n) {
+    return {
+        async call(tx: { data?: string }) {
+            if ((tx.data ?? "").slice(0, 10) !== DECIMALS_SELECTOR) {
+                throw new Error(`Unexpected provider call: ${JSON.stringify(tx)}`);
+            }
+
+            return `0x${decimals.toString(16).padStart(64, "0")}`;
+        },
+        async getNetwork() {
+            return { chainId: 143n, name: "monad-mainnet" };
+        },
+        async resolveName(name: string) {
+            return name;
+        },
+    };
 }
 
 test("setupChain only publishes the latest invocation", async (t) => {
@@ -67,6 +167,2755 @@ test("setupChain only publishes the latest invocation", async (t) => {
     assert.notDeepEqual(all_markets, olderResult.markets);
     assert.equal((newerResult.markets[0] as any).marker, "https://api.newer.example");
     assert.equal((olderResult.markets[0] as any).marker, "https://api.older.example");
+});
+
+test("setupChain returns chain provenance and immutable setup snapshot", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async (_reader, _oracleManager, _provider, _signer, _account, _milestones, _incentives, setup) => {
+        return [{ setup }] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    const monad = await setupChain("monad-mainnet", null, "https://api.monad.example");
+    assert.equal(monad.chain, "monad-mainnet");
+    assert.equal(monad.chainId, 143);
+    assert.equal(monad.setupConfigSnapshot.chain, "monad-mainnet");
+    assert.equal(monad.setupConfigSnapshot.chainId, 143);
+    assert.equal((monad.markets[0] as any).setup, monad.setupConfigSnapshot);
+    assert.equal((monad.markets[0] as any).setup.chain, monad.chain);
+    assert.equal(Object.isFrozen(monad.setupConfigSnapshot), true);
+    assert.equal(Object.isFrozen(monad.setupConfigSnapshot.contracts), true);
+
+    const originalProtocolReader = monad.setupConfigSnapshot.contracts.ProtocolReader;
+    ignoreMutationError(() => {
+        (monad.setupConfigSnapshot as any).chain = "arb-sepolia";
+    });
+    ignoreMutationError(() => {
+        (monad.setupConfigSnapshot.contracts as any).ProtocolReader = "0x0000000000000000000000000000000000000001";
+    });
+    assert.equal(monad.setupConfigSnapshot.chain, "monad-mainnet");
+    assert.equal(monad.setupConfigSnapshot.contracts.ProtocolReader, originalProtocolReader);
+
+    const mutableContractsCopy = getContractAddresses("monad-mainnet") as any;
+    mutableContractsCopy.ProtocolReader = "0x0000000000000000000000000000000000000002";
+    const nextMonad = await setupChain("monad-mainnet", null, "https://api.monad-next.example");
+    assert.equal(nextMonad.setupConfigSnapshot.contracts.ProtocolReader, originalProtocolReader);
+});
+
+test("setupChain boots non-Monad chains successfully with result provenance", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async (_reader, _oracleManager, _provider, _signer, _account, _milestones, _incentives, setup) => {
+        return [{ setup }] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    const result = await setupChain("arb-sepolia", null, "https://api.arb.example");
+
+    assert.equal(result.chain, "arb-sepolia");
+    assert.equal(result.chainId, 421614);
+    assert.equal(result.setupConfigSnapshot.chain, "arb-sepolia");
+    assert.equal(result.setupConfigSnapshot.chainId, 421614);
+    assert.ok(result.dexAgg instanceof UnsupportedDexAgg);
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal((result.markets[0] as any).setup.chain, "arb-sepolia");
+    assert.equal(result.setupConfigSnapshot.feePolicy.getFeeBps({
+        operation: "zap",
+        inputToken: "0x0000000000000000000000000000000000000001" as any,
+        outputToken: "0x0000000000000000000000000000000000000002" as any,
+        inputAmount: 1n,
+        currentLeverage: null,
+        targetLeverage: null,
+    }), CURVANCE_FEE_BPS);
+    assert.equal(result.setupConfigSnapshot.feePolicy.feeReceiver, BOOT_DAO_FEE_RECEIVER);
+});
+
+test("setupChain boots arb-sepolia through Market.getAll with chain-scoped enrichment", async (t) => {
+    const milestone = {
+        market: ARB_STABLE_MARKET,
+        tvl: 123,
+        multiplier: 1,
+        fail_multiplier: 0,
+        chain_network: "arb-sepolia",
+        start_date: "2026-01-01",
+        end_date: "2026-01-02",
+        duration_in_days: 1,
+    };
+    const incentive = {
+        market: ARB_STABLE_MARKET,
+        type: "supply",
+        rate: 1,
+        description: "Arbitrum setup boot incentive",
+        image: "",
+    };
+
+    const harness = installSetupChainBootHarness(t, {
+        rewards: () => ({
+            milestones: { [ARB_STABLE_MARKET.toUpperCase()]: milestone },
+            incentives: { [ARB_STABLE_MARKET.toUpperCase()]: [incentive] },
+        }),
+        marketData: () => ({
+            staticMarket: [
+                createBootStaticMarket(ARB_UNKNOWN_MARKET, [{ cToken: ARB_UNKNOWN_TOKEN, symbol: "SKIP" }]),
+                createBootStaticMarket(ARB_STABLE_MARKET, [
+                    { cToken: ARB_USDC_CTOKEN, symbol: "USDC" },
+                    { cToken: ARB_AUSD_CTOKEN, symbol: "AUSD" },
+                ]),
+            ],
+            dynamicMarket: [
+                createBootDynamicMarket(ARB_UNKNOWN_MARKET, [ARB_UNKNOWN_TOKEN]),
+                createBootDynamicMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+            ],
+            userData: {
+                locks: [],
+                markets: [
+                    createBootUserMarket(ARB_UNKNOWN_MARKET, [ARB_UNKNOWN_TOKEN]),
+                    createBootUserMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                ],
+            },
+        }),
+        merkl: (params) => {
+            if (params.action === "LEND") {
+                return [{
+                    identifier: ARB_STABLE_MARKET,
+                    apr: 21,
+                    name: "arb lend",
+                    type: "merkl",
+                    tokens: [{ address: ARB_USDC_CTOKEN, symbol: "cUSDC" }],
+                }];
+            }
+
+            return [{
+                identifier: ARB_AUSD_CTOKEN,
+                apr: 7,
+                name: "arb borrow",
+                type: "merkl",
+                tokens: [],
+            }];
+        },
+    });
+
+    const result = await setupChain("arb-sepolia", null, "https://api.arb-e2e.example", {
+        account: ARB_ACCOUNT,
+    });
+
+    assert.deepEqual(harness.rewardsConfigs, [{ chain: "arb-sepolia", apiUrl: "https://api.arb-e2e.example" }]);
+    assert.equal(result.chain, "arb-sepolia");
+    assert.equal(result.chainId, 421614);
+    assert.equal(result.setupConfigSnapshot.chain, "arb-sepolia");
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets, result.markets);
+
+    assert.equal(harness.readerContexts.length, 1);
+    const readerContext = harness.readerContexts[0];
+    assert.ok(readerContext);
+    assert.equal(readerContext.account, ARB_ACCOUNT);
+    assert.equal(readerContext.address.toLowerCase(), String(result.setupConfigSnapshot.contracts.ProtocolReader).toLowerCase());
+    assert.equal(readerContext.batchKey, result.reader.batchKey);
+    assert.match(readerContext.batchKey ?? "", /^arb-sepolia:/);
+
+    assert.deepEqual(harness.merklCalls, [
+        { action: "LEND", chainId: 421614 },
+        { action: "BORROW", chainId: 421614 },
+    ]);
+    assert.deepEqual(harness.externalFetchCalls, [], "arb-sepolia native-yield path should not make an HTTP request");
+    assert.ok(
+        harness.warnings.some((message) => message.includes(ARB_UNKNOWN_MARKET)),
+        "testnet setup should warn and skip reader markets that lack deployment metadata",
+    );
+
+    assert.equal(result.markets.length, 1);
+    const market = result.markets[0];
+    assert.ok(market);
+    assert.equal(market.name, "Stable Market");
+    assert.equal(market.address, ARB_STABLE_MARKET);
+    assert.equal(market.setup, result.setupConfigSnapshot);
+    assert.equal(market.setup.chain, "arb-sepolia");
+    assert.equal(market.reader, result.reader);
+    assert.equal(market.milestone, milestone);
+    assert.deepEqual(market.incentives, [incentive]);
+
+    const tokensByAddress = new Map(market.tokens.map((token) => [token.address.toLowerCase(), token]));
+    const usdc = tokensByAddress.get(ARB_USDC_CTOKEN.toLowerCase())!;
+    const ausd = tokensByAddress.get(ARB_AUSD_CTOKEN.toLowerCase())!;
+    assert.ok(usdc);
+    assert.ok(ausd);
+
+    assert.equal(usdc.incentiveSupplyApy.toString(), "0.21");
+    assert.equal(usdc.nativeApy.toString(), "0");
+    assert.equal(ausd.incentiveBorrowApy.toString(), "0.07");
+    assert.equal(ausd.nativeApy.toString(), "0");
+    assert.equal(usdc.canZap, false);
+    assert.deepEqual(usdc.zapTypes, []);
+    assert.deepEqual((await usdc.getDepositTokens()).map((token) => token.type), ["none"]);
+    assert.equal(usdc.canLeverage, false);
+    assert.deepEqual(usdc.leverageTypes, []);
+    assert.equal(ausd.canZap, false);
+    assert.deepEqual(ausd.zapTypes, []);
+    assert.deepEqual((await ausd.getDepositTokens()).map((token) => token.type), ["none"]);
+
+    assert.ok(result.dexAgg instanceof UnsupportedDexAgg);
+    assert.deepEqual(
+        await result.dexAgg.getAvailableTokens(result.setupConfigSnapshot.readProvider, null, ARB_ACCOUNT),
+        [],
+    );
+    await assert.rejects(
+        () => result.dexAgg.quote(ARB_ACCOUNT, ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN, 1n, 50n),
+        /DEX aggregation is not configured for arb-sepolia\./,
+    );
+});
+
+test("setupChain filters wrong-chain reward milestones before market enrichment", async (t) => {
+    const correctMilestone = {
+        market: MONAD_MARKET,
+        tvl: 123,
+        multiplier: 2,
+        fail_multiplier: 0,
+        chain_network: "monad-mainnet",
+        start_date: "2026-01-01",
+        end_date: "2026-01-02",
+        duration_in_days: 1,
+    };
+    const wrongChainMilestone = {
+        market: MONAD_MARKET,
+        tvl: 999,
+        multiplier: 99,
+        fail_multiplier: 0,
+        chain_network: "Arbitrum Sepolia",
+        start_date: "2026-01-01",
+        end_date: "2026-01-02",
+        duration_in_days: 1,
+    };
+    const correctGlobalMilestone = {
+        market: "global",
+        tvl: 456,
+        multiplier: 3,
+        fail_multiplier: 0,
+        chain_network: "monad",
+        start_date: "2026-01-01",
+        end_date: "2026-01-02",
+        duration_in_days: 1,
+    };
+    const wrongChainGlobalMilestone = {
+        market: "global",
+        tvl: 999,
+        multiplier: 99,
+        fail_multiplier: 0,
+        chain_network: "Arbitrum Sepolia",
+        start_date: "2026-01-01",
+        end_date: "2026-01-02",
+        duration_in_days: 1,
+    };
+
+    const harness = installSetupChainBootHarness(t, {
+        rewards: false,
+        marketData: (context) => {
+            assert.match(context.batchKey ?? "", /^monad-mainnet:/);
+            return {
+                staticMarket: [
+                    createBootStaticMarket(MONAD_MARKET, [
+                        { cToken: MONAD_WMON_CTOKEN, symbol: "WMON", asset: MONAD_WRAPPED_NATIVE },
+                        { cToken: MONAD_USDC_CTOKEN, symbol: "USDC", asset: MONAD_USDC_ASSET },
+                    ]),
+                ],
+                dynamicMarket: [
+                    createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                ],
+                userData: {
+                    locks: [],
+                    markets: [
+                        createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                    ],
+                },
+            };
+        },
+        fetch: async (url) => {
+            if (url === "https://api.monad-rewards.example/v1/rewards/active/monad-mainnet") {
+                return {
+                    ok: true,
+                    json: async () => ({
+                        milestones: [
+                            wrongChainGlobalMilestone,
+                            correctGlobalMilestone,
+                            correctMilestone,
+                            wrongChainMilestone,
+                        ],
+                        incentives: [],
+                    }),
+                };
+            }
+
+            if (url === "https://api.monad-rewards.example/v1/monad/native_apy") {
+                return {
+                    ok: true,
+                    json: async () => ({ native_apy: [] }),
+                };
+            }
+
+            throw new Error(`Unexpected fetch URL: ${url}`);
+        },
+    });
+
+    const result = await setupChain("monad-mainnet", null, "https://api.monad-rewards.example", {
+        account: MONAD_ACCOUNT,
+        readProvider: createDecimalsReadProvider(143n) as any,
+    });
+    const market = result.markets[0];
+
+    assert.ok(market);
+    assert.equal(market.milestone, correctMilestone);
+    assert.equal(market.milestone?.multiplier, 2);
+    assert.equal(result.global_milestone, correctGlobalMilestone);
+    assert.equal(result.global_milestone?.multiplier, 3);
+    assert.deepEqual(new Set(harness.externalFetchCalls), new Set([
+        "https://api.monad-rewards.example/v1/rewards/active/monad-mainnet",
+        "https://api.monad-rewards.example/v1/monad/native_apy",
+    ]));
+});
+
+test("setupChain keeps market token DEX routes bound after a later chain boot moves the singleton", async (t) => {
+    const harness = installSetupChainBootHarness(t, {
+        marketData: (context) => {
+            if (context.batchKey?.startsWith("monad-mainnet:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(MONAD_MARKET, [
+                            { cToken: MONAD_WMON_CTOKEN, symbol: "WMON", asset: MONAD_WRAPPED_NATIVE },
+                            { cToken: MONAD_USDC_CTOKEN, symbol: "USDC", asset: MONAD_USDC_ASSET },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            if (context.batchKey?.startsWith("arb-sepolia:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(ARB_STABLE_MARKET, [
+                            { cToken: ARB_USDC_CTOKEN, symbol: "USDC" },
+                            { cToken: ARB_AUSD_CTOKEN, symbol: "AUSD" },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            throw new Error(`Unexpected setup boot reader context: ${context.batchKey}`);
+        },
+        fetch: async (url) => {
+            assert.equal(url, "https://api.monad-e2e.example/v1/monad/native_apy");
+            return {
+                ok: true,
+                json: async () => ({ native_apy: [] }),
+            };
+        },
+    });
+
+    const monadResult = await setupChain("monad-mainnet", null, "https://api.monad-e2e.example", {
+        account: MONAD_ACCOUNT,
+        readProvider: createDecimalsReadProvider(143n) as any,
+    });
+    const monadMarket = monadResult.markets[0];
+    assert.ok(monadMarket);
+    const monadUsdc = monadMarket.tokens.find(
+        (token) => token.address.toLowerCase() === MONAD_USDC_CTOKEN.toLowerCase(),
+    );
+    assert.ok(monadUsdc);
+
+    const quoteCalls: Array<{
+        wallet: string;
+        tokenIn: string;
+        tokenOut: string;
+        amount: bigint;
+        feeBps: bigint | undefined;
+        feeReceiver: string | undefined;
+    }> = [];
+    (monadResult.dexAgg as any).quote = async (
+        wallet: string,
+        tokenIn: string,
+        tokenOut: string,
+        amount: bigint,
+        _slippage: bigint,
+        feeBps?: bigint,
+        feeReceiver?: address,
+    ) => {
+        quoteCalls.push({ wallet, tokenIn, tokenOut, amount, feeBps, feeReceiver });
+        return {
+            to: tokenOut as address,
+            calldata: "0x" as bytes,
+            min_out: 1n,
+            out: 2n,
+        };
+    };
+
+    const arbResult = await setupChain("arb-sepolia", null, "https://api.arb-after-monad.example", {
+        account: ARB_ACCOUNT,
+        readProvider: createDecimalsReadProvider(421614n) as any,
+    });
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets, arbResult.markets);
+
+    const depositTokens = await monadUsdc.getDepositTokens();
+    assert.deepEqual(monadUsdc.zapTypes, ["simple"]);
+    assert.deepEqual(monadUsdc.leverageTypes, ["simple"]);
+    assert.equal(monadUsdc.canZap, true);
+    assert.equal(monadUsdc.canLeverage, true);
+
+    const simpleAddresses = depositTokens
+        .filter((token) => token.type === "simple")
+        .map((token) => token.interface.address.toLowerCase());
+    const quoteableDexSimpleOptions = depositTokens.filter(
+        (token) => token.type === "simple" && token.interface.address.toLowerCase() !== NATIVE_ADDRESS.toLowerCase(),
+    );
+
+    assert.ok(
+        simpleAddresses.includes(MONAD_WRAPPED_NATIVE.toLowerCase()),
+        "older Monad token route discovery should still use the Monad boot markets",
+    );
+    assert.equal(
+        simpleAddresses.includes(ARB_USDC_CTOKEN.toLowerCase()) || simpleAddresses.includes(ARB_AUSD_CTOKEN.toLowerCase()),
+        false,
+        "older Monad token route discovery must not read Arbitrum singleton markets after a later boot",
+    );
+    assert.ok(quoteableDexSimpleOptions.length > 0, "expected at least one DEX-sourced simple zap option");
+    assert.equal(
+        quoteableDexSimpleOptions.every((token) => typeof token.quote === "function"),
+        true,
+        "every advertised DEX-sourced simple zap option must expose a quote callback",
+    );
+
+    const wrappedNativeZap = depositTokens.find(
+        (token) => token.type === "simple" && token.interface.address.toLowerCase() === MONAD_WRAPPED_NATIVE.toLowerCase(),
+    );
+    assert.ok(wrappedNativeZap?.quote);
+    await wrappedNativeZap.quote(MONAD_WRAPPED_NATIVE, MONAD_USDC_ASSET, Decimal(1), Decimal(0.01));
+
+    assert.deepEqual(quoteCalls, [{
+        wallet: MONAD_ACCOUNT,
+        tokenIn: MONAD_WRAPPED_NATIVE,
+        tokenOut: MONAD_USDC_ASSET,
+        amount: 1_000_000_000_000_000_000n,
+        feeBps: CURVANCE_FEE_BPS,
+        feeReceiver: BOOT_DAO_FEE_RECEIVER,
+    }]);
+    assert.deepEqual(harness.merklCalls, [
+        { action: "LEND", chainId: 143 },
+        { action: "BORROW", chainId: 143 },
+        { action: "LEND", chainId: 421614 },
+        { action: "BORROW", chainId: 421614 },
+    ]);
+    assert.deepEqual(harness.externalFetchCalls, ["https://api.monad-e2e.example/v1/monad/native_apy"]);
+});
+
+test("setupChain recomputes token route metadata after context-bound DEX adapter attaches", async (t) => {
+    const originalMonadDexAgg = chain_config["monad-mainnet"].dexAgg;
+    const contextBindings: string[][] = [];
+
+    (chain_config["monad-mainnet"] as any).dexAgg = {
+        dao: BOOT_DAO_FEE_RECEIVER,
+        router: EMPTY_ADDRESS,
+        withContext(context: any) {
+            contextBindings.push(context.markets.map((market: any) => market.address));
+            return {
+                dao: BOOT_DAO_FEE_RECEIVER,
+                router: MONAD_TEST_TOKEN,
+                getAvailableTokens: async () => [{
+                    interface: { address: MONAD_WRAPPED_NATIVE, symbol: "WMON" },
+                    type: "simple",
+                }],
+                quoteAction: async () => {
+                    throw new Error("quoteAction is not used by this test");
+                },
+                quoteMin: async () => 1n,
+                quote: async () => ({
+                    to: MONAD_TEST_TOKEN,
+                    calldata: "0x" as bytes,
+                    min_out: 1n,
+                    out: 2n,
+                }),
+            };
+        },
+        getAvailableTokens: async () => {
+            throw new Error("unbound DEX adapter should not discover setup routes");
+        },
+        quoteAction: async () => {
+            throw new Error("unbound DEX adapter should not quote");
+        },
+        quoteMin: async () => {
+            throw new Error("unbound DEX adapter should not quote");
+        },
+        quote: async () => {
+            throw new Error("unbound DEX adapter should not quote");
+        },
+    };
+
+    const harness = installSetupChainBootHarness(t, {
+        marketData: (context) => {
+            assert.match(context.batchKey ?? "", /^monad-mainnet:/);
+            return {
+                staticMarket: [
+                    createBootStaticMarket(MONAD_MARKET, [
+                        { cToken: MONAD_WMON_CTOKEN, symbol: "WMON", asset: MONAD_WRAPPED_NATIVE },
+                        { cToken: MONAD_USDC_CTOKEN, symbol: "USDC", asset: MONAD_USDC_ASSET },
+                    ]),
+                ],
+                dynamicMarket: [
+                    createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                ],
+                userData: {
+                    locks: [],
+                    markets: [
+                        createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                    ],
+                },
+            };
+        },
+        fetch: async (url) => {
+            assert.equal(url, "https://api.monad-context-router.example/v1/monad/native_apy");
+            return {
+                ok: true,
+                json: async () => ({ native_apy: [] }),
+            };
+        },
+    });
+
+    t.after(() => {
+        (chain_config["monad-mainnet"] as any).dexAgg = originalMonadDexAgg;
+    });
+
+    const result = await setupChain("monad-mainnet", null, "https://api.monad-context-router.example", {
+        account: MONAD_ACCOUNT,
+        readProvider: createDecimalsReadProvider(143n) as any,
+    });
+    const market = result.markets[0];
+    const usdc = market?.tokens.find(
+        (token) => token.address.toLowerCase() === MONAD_USDC_CTOKEN.toLowerCase(),
+    );
+    assert.ok(usdc);
+
+    assert.deepEqual(contextBindings, [[MONAD_MARKET]]);
+    assert.deepEqual(usdc.zapTypes, ["simple"]);
+    assert.deepEqual(usdc.leverageTypes, ["simple"]);
+    assert.equal(usdc.canZap, true);
+    assert.equal(usdc.canLeverage, true);
+    assert.deepEqual(
+        (await usdc.getDepositTokens()).map((token) => ({
+            type: token.type,
+            address: token.interface.address,
+        })),
+        [
+            { type: "none", address: MONAD_USDC_ASSET },
+            { type: "simple", address: MONAD_WRAPPED_NATIVE },
+            { type: "simple", address: NATIVE_ADDRESS },
+        ],
+    );
+    assert.deepEqual(harness.merklCalls, [
+        { action: "LEND", chainId: 143 },
+        { action: "BORROW", chainId: 143 },
+    ]);
+});
+
+test("setupChain treats differently-cased empty DEX routers as unsupported", async (t) => {
+    const originalMonadDexAgg = chain_config["monad-mainnet"].dexAgg;
+    const emptyRouter = EMPTY_ADDRESS.toUpperCase() as address;
+    let getAvailableCalls = 0;
+
+    const emptyDexAgg = {
+        dao: BOOT_DAO_FEE_RECEIVER,
+        router: emptyRouter,
+        withContext() {
+            return {
+                dao: BOOT_DAO_FEE_RECEIVER,
+                router: emptyRouter,
+                getAvailableTokens: async () => {
+                    getAvailableCalls++;
+                    return [{
+                        interface: { address: MONAD_WRAPPED_NATIVE, symbol: "WMON" },
+                        type: "simple",
+                    }];
+                },
+                quoteAction: async () => {
+                    throw new Error("empty-router DEX adapter should not quote actions");
+                },
+                quoteMin: async () => {
+                    throw new Error("empty-router DEX adapter should not quote min output");
+                },
+                quote: async () => {
+                    throw new Error("empty-router DEX adapter should not quote");
+                },
+            };
+        },
+        getAvailableTokens: async () => {
+            throw new Error("unbound empty-router DEX adapter should not discover setup routes");
+        },
+        quoteAction: async () => {
+            throw new Error("unbound empty-router DEX adapter should not quote actions");
+        },
+        quoteMin: async () => {
+            throw new Error("unbound empty-router DEX adapter should not quote min output");
+        },
+        quote: async () => {
+            throw new Error("unbound empty-router DEX adapter should not quote");
+        },
+    };
+
+    (chain_config["monad-mainnet"] as any).dexAgg = emptyDexAgg;
+
+    installSetupChainBootHarness(t, {
+        marketData: (context) => {
+            assert.ok(context.batchKey?.startsWith("monad-mainnet:"));
+            return {
+                staticMarket: [
+                    createBootStaticMarket(MONAD_MARKET, [
+                        { cToken: MONAD_WMON_CTOKEN, symbol: "WMON", asset: MONAD_WRAPPED_NATIVE },
+                        { cToken: MONAD_USDC_CTOKEN, symbol: "USDC", asset: MONAD_USDC_ASSET },
+                    ]),
+                ],
+                dynamicMarket: [
+                    createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                ],
+                userData: {
+                    locks: [],
+                    markets: [
+                        createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                    ],
+                },
+            };
+        },
+        fetch: async (url) => {
+            assert.equal(url, "https://api.monad-empty-router.example/v1/monad/native_apy");
+            return {
+                ok: true,
+                json: async () => ({ native_apy: [] }),
+            };
+        },
+    });
+
+    t.after(() => {
+        (chain_config["monad-mainnet"] as any).dexAgg = originalMonadDexAgg;
+    });
+
+    const result = await setupChain("monad-mainnet", null, "https://api.monad-empty-router.example", {
+        account: MONAD_ACCOUNT,
+        readProvider: createDecimalsReadProvider(143n) as any,
+    });
+    const usdc = result.markets[0]?.tokens.find(
+        (token) => token.address.toLowerCase() === MONAD_USDC_CTOKEN.toLowerCase(),
+    );
+    assert.ok(usdc);
+
+    assert.equal(result.dexAgg.router, emptyRouter);
+    assert.equal(usdc.canZap, false);
+    assert.deepEqual(usdc.zapTypes, []);
+    assert.equal(usdc.canLeverage, false);
+    assert.deepEqual(usdc.leverageTypes, []);
+    assert.deepEqual(
+        (await usdc.getDepositTokens()).map((token) => ({
+            type: token.type,
+            address: token.interface.address,
+        })),
+        [{ type: "none", address: MONAD_USDC_ASSET }],
+    );
+    assert.equal(getAvailableCalls, 0);
+});
+
+test("setupChain advertises MultiDex simple routes when a later child is executable", async (t) => {
+    const originalMonadDexAgg = chain_config["monad-mainnet"].dexAgg;
+    const contextBindings: string[][] = [];
+    const quoteCalls: Array<{
+        tokenIn: string;
+        tokenOut: string;
+        amount: bigint;
+        feeBps: bigint | undefined;
+        feeReceiver: string | undefined;
+    }> = [];
+
+    const executableChild = {
+        dao: BOOT_DAO_FEE_RECEIVER,
+        router: EMPTY_ADDRESS,
+        withContext(context: any) {
+            contextBindings.push(context.markets.map((market: any) => market.address));
+            return {
+                dao: BOOT_DAO_FEE_RECEIVER,
+                router: MONAD_TEST_TOKEN,
+                getAvailableTokens: async () => [{
+                    interface: { address: MONAD_WRAPPED_NATIVE, symbol: "WMON" },
+                    type: "simple",
+                }],
+                quoteAction: async () => {
+                    throw new Error("quoteAction is not used by this test");
+                },
+                quoteMin: async () => 1n,
+                quote: async (
+                    _wallet: string,
+                    tokenIn: string,
+                    tokenOut: string,
+                    amount: bigint,
+                    _slippage: bigint,
+                    feeBps?: bigint,
+                    feeReceiver?: address,
+                ) => {
+                    quoteCalls.push({ tokenIn, tokenOut, amount, feeBps, feeReceiver });
+                    return {
+                        to: MONAD_TEST_TOKEN,
+                        calldata: "0x" as bytes,
+                        min_out: 1n,
+                        out: 2n,
+                    };
+                },
+            };
+        },
+        getAvailableTokens: async () => {
+            throw new Error("unbound executable child should not discover setup routes");
+        },
+        quoteAction: async () => {
+            throw new Error("unbound executable child should not quote");
+        },
+        quoteMin: async () => {
+            throw new Error("unbound executable child should not quote");
+        },
+        quote: async () => {
+            throw new Error("unbound executable child should not quote");
+        },
+    };
+
+    (chain_config["monad-mainnet"] as any).dexAgg = new MultiDexAgg([
+        new UnsupportedDexAgg("monad-empty-primary"),
+        executableChild as any,
+    ]);
+
+    installSetupChainBootHarness(t, {
+        marketData: (context) => {
+            if (context.batchKey?.startsWith("monad-mainnet:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(MONAD_MARKET, [
+                            { cToken: MONAD_WMON_CTOKEN, symbol: "WMON", asset: MONAD_WRAPPED_NATIVE },
+                            { cToken: MONAD_USDC_CTOKEN, symbol: "USDC", asset: MONAD_USDC_ASSET },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            if (context.batchKey?.startsWith("arb-sepolia:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(ARB_STABLE_MARKET, [
+                            { cToken: ARB_USDC_CTOKEN, symbol: "USDC" },
+                            { cToken: ARB_AUSD_CTOKEN, symbol: "AUSD" },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            throw new Error(`Unexpected setup batch key: ${context.batchKey}`);
+        },
+        fetch: async (url) => {
+            assert.equal(url, "https://api.monad-multidex-secondary.example/v1/monad/native_apy");
+            return {
+                ok: true,
+                json: async () => ({ native_apy: [] }),
+            };
+        },
+    });
+
+    t.after(() => {
+        (chain_config["monad-mainnet"] as any).dexAgg = originalMonadDexAgg;
+    });
+
+    const result = await setupChain("monad-mainnet", null, "https://api.monad-multidex-secondary.example", {
+        account: MONAD_ACCOUNT,
+        readProvider: createDecimalsReadProvider(143n) as any,
+    });
+    const arbResult = await setupChain("arb-sepolia", null, "https://api.arb-after-secondary.example", {
+        account: ARB_ACCOUNT,
+        readProvider: createDecimalsReadProvider(421614n) as any,
+    });
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets[0], arbResult.markets[0]);
+
+    const market = result.markets[0];
+    const usdc = market?.tokens.find(
+        (token) => token.address.toLowerCase() === MONAD_USDC_CTOKEN.toLowerCase(),
+    );
+    assert.ok(usdc);
+
+    assert.equal(result.dexAgg.router, MONAD_TEST_TOKEN);
+    assert.deepEqual(contextBindings, [[MONAD_MARKET]]);
+    assert.deepEqual(usdc.zapTypes, ["simple"]);
+    assert.deepEqual(usdc.leverageTypes, ["simple"]);
+    assert.equal(usdc.canZap, true);
+    assert.equal(usdc.canLeverage, true);
+
+    const depositTokens = await usdc.getDepositTokens();
+    const wrappedNativeZap = depositTokens.find(
+        (token) => token.type === "simple" && token.interface.address.toLowerCase() === MONAD_WRAPPED_NATIVE.toLowerCase(),
+    );
+    assert.ok(wrappedNativeZap);
+    await result.dexAgg.quote(
+        MONAD_ACCOUNT,
+        MONAD_WRAPPED_NATIVE,
+        MONAD_USDC_ASSET,
+        1_000_000_000_000_000_000n,
+        100n,
+        CURVANCE_FEE_BPS,
+        BOOT_DAO_FEE_RECEIVER,
+    );
+    assert.deepEqual(quoteCalls, [{
+        tokenIn: MONAD_WRAPPED_NATIVE,
+        tokenOut: MONAD_USDC_ASSET,
+        amount: 1_000_000_000_000_000_000n,
+        feeBps: CURVANCE_FEE_BPS,
+        feeReceiver: BOOT_DAO_FEE_RECEIVER,
+    }]);
+});
+
+test("setupChain preserves quoteable MultiDex duplicate routes after singleton moves", async (t) => {
+    const originalMonadDexAgg = chain_config["monad-mainnet"].dexAgg;
+    const routeQuoteCalls: Array<{
+        label: string;
+        chain: string;
+        tokenIn: string;
+        tokenOut: string;
+        amount: string;
+        slippage: string;
+    }> = [];
+
+    function duplicateTokenChild(label: string, withQuote: boolean, router: address) {
+        return {
+            dao: BOOT_DAO_FEE_RECEIVER,
+            router,
+            withContext(context: any) {
+                const chain = context.markets[0]?.setup?.chain ?? "unknown";
+                return {
+                    dao: BOOT_DAO_FEE_RECEIVER,
+                    router,
+                    getAvailableTokens: async () => [{
+                        interface: { address: MONAD_WRAPPED_NATIVE, symbol: "WMON" },
+                        type: "simple",
+                        ...(withQuote ? {
+                            quote: async (
+                                tokenIn: string,
+                                tokenOut: string,
+                                amount: Decimal,
+                                slippage: Decimal,
+                            ) => {
+                                routeQuoteCalls.push({
+                                    label,
+                                    chain,
+                                    tokenIn,
+                                    tokenOut,
+                                    amount: amount.toString(),
+                                    slippage: slippage.toString(),
+                                });
+                                return {
+                                    minOut_raw: 10n,
+                                    output_raw: 11n,
+                                    minOut: Decimal(10),
+                                    output: Decimal(11),
+                                };
+                            },
+                        } : {}),
+                    }],
+                    quoteAction: async () => {
+                        throw new Error("quoteAction is not used by this test");
+                    },
+                    quoteMin: async () => 1n,
+                    quote: async () => ({
+                        to: router,
+                        calldata: "0x" as bytes,
+                        min_out: 1n,
+                        out: 2n,
+                    }),
+                };
+            },
+            getAvailableTokens: async () => {
+                throw new Error(`${label} child was used before setup context binding`);
+            },
+            quoteAction: async () => {
+                throw new Error(`${label} child was used before setup context binding`);
+            },
+            quoteMin: async () => {
+                throw new Error(`${label} child was used before setup context binding`);
+            },
+            quote: async () => {
+                throw new Error(`${label} child was used before setup context binding`);
+            },
+        };
+    }
+
+    (chain_config["monad-mainnet"] as any).dexAgg = new MultiDexAgg([
+        duplicateTokenChild("unquoteable-primary", false, MONAD_TEST_TOKEN) as any,
+        duplicateTokenChild("quoteable-secondary", true, MONAD_TEST_OUTPUT_TOKEN) as any,
+    ]);
+
+    installSetupChainBootHarness(t, {
+        marketData: (context) => {
+            if (context.batchKey?.startsWith("monad-mainnet:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(MONAD_MARKET, [
+                            { cToken: MONAD_WMON_CTOKEN, symbol: "WMON", asset: MONAD_WRAPPED_NATIVE },
+                            { cToken: MONAD_USDC_CTOKEN, symbol: "USDC", asset: MONAD_USDC_ASSET },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            if (context.batchKey?.startsWith("arb-sepolia:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(ARB_STABLE_MARKET, [
+                            { cToken: ARB_USDC_CTOKEN, symbol: "USDC" },
+                            { cToken: ARB_AUSD_CTOKEN, symbol: "AUSD" },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            throw new Error(`Unexpected setup batch key: ${context.batchKey}`);
+        },
+        fetch: async (url) => {
+            assert.equal(url, "https://api.monad-multidex-duplicate.example/v1/monad/native_apy");
+            return {
+                ok: true,
+                json: async () => ({ native_apy: [] }),
+            };
+        },
+    });
+
+    t.after(() => {
+        (chain_config["monad-mainnet"] as any).dexAgg = originalMonadDexAgg;
+    });
+
+    const monadResult = await setupChain("monad-mainnet", null, "https://api.monad-multidex-duplicate.example", {
+        account: MONAD_ACCOUNT,
+        readProvider: createDecimalsReadProvider(143n) as any,
+    });
+    const arbResult = await setupChain("arb-sepolia", null, "https://api.arb-after-duplicate.example", {
+        account: ARB_ACCOUNT,
+        readProvider: createDecimalsReadProvider(421614n) as any,
+    });
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets[0], arbResult.markets[0]);
+
+    const usdc = monadResult.markets[0]?.tokens.find(
+        (token) => token.address.toLowerCase() === MONAD_USDC_CTOKEN.toLowerCase(),
+    );
+    assert.ok(usdc);
+
+    const wrappedNativeZap = (await usdc.getDepositTokens()).find(
+        (token) => token.type === "simple" && token.interface.address.toLowerCase() === MONAD_WRAPPED_NATIVE.toLowerCase(),
+    );
+    assert.ok(wrappedNativeZap?.quote);
+    const quote = await wrappedNativeZap.quote(
+        MONAD_WRAPPED_NATIVE,
+        MONAD_USDC_ASSET,
+        Decimal("1.5"),
+        Decimal("0.02"),
+    );
+
+    assert.equal(quote.minOut_raw, 10n);
+    assert.deepEqual(routeQuoteCalls, [{
+        label: "quoteable-secondary",
+        chain: "monad-mainnet",
+        tokenIn: MONAD_WRAPPED_NATIVE,
+        tokenOut: MONAD_USDC_ASSET,
+        amount: "1.5",
+        slippage: "0.02",
+    }]);
+});
+
+test("explicit active-user refresh helpers keep older result markets bound after a later chain boot", async (t) => {
+    installSetupChainBootHarness(t, {
+        marketData: (context) => {
+            if (context.batchKey?.startsWith("monad-mainnet:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(MONAD_MARKET, [
+                            { cToken: MONAD_WMON_CTOKEN, symbol: "WMON", asset: MONAD_WRAPPED_NATIVE },
+                            { cToken: MONAD_USDC_CTOKEN, symbol: "USDC", asset: MONAD_USDC_ASSET },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            if (context.batchKey?.startsWith("arb-sepolia:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(ARB_STABLE_MARKET, [
+                            { cToken: ARB_USDC_CTOKEN, symbol: "USDC" },
+                            { cToken: ARB_AUSD_CTOKEN, symbol: "AUSD" },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            throw new Error(`Unexpected setup boot reader context: ${context.batchKey}`);
+        },
+        fetch: async () => ({
+            ok: true,
+            json: async () => ({ native_apy: [] }),
+        }),
+    });
+
+    const monadResult = await setupChain("monad-mainnet", null, "https://api.monad-active.example", {
+        account: MONAD_ACCOUNT,
+        readProvider: createDecimalsReadProvider(143n) as any,
+    });
+    const monadMarket = monadResult.markets[0];
+    assert.ok(monadMarket);
+
+    const arbResult = await setupChain("arb-sepolia", null, "https://api.arb-active.example", {
+        account: ARB_ACCOUNT,
+        readProvider: createDecimalsReadProvider(421614n) as any,
+    });
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets, arbResult.markets);
+
+    const monadFullRefreshCalls: Array<{ addresses: string[]; account: string }> = [];
+    const monadSummaryRefreshCalls: Array<{ addresses: string[]; account: string }> = [];
+    const arbRefreshCalls: Array<{ addresses: string[]; account: string }> = [];
+
+    (monadMarket.reader as any).getMarketStates = async (addresses: string[], account: string) => {
+        monadFullRefreshCalls.push({ addresses, account });
+        return {
+            dynamicMarkets: [
+                createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+            ],
+            userMarkets: [
+                createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+            ],
+        };
+    };
+    (monadMarket.reader as any).getMarketSummaries = async (addresses: string[], account: string) => {
+        monadSummaryRefreshCalls.push({ addresses, account });
+        return [{
+            address: MONAD_MARKET,
+            collateral: 11n,
+            maxDebt: 12n,
+            debt: 0n,
+            positionHealth: 13n,
+            cooldown: 1200n,
+            errorCodeHit: false,
+            priceStale: false,
+        }];
+    };
+    (arbResult.markets[0]!.reader as any).getMarketStates = async (addresses: string[], account: string) => {
+        arbRefreshCalls.push({ addresses, account });
+        return {
+            dynamicMarkets: [
+                createBootDynamicMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+            ],
+            userMarkets: [
+                createBootUserMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+            ],
+        };
+    };
+    (arbResult.markets[0]!.reader as any).getMarketSummaries = async (addresses: string[], account: string) => {
+        arbRefreshCalls.push({ addresses, account });
+        return [{
+            address: ARB_STABLE_MARKET,
+            collateral: 21n,
+            maxDebt: 22n,
+            debt: 0n,
+            positionHealth: 23n,
+            cooldown: 1200n,
+            errorCodeHit: false,
+            priceStale: false,
+        }];
+    };
+
+    const activeMonadMarkets = await refreshActiveUserMarkets(MONAD_ACCOUNT, monadResult.markets);
+    const summaryMonadMarkets = await refreshActiveUserMarketSummaries(MONAD_ACCOUNT, monadResult.markets);
+
+    assert.deepEqual(activeMonadMarkets, [monadMarket]);
+    assert.deepEqual(summaryMonadMarkets, [monadMarket]);
+    assert.deepEqual(monadFullRefreshCalls, [{
+        addresses: [MONAD_MARKET],
+        account: MONAD_ACCOUNT,
+    }]);
+    assert.deepEqual(monadSummaryRefreshCalls, [{
+        addresses: [MONAD_MARKET],
+        account: MONAD_ACCOUNT,
+    }]);
+    assert.deepEqual(arbRefreshCalls, []);
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets, arbResult.markets);
+    assert.equal(monadMarket.setup.chain, "monad-mainnet");
+    assert.equal(monadMarket.account, MONAD_ACCOUNT);
+    assert.equal(monadMarket.userDataScope, "summary");
+
+    const arbMarket = arbResult.markets[0]!;
+    const currentDefaultActiveMarkets = await refreshActiveUserMarkets(ARB_ACCOUNT);
+    const currentDefaultSummaryMarkets = await refreshActiveUserMarketSummaries(ARB_ACCOUNT);
+
+    assert.deepEqual(currentDefaultActiveMarkets, [arbMarket]);
+    assert.deepEqual(currentDefaultSummaryMarkets, [arbMarket]);
+    assert.deepEqual(monadFullRefreshCalls, [{
+        addresses: [MONAD_MARKET],
+        account: MONAD_ACCOUNT,
+    }]);
+    assert.deepEqual(monadSummaryRefreshCalls, [{
+        addresses: [MONAD_MARKET],
+        account: MONAD_ACCOUNT,
+    }]);
+    assert.deepEqual(arbRefreshCalls, [
+        {
+            addresses: [ARB_STABLE_MARKET],
+            account: ARB_ACCOUNT,
+        },
+        {
+            addresses: [ARB_STABLE_MARKET],
+            account: ARB_ACCOUNT,
+        },
+    ]);
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets, arbResult.markets);
+
+    const mixedChainRefreshed = await Market.reloadUserMarkets([monadMarket, arbMarket], MONAD_ACCOUNT);
+
+    assert.deepEqual(mixedChainRefreshed, [monadMarket, arbMarket]);
+    assert.deepEqual(monadFullRefreshCalls, [
+        {
+            addresses: [MONAD_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+        {
+            addresses: [MONAD_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+    ]);
+    assert.deepEqual(arbRefreshCalls, [
+        {
+            addresses: [ARB_STABLE_MARKET],
+            account: ARB_ACCOUNT,
+        },
+        {
+            addresses: [ARB_STABLE_MARKET],
+            account: ARB_ACCOUNT,
+        },
+        {
+            addresses: [ARB_STABLE_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+    ]);
+    assert.equal(monadMarket.account, MONAD_ACCOUNT);
+    assert.equal(arbMarket.account, MONAD_ACCOUNT);
+    assert.equal(monadMarket.setup.chain, "monad-mainnet");
+    assert.equal(arbMarket.setup.chain, "arb-sepolia");
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets, arbResult.markets);
+
+    const mixedChainSummaryRefreshed = await Market.reloadUserMarketSummaries(
+        [monadMarket, arbMarket],
+        MONAD_ACCOUNT,
+    );
+
+    assert.deepEqual(mixedChainSummaryRefreshed, [monadMarket, arbMarket]);
+    assert.deepEqual(monadSummaryRefreshCalls, [
+        {
+            addresses: [MONAD_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+        {
+            addresses: [MONAD_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+    ]);
+    assert.deepEqual(arbRefreshCalls, [
+        {
+            addresses: [ARB_STABLE_MARKET],
+            account: ARB_ACCOUNT,
+        },
+        {
+            addresses: [ARB_STABLE_MARKET],
+            account: ARB_ACCOUNT,
+        },
+        {
+            addresses: [ARB_STABLE_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+        {
+            addresses: [ARB_STABLE_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+    ]);
+    assert.equal(monadMarket.account, MONAD_ACCOUNT);
+    assert.equal(arbMarket.account, MONAD_ACCOUNT);
+    assert.equal(monadMarket.userDataScope, "summary");
+    assert.equal(arbMarket.userDataScope, "summary");
+    assert.equal(monadMarket.setup.chain, "monad-mainnet");
+    assert.equal(arbMarket.setup.chain, "arb-sepolia");
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets, arbResult.markets);
+});
+
+test("older returned cToken writes execute with result signer and refresh result reader after singleton moves", async (t) => {
+    installSetupChainBootHarness(t, {
+        marketData: (context) => {
+            if (context.batchKey?.startsWith("monad-mainnet:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(MONAD_MARKET, [
+                            { cToken: MONAD_WMON_CTOKEN, symbol: "WMON", asset: MONAD_WRAPPED_NATIVE },
+                            { cToken: MONAD_USDC_CTOKEN, symbol: "USDC", asset: MONAD_USDC_ASSET, isBorrowable: true },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            if (context.batchKey?.startsWith("arb-sepolia:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(ARB_STABLE_MARKET, [
+                            { cToken: ARB_USDC_CTOKEN, symbol: "USDC" },
+                            { cToken: ARB_AUSD_CTOKEN, symbol: "AUSD" },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            throw new Error(`Unexpected setup boot reader context: ${context.batchKey}`);
+        },
+        fetch: async () => ({
+            ok: true,
+            json: async () => ({ native_apy: [] }),
+        }),
+    });
+
+    const monadTransactions: Array<{ to: string; data: string }> = [];
+    const monadSimulations: Array<{ to: string; data: string; from: string }> = [];
+    let monadWaits = 0;
+    const monadSigner = {
+        address: MONAD_ACCOUNT,
+        provider: createDecimalsReadProvider(143n) as any,
+        sendTransaction: async (tx: { to: string; data: string }) => {
+            monadTransactions.push(tx);
+            return {
+                hash: "0xmonad-write",
+                wait: async () => {
+                    monadWaits += 1;
+                    return { status: 1 };
+                },
+            };
+        },
+        call: async (tx: { to: string; data: string; from: string }) => {
+            monadSimulations.push(tx);
+            return "0x";
+        },
+    };
+    const arbSigner = {
+        address: ARB_ACCOUNT,
+        provider: createDecimalsReadProvider(421614n) as any,
+        sendTransaction: async () => {
+            throw new Error("Arbitrum singleton signer should not execute older Monad token writes");
+        },
+    };
+
+    const monadResult = await setupChain("monad-mainnet", monadSigner as any, "https://api.monad-write.example");
+    const monadMarket = monadResult.markets[0];
+    assert.ok(monadMarket);
+    const monadWmon = monadMarket.tokens.find(
+        (token) => token.address.toLowerCase() === MONAD_WMON_CTOKEN.toLowerCase(),
+    );
+    assert.ok(monadWmon);
+
+    const arbResult = await setupChain("arb-sepolia", arbSigner as any, "https://api.arb-write.example");
+    const arbMarket = arbResult.markets[0];
+    assert.ok(arbMarket);
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(setup_config.signer, arbSigner);
+    assert.equal(all_markets, arbResult.markets);
+
+    const monadRefreshCalls: Array<{ addresses: string[]; account: string }> = [];
+    const arbRefreshCalls: Array<{ addresses: string[]; account: string }> = [];
+    (monadMarket.reader as any).getMarketStates = async (addresses: string[], account: string) => {
+        monadRefreshCalls.push({ addresses, account });
+        return {
+            dynamicMarkets: [
+                createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+            ],
+            userMarkets: [
+                createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+            ],
+        };
+    };
+    (arbMarket.reader as any).getMarketStates = async (addresses: string[], account: string) => {
+        arbRefreshCalls.push({ addresses, account });
+        throw new Error("Arbitrum reader should not refresh older Monad token writes");
+    };
+    (monadWmon as any).ensureUnderlyingAmount = async (amount: Decimal) => amount;
+    (monadWmon as any)._checkDepositApprovals = async () => {};
+
+    const tx = await monadWmon.deposit(Decimal(1), "none");
+
+    assert.deepEqual(tx, {
+        hash: "0xmonad-write",
+        wait: tx.wait,
+    });
+    assert.equal(monadTransactions.length, 1);
+    assert.equal(monadTransactions[0]?.to, MONAD_WMON_CTOKEN);
+    assert.match(monadTransactions[0]?.data ?? "", /^0x[0-9a-f]+$/i);
+    assert.equal(monadWaits, 1);
+    assert.deepEqual(monadRefreshCalls, [{
+        addresses: [MONAD_MARKET],
+        account: MONAD_ACCOUNT,
+    }]);
+    assert.deepEqual(arbRefreshCalls, []);
+    assert.equal(monadMarket.account, MONAD_ACCOUNT);
+    assert.equal(monadMarket.setup.chain, "monad-mainnet");
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(setup_config.signer, arbSigner);
+    assert.equal(all_markets, arbResult.markets);
+
+    const quoteCalls: Array<{
+        wallet: string;
+        tokenIn: string;
+        tokenOut: string;
+        amount: bigint;
+        feeBps: bigint | undefined;
+        feeReceiver: string | undefined;
+    }> = [];
+    (monadResult.dexAgg as any).quote = async (
+        wallet: string,
+        tokenIn: string,
+        tokenOut: string,
+        amount: bigint,
+        _slippage: bigint,
+        feeBps?: bigint,
+        feeReceiver?: address,
+    ) => {
+        quoteCalls.push({ wallet, tokenIn, tokenOut, amount, feeBps, feeReceiver });
+        return {
+            to: MONAD_TEST_OUTPUT_TOKEN,
+            calldata: "0xabcdef" as bytes,
+            min_out: 1_000_000_000_000_000_000n,
+            out: 1_010_000_000_000_000_000n,
+        };
+    };
+    (monadWmon as any).convertToShares = async (assets: bigint) => assets;
+
+    const simpleZapTx = await monadWmon.deposit(Decimal(2), {
+        type: "simple",
+        inputToken: MONAD_USDC_ASSET,
+        slippage: Decimal("0.01"),
+    });
+
+    assert.equal(simpleZapTx.hash, "0xmonad-write");
+    assert.equal(monadTransactions.length, 2);
+    assert.equal(
+        monadTransactions[1]?.to,
+        monadResult.setupConfigSnapshot.contracts.zappers.simpleZapper,
+    );
+    assert.match(monadTransactions[1]?.data ?? "", /^0x[0-9a-f]+$/i);
+    assert.equal(monadWaits, 2);
+    assert.deepEqual(quoteCalls, [{
+        wallet: monadResult.setupConfigSnapshot.contracts.zappers.simpleZapper as string,
+        tokenIn: MONAD_USDC_ASSET,
+        tokenOut: MONAD_WRAPPED_NATIVE,
+        amount: 2_000_000_000_000_000_000n,
+        feeBps: CURVANCE_FEE_BPS,
+        feeReceiver: BOOT_DAO_FEE_RECEIVER,
+    }]);
+    assert.deepEqual(monadRefreshCalls, [
+        {
+            addresses: [MONAD_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+        {
+            addresses: [MONAD_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+    ]);
+    assert.deepEqual(arbRefreshCalls, []);
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(setup_config.signer, arbSigner);
+    assert.equal(all_markets, arbResult.markets);
+
+    const simulation = await monadWmon.simulateDeposit(Decimal(3), {
+        type: "simple",
+        inputToken: MONAD_USDC_ASSET,
+        slippage: Decimal("0.01"),
+    });
+
+    assert.deepEqual(simulation, { success: true });
+    assert.equal(monadTransactions.length, 2, "simulation should not submit another transaction");
+    assert.equal(monadSimulations.length, 1);
+    assert.equal(monadSimulations[0]?.to, monadResult.setupConfigSnapshot.contracts.zappers.simpleZapper);
+    assert.equal(monadSimulations[0]?.from, MONAD_ACCOUNT);
+    assert.match(monadSimulations[0]?.data ?? "", /^0x[0-9a-f]+$/i);
+    assert.deepEqual(quoteCalls, [
+        {
+            wallet: monadResult.setupConfigSnapshot.contracts.zappers.simpleZapper as string,
+            tokenIn: MONAD_USDC_ASSET,
+            tokenOut: MONAD_WRAPPED_NATIVE,
+            amount: 2_000_000_000_000_000_000n,
+            feeBps: CURVANCE_FEE_BPS,
+            feeReceiver: BOOT_DAO_FEE_RECEIVER,
+        },
+        {
+            wallet: monadResult.setupConfigSnapshot.contracts.zappers.simpleZapper as string,
+            tokenIn: MONAD_USDC_ASSET,
+            tokenOut: MONAD_WRAPPED_NATIVE,
+            amount: 3_000_000_000_000_000_000n,
+            feeBps: CURVANCE_FEE_BPS,
+            feeReceiver: BOOT_DAO_FEE_RECEIVER,
+        },
+    ]);
+    assert.deepEqual(monadRefreshCalls, [
+        {
+            addresses: [MONAD_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+        {
+            addresses: [MONAD_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+    ]);
+    assert.deepEqual(arbRefreshCalls, []);
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(setup_config.signer, arbSigner);
+    assert.equal(all_markets, arbResult.markets);
+
+    const monadBorrowable = monadMarket.tokens.find(
+        (token) => token.address.toLowerCase() === MONAD_USDC_CTOKEN.toLowerCase(),
+    );
+    assert.ok(monadBorrowable);
+    assert.equal(monadBorrowable.isBorrowable, true);
+
+    const borrowTx = await (monadBorrowable as any).borrow(Decimal(4));
+
+    assert.equal(borrowTx.hash, "0xmonad-write");
+    assert.equal(monadTransactions.length, 3);
+    assert.equal(monadTransactions[2]?.to, MONAD_USDC_CTOKEN);
+    assert.match(monadTransactions[2]?.data ?? "", /^0x[0-9a-f]+$/i);
+    assert.equal(monadWaits, 3);
+    assert.deepEqual(monadRefreshCalls, [
+        {
+            addresses: [MONAD_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+        {
+            addresses: [MONAD_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+        {
+            addresses: [MONAD_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+    ]);
+    assert.deepEqual(arbRefreshCalls, []);
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(setup_config.signer, arbSigner);
+    assert.equal(all_markets, arbResult.markets);
+});
+
+test("explicit portfolio snapshots keep older result markets bound after a later chain boot", async (t) => {
+    installSetupChainBootHarness(t, {
+        marketData: (context) => {
+            if (context.batchKey?.startsWith("monad-mainnet:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(MONAD_MARKET, [
+                            { cToken: MONAD_WMON_CTOKEN, symbol: "WMON", asset: MONAD_WRAPPED_NATIVE },
+                            { cToken: MONAD_USDC_CTOKEN, symbol: "USDC", asset: MONAD_USDC_ASSET },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            if (context.batchKey?.startsWith("arb-sepolia:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(ARB_STABLE_MARKET, [
+                            { cToken: ARB_USDC_CTOKEN, symbol: "USDC" },
+                            { cToken: ARB_AUSD_CTOKEN, symbol: "AUSD" },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            throw new Error(`Unexpected setup boot reader context: ${context.batchKey}`);
+        },
+        fetch: async () => ({
+            ok: true,
+            json: async () => ({ native_apy: [] }),
+        }),
+    });
+
+    const monadResult = await setupChain("monad-mainnet", null, "https://api.monad-snapshot.example", {
+        account: MONAD_ACCOUNT,
+        readProvider: createDecimalsReadProvider(143n) as any,
+    });
+    const monadMarket = monadResult.markets[0];
+    assert.ok(monadMarket);
+
+    const arbResult = await setupChain("arb-sepolia", null, "https://api.arb-after-snapshot.example", {
+        account: ARB_ACCOUNT,
+        readProvider: createDecimalsReadProvider(421614n) as any,
+    });
+    const arbMarket = arbResult.markets[0];
+    assert.ok(arbMarket);
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets, arbResult.markets);
+
+    const monadSnapshotRefreshCalls: Array<{ account: string }> = [];
+    const arbSnapshotRefreshCalls: Array<{ account: string }> = [];
+
+    (monadMarket.reader as any).getAllDynamicState = async (account: string) => {
+        monadSnapshotRefreshCalls.push({ account });
+        return {
+            dynamicMarket: [
+                createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+            ],
+            userData: {
+                markets: [
+                    createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                ],
+            },
+        };
+    };
+    (arbMarket.reader as any).getAllDynamicState = async (account: string) => {
+        arbSnapshotRefreshCalls.push({ account });
+        return {
+            dynamicMarket: [
+                createBootDynamicMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+            ],
+            userData: {
+                markets: [
+                    createBootUserMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                ],
+            },
+        };
+    };
+
+    const olderMonadSnapshot = await takePortfolioSnapshot(MONAD_ACCOUNT, {
+        markets: monadResult.markets,
+        refresh: true,
+    });
+
+    assert.equal(olderMonadSnapshot.chain, "monad-mainnet");
+    assert.deepEqual(
+        olderMonadSnapshot.markets.map((market) => ({
+            address: market.marketAddress,
+            chain: market.chain,
+            chainId: market.chainId,
+        })),
+        [{ address: MONAD_MARKET, chain: "monad-mainnet", chainId: 143 }],
+    );
+    assert.deepEqual(monadSnapshotRefreshCalls, [{ account: MONAD_ACCOUNT }]);
+    assert.deepEqual(arbSnapshotRefreshCalls, []);
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets, arbResult.markets);
+    assert.equal(monadMarket.setup.chain, "monad-mainnet");
+    assert.equal(monadMarket.account, MONAD_ACCOUNT);
+
+    const currentDefaultSnapshot = await takePortfolioSnapshot(ARB_ACCOUNT, { refresh: true });
+
+    assert.equal(currentDefaultSnapshot.chain, "arb-sepolia");
+    assert.deepEqual(
+        currentDefaultSnapshot.markets.map((market) => ({
+            address: market.marketAddress,
+            chain: market.chain,
+            chainId: market.chainId,
+        })),
+        [{ address: ARB_STABLE_MARKET, chain: "arb-sepolia", chainId: 421614 }],
+    );
+    assert.deepEqual(monadSnapshotRefreshCalls, [{ account: MONAD_ACCOUNT }]);
+    assert.deepEqual(arbSnapshotRefreshCalls, [{ account: ARB_ACCOUNT }]);
+    assert.equal(all_markets, arbResult.markets);
+
+    const monadSummaryRefreshCalls: Array<{ addresses: string[]; account: string }> = [];
+    const monadSummaryPromotionCalls: Array<{ addresses: string[]; account: string }> = [];
+
+    (monadMarket.reader as any).getMarketSummaries = async (addresses: string[], account: string) => {
+        monadSummaryRefreshCalls.push({ addresses, account });
+        return [{
+            address: MONAD_MARKET,
+            collateral: 31n,
+            maxDebt: 32n,
+            debt: 0n,
+            positionHealth: 33n,
+            cooldown: 1200n,
+            errorCodeHit: false,
+            priceStale: false,
+        }];
+    };
+    (monadMarket.reader as any).getMarketStates = async (addresses: string[], account: string) => {
+        monadSummaryPromotionCalls.push({ addresses, account });
+        return {
+            dynamicMarkets: [
+                createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+            ],
+            userMarkets: [
+                createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+            ],
+        };
+    };
+
+    const summaryScopedMonadMarkets = await refreshActiveUserMarketSummaries(
+        MONAD_ACCOUNT,
+        monadResult.markets,
+    );
+    assert.equal(monadMarket.userDataScope, "summary");
+
+    const promotedSummarySnapshot = await takePortfolioSnapshot(MONAD_ACCOUNT, {
+        markets: summaryScopedMonadMarkets,
+    });
+
+    assert.equal(promotedSummarySnapshot.chain, "monad-mainnet");
+    assert.deepEqual(
+        promotedSummarySnapshot.markets.map((market) => ({
+            address: market.marketAddress,
+            chain: market.chain,
+            chainId: market.chainId,
+        })),
+        [{ address: MONAD_MARKET, chain: "monad-mainnet", chainId: 143 }],
+    );
+    assert.deepEqual(monadSummaryRefreshCalls, [{
+        addresses: [MONAD_MARKET],
+        account: MONAD_ACCOUNT,
+    }]);
+    assert.deepEqual(monadSummaryPromotionCalls, [{
+        addresses: [MONAD_MARKET],
+        account: MONAD_ACCOUNT,
+    }]);
+    assert.deepEqual(monadSnapshotRefreshCalls, [{ account: MONAD_ACCOUNT }]);
+    assert.deepEqual(arbSnapshotRefreshCalls, [{ account: ARB_ACCOUNT }]);
+    assert.equal(monadMarket.account, MONAD_ACCOUNT);
+    assert.equal(monadMarket.userDataScope, "full");
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets, arbResult.markets);
+
+    const arbSummaryRefreshCalls: Array<{ addresses: string[]; account: string }> = [];
+    const arbSummaryPromotionCalls: Array<{ addresses: string[]; account: string }> = [];
+
+    (arbMarket.reader as any).getMarketSummaries = async (addresses: string[], account: string) => {
+        arbSummaryRefreshCalls.push({ addresses, account });
+        return [{
+            address: ARB_STABLE_MARKET,
+            collateral: 41n,
+            maxDebt: 42n,
+            debt: 0n,
+            positionHealth: 43n,
+            cooldown: 1200n,
+            errorCodeHit: false,
+            priceStale: false,
+        }];
+    };
+    (arbMarket.reader as any).getMarketStates = async (addresses: string[], account: string) => {
+        arbSummaryPromotionCalls.push({ addresses, account });
+        return {
+            dynamicMarkets: [
+                createBootDynamicMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+            ],
+            userMarkets: [
+                createBootUserMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+            ],
+        };
+    };
+
+    const summaryScopedMixedMarkets = await Market.reloadUserMarketSummaries(
+        [monadMarket, arbMarket],
+        MONAD_ACCOUNT,
+    );
+    assert.equal(monadMarket.userDataScope, "summary");
+    assert.equal(arbMarket.userDataScope, "summary");
+
+    const promotedMixedSnapshot = await takePortfolioSnapshot(MONAD_ACCOUNT, {
+        markets: summaryScopedMixedMarkets,
+        allowMixedChains: true,
+    });
+
+    assert.equal(promotedMixedSnapshot.chain, "multi");
+    assert.deepEqual(
+        promotedMixedSnapshot.markets.map((market) => ({
+            address: market.marketAddress,
+            chain: market.chain,
+            chainId: market.chainId,
+        })),
+        [
+            { address: MONAD_MARKET, chain: "monad-mainnet", chainId: 143 },
+            { address: ARB_STABLE_MARKET, chain: "arb-sepolia", chainId: 421614 },
+        ],
+    );
+    assert.deepEqual(monadSummaryRefreshCalls, [
+        {
+            addresses: [MONAD_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+        {
+            addresses: [MONAD_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+    ]);
+    assert.deepEqual(arbSummaryRefreshCalls, [{
+        addresses: [ARB_STABLE_MARKET],
+        account: MONAD_ACCOUNT,
+    }]);
+    assert.deepEqual(monadSummaryPromotionCalls, [
+        {
+            addresses: [MONAD_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+        {
+            addresses: [MONAD_MARKET],
+            account: MONAD_ACCOUNT,
+        },
+    ]);
+    assert.deepEqual(arbSummaryPromotionCalls, [{
+        addresses: [ARB_STABLE_MARKET],
+        account: MONAD_ACCOUNT,
+    }]);
+    assert.deepEqual(monadSnapshotRefreshCalls, [{ account: MONAD_ACCOUNT }]);
+    assert.deepEqual(arbSnapshotRefreshCalls, [{ account: ARB_ACCOUNT }]);
+    assert.equal(monadMarket.userDataScope, "full");
+    assert.equal(arbMarket.userDataScope, "full");
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets, arbResult.markets);
+});
+
+test("multiHoldExpiresAt rejects mixed-chain explicit market batches before reader RPC", async (t) => {
+    installSetupChainBootHarness(t, {
+        marketData: (context) => {
+            if (context.batchKey?.startsWith("monad-mainnet:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(MONAD_MARKET, [
+                            { cToken: MONAD_WMON_CTOKEN, symbol: "WMON", asset: MONAD_WRAPPED_NATIVE },
+                            { cToken: MONAD_USDC_CTOKEN, symbol: "USDC", asset: MONAD_USDC_ASSET },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            if (context.batchKey?.startsWith("arb-sepolia:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(ARB_STABLE_MARKET, [
+                            { cToken: ARB_USDC_CTOKEN, symbol: "USDC" },
+                            { cToken: ARB_AUSD_CTOKEN, symbol: "AUSD" },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            throw new Error(`Unexpected setup boot reader context: ${context.batchKey}`);
+        },
+        fetch: async () => ({
+            ok: true,
+            json: async () => ({ native_apy: [] }),
+        }),
+    });
+
+    const monadResult = await setupChain("monad-mainnet", null, "https://api.monad-cooldown.example", {
+        account: MONAD_ACCOUNT,
+        readProvider: createDecimalsReadProvider(143n) as any,
+    });
+    const monadMarket = monadResult.markets[0];
+    assert.ok(monadMarket);
+
+    const arbResult = await setupChain("arb-sepolia", null, "https://api.arb-cooldown.example", {
+        account: ARB_ACCOUNT,
+        readProvider: createDecimalsReadProvider(421614n) as any,
+    });
+    const arbMarket = arbResult.markets[0];
+    assert.ok(arbMarket);
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets, arbResult.markets);
+
+    const cooldownCalls: Array<{ addresses: string[]; account: string }> = [];
+    (monadMarket.reader as any).marketMultiCooldown = async (addresses: string[], account: string) => {
+        cooldownCalls.push({ addresses, account });
+        return [monadMarket.cooldownLength];
+    };
+
+    const sameChainCooldowns = await monadMarket.multiHoldExpiresAt([monadMarket]);
+    assert.deepEqual(cooldownCalls, [{
+        addresses: [MONAD_MARKET],
+        account: MONAD_ACCOUNT,
+    }]);
+    assert.equal(sameChainCooldowns[MONAD_MARKET], null);
+
+    const otherMonadReaderMarket = {
+        ...monadMarket,
+        address: "0x0000000000000000000000000000000000000f0f",
+        setup: monadMarket.setup,
+        reader: {
+            address: "0x0000000000000000000000000000000000000d1f",
+        },
+    } as any;
+
+    await assert.rejects(
+        () => monadMarket.multiHoldExpiresAt([monadMarket, otherMonadReaderMarket]),
+        /Cannot batch cooldowns across different ProtocolReader deployments/i,
+    );
+    assert.deepEqual(cooldownCalls, [{
+        addresses: [MONAD_MARKET],
+        account: MONAD_ACCOUNT,
+    }]);
+
+    const sameAddressDetachedReaderMarket = {
+        ...monadMarket,
+        address: "0x0000000000000000000000000000000000000f10",
+        setup: monadMarket.setup,
+        reader: {
+            address: monadMarket.reader.address,
+            batchKey: null,
+        },
+    } as any;
+
+    await assert.rejects(
+        () => monadMarket.multiHoldExpiresAt([monadMarket, sameAddressDetachedReaderMarket]),
+        /Cannot batch cooldowns across different ProtocolReader deployments/i,
+    );
+    assert.deepEqual(cooldownCalls, [{
+        addresses: [MONAD_MARKET],
+        account: MONAD_ACCOUNT,
+    }]);
+
+    await assert.rejects(
+        () => monadMarket.multiHoldExpiresAt([monadMarket, arbMarket]),
+        /Cannot batch cooldowns across chains: base=monad-mainnet market=arb-sepolia/i,
+    );
+    assert.deepEqual(cooldownCalls, [{
+        addresses: [MONAD_MARKET],
+        account: MONAD_ACCOUNT,
+    }]);
+
+    const positionHealthCalls: Array<{ depositToken: string; borrowToken: string }> = [];
+    (monadMarket.reader as any).getPositionHealth = async (
+        _market: string,
+        _account: string,
+        depositToken: string,
+        borrowToken: string,
+    ) => {
+        positionHealthCalls.push({ depositToken, borrowToken });
+        return {
+            positionHealth: 2n * (10n ** 18n),
+            errorCodeHit: false,
+        };
+    };
+
+    const assetImpactCalls: Array<{ collateralToken: string; debtToken: string }> = [];
+    (monadMarket.reader as any).previewAssetImpact = async (
+        _account: string,
+        collateralToken: string,
+        debtToken: string,
+    ) => {
+        assetImpactCalls.push({ collateralToken, debtToken });
+        return { supply: 0n, borrow: 0n };
+    };
+
+    const monadToken = monadMarket.tokens[0]!;
+    const arbToken = arbMarket.tokens[0]!;
+    const sameMarketHealth = await monadMarket.previewPositionHealth(monadToken, null, true, Decimal(1));
+
+    assert.equal(sameMarketHealth?.toString(), "1");
+    assert.deepEqual(positionHealthCalls, [{
+        depositToken: MONAD_WMON_CTOKEN,
+        borrowToken: "0x0000000000000000000000000000000000000000",
+    }]);
+
+    await assert.rejects(
+        () => monadMarket.previewPositionHealth(arbToken as any, null, true, Decimal(1)),
+        /Deposit token .* belongs to market .* on arb-sepolia, not market .* on monad-mainnet/i,
+    );
+    assert.deepEqual(positionHealthCalls, [{
+        depositToken: MONAD_WMON_CTOKEN,
+        borrowToken: "0x0000000000000000000000000000000000000000",
+    }]);
+
+    const sameAddressDifferentReaderToken = {
+        ...monadToken,
+        market: {
+            ...monadMarket,
+            reader: {
+                address: monadMarket.reader.address,
+                batchKey: null,
+            },
+        },
+        convertTokenInputToShares: () => {
+            throw new Error("same-address reader guard should run before token amount conversion");
+        },
+    } as any;
+
+    await assert.rejects(
+        () => monadMarket.previewPositionHealth(sameAddressDifferentReaderToken, null, true, Decimal(1)),
+        /Deposit token .* with the same reader deployment/i,
+    );
+    assert.deepEqual(positionHealthCalls, [{
+        depositToken: MONAD_WMON_CTOKEN,
+        borrowToken: "0x0000000000000000000000000000000000000000",
+    }]);
+
+    await assert.rejects(
+        () => monadMarket.previewAssetImpact(
+            MONAD_ACCOUNT,
+            monadToken,
+            arbToken as any,
+            Decimal(1),
+            Decimal(0),
+            "day",
+        ),
+        /Debt token .* belongs to market .* on arb-sepolia, not market .* on monad-mainnet/i,
+    );
+    assert.deepEqual(assetImpactCalls, []);
+
+    const leverageSnapshotCalls: Array<{ collateralToken: string; borrowToken: string }> = [];
+    (monadMarket.reader as any).getLeverageSnapshot = async (
+        _account: string,
+        collateralToken: string,
+        borrowToken: string,
+    ) => {
+        leverageSnapshotCalls.push({ collateralToken, borrowToken });
+        throw new Error("mixed-chain leverage guard should run before snapshot RPC");
+    };
+
+    assert.throws(
+        () => monadToken.previewLeverageUp(Decimal(2), arbToken as any),
+        /Borrow token .* belongs to market .* on arb-sepolia, not market .* on monad-mainnet/i,
+    );
+    assert.throws(
+        () => monadToken.previewLeverageDown(Decimal(1.5), Decimal(2), arbToken as any),
+        /Borrow token .* belongs to market .* on arb-sepolia, not market .* on monad-mainnet/i,
+    );
+    await assert.rejects(
+        () => monadToken.leverageUp(arbToken as any, Decimal(2), "simple", Decimal(0.01)),
+        /Borrow token .* belongs to market .* on arb-sepolia, not market .* on monad-mainnet/i,
+    );
+    await assert.rejects(
+        () => monadToken.leverageDown(arbToken as any, Decimal(2), Decimal(1.5), "simple", Decimal(0.01)),
+        /Borrow token .* belongs to market .* on arb-sepolia, not market .* on monad-mainnet/i,
+    );
+    await assert.rejects(
+        () => monadToken.depositAndLeverage(Decimal(1), arbToken as any, Decimal(2), "simple", Decimal(0.01)),
+        /Borrow token .* belongs to market .* on arb-sepolia, not market .* on monad-mainnet/i,
+    );
+
+    const monadBorrowToken = monadMarket.tokens[1]!;
+    const sameAddressDifferentReaderBorrowToken = {
+        ...monadBorrowToken,
+        market: {
+            ...monadMarket,
+            reader: {
+                address: monadMarket.reader.address,
+                batchKey: null,
+            },
+        },
+    } as any;
+
+    assert.throws(
+        () => monadToken.previewLeverageUp(Decimal(2), sameAddressDifferentReaderBorrowToken),
+        /Borrow token .* with the same reader deployment/i,
+    );
+    assert.deepEqual(leverageSnapshotCalls, []);
+
+    const expectedVaultShareCalls: bigint[] = [];
+    (monadToken as any).getExpectedVaultShares = async (assets: bigint) => {
+        expectedVaultShareCalls.push(assets);
+        return 4_242n;
+    };
+
+    assert.equal(
+        await PositionManager.getVaultExpectedShares(monadToken, monadBorrowToken, Decimal(1)),
+        4_242n,
+    );
+    assert.deepEqual(expectedVaultShareCalls, [1_000_000_000_000_000_000n]);
+
+    await assert.rejects(
+        () => PositionManager.getVaultExpectedShares(monadToken, arbToken as any, Decimal(1)),
+        /Vault expected shares for deposit token .* on monad-mainnet market .* cannot use borrow token .* from arb-sepolia market/i,
+    );
+    assert.deepEqual(expectedVaultShareCalls, [1_000_000_000_000_000_000n]);
+
+    await assert.rejects(
+        () => PositionManager.getVaultExpectedShares(monadToken, sameAddressDifferentReaderBorrowToken, Decimal(1)),
+        /Vault expected shares for deposit token .* with a different reader deployment/i,
+    );
+    assert.deepEqual(expectedVaultShareCalls, [1_000_000_000_000_000_000n]);
+
+    const directReaderCalls: string[] = [];
+    (monadMarket.reader as any).contract = {
+        maxRedemptionOf: async () => {
+            directReaderCalls.push("maxRedemptionOf");
+            return [0n, 0n, false];
+        },
+        hypotheticalRedemptionOf: async () => {
+            directReaderCalls.push("hypotheticalRedemptionOf");
+            return [0n, 0n, true, false];
+        },
+        hypotheticalBorrowOf: async () => {
+            directReaderCalls.push("hypotheticalBorrowOf");
+            return [0n, 0n, true, false, false];
+        },
+        hypotheticalLeverageOf: async () => {
+            directReaderCalls.push("hypotheticalLeverageOf");
+            return [0n, 0n, 0n, 0n, false, false];
+        },
+    };
+
+    await monadMarket.reader.hypotheticalBorrowOf(MONAD_ACCOUNT, monadToken as any, 1n);
+    assert.deepEqual(directReaderCalls, ["hypotheticalBorrowOf"]);
+
+    await assert.rejects(
+        () => monadMarket.reader.maxRedemptionOf(MONAD_ACCOUNT, arbToken as any),
+        /ProtocolReader .* cannot read redemption token .* on arb-sepolia/i,
+    );
+    await assert.rejects(
+        () => monadMarket.reader.hypotheticalRedemptionOf(MONAD_ACCOUNT, arbToken as any, 1n),
+        /ProtocolReader .* cannot read redemption token .* on arb-sepolia/i,
+    );
+    await assert.rejects(
+        () => monadMarket.reader.hypotheticalBorrowOf(MONAD_ACCOUNT, arbToken as any, 1n),
+        /ProtocolReader .* cannot read borrow token .* on arb-sepolia/i,
+    );
+    await assert.rejects(
+        () => monadMarket.reader.hypotheticalLeverageOf(MONAD_ACCOUNT, monadToken, arbToken as any, Decimal(1)),
+        /ProtocolReader .* cannot read borrow token .* on arb-sepolia/i,
+    );
+    assert.deepEqual(directReaderCalls, ["hypotheticalBorrowOf"]);
+
+    const zapperCalldataCalls: Array<{ method: string; ctoken: string }> = [];
+    const monadZapper = Object.create(Zapper.prototype) as Zapper;
+    (monadZapper as any).address = "0x0000000000000000000000000000000000000d0d" as address;
+    (monadZapper as any).type = "simple";
+    (monadZapper as any).signer = { address: MONAD_ACCOUNT };
+    (monadZapper as any).setup = monadResult.setupConfigSnapshot;
+    (monadZapper as any).dexAgg = {
+        quote: async () => {
+            throw new Error("mixed-chain zapper guard should run before DEX quote");
+        },
+    };
+    (monadZapper as any).getCallData = (method: string, args: unknown[]) => {
+        zapperCalldataCalls.push({ method, ctoken: String(args[0]) });
+        return "0xzapper";
+    };
+    (monadToken as any).convertToShares = async () => 1n;
+    (arbToken as any).convertToShares = async () => {
+        throw new Error("mixed-chain zapper guard should run before foreign token conversion");
+    };
+
+    const sameChainZapCalldata = await monadZapper.getSimpleZapCalldata(
+        monadToken,
+        monadToken.asset.address,
+        monadToken.asset.address,
+        1n,
+        false,
+        50n,
+        MONAD_ACCOUNT,
+    );
+    assert.equal(sameChainZapCalldata, "0xzapper");
+    assert.deepEqual(zapperCalldataCalls, [{
+        method: "swapAndDeposit",
+        ctoken: MONAD_WMON_CTOKEN,
+    }]);
+
+    await assert.rejects(
+        () => monadZapper.getSimpleZapCalldata(
+            arbToken as any,
+            (arbToken as any).asset.address,
+            (arbToken as any).asset.address,
+            1n,
+            false,
+            50n,
+            MONAD_ACCOUNT,
+        ),
+        /simple Zapper on monad-mainnet cannot build calldata for token .* on arb-sepolia/i,
+    );
+    await assert.rejects(
+        () => monadZapper.getNativeZapCalldata(arbToken as any, 1n, false, false, MONAD_ACCOUNT),
+        /simple Zapper on monad-mainnet cannot build calldata for token .* on arb-sepolia/i,
+    );
+    await assert.rejects(
+        () => monadZapper.simpleZap(
+            arbToken as any,
+            (arbToken as any).asset.address,
+            (arbToken as any).asset.address,
+            1n,
+            false,
+            50n,
+            MONAD_ACCOUNT,
+        ),
+        /simple Zapper on monad-mainnet cannot build calldata for token .* on arb-sepolia/i,
+    );
+    const sameChainDifferentSetupToken = {
+        ...monadToken,
+        market: {
+            ...monadMarket,
+            setup: {
+                ...monadResult.setupConfigSnapshot,
+            },
+        },
+        convertToShares: async () => {
+            throw new Error("same-chain setup-snapshot zapper guard should run before token conversion");
+        },
+    } as any;
+
+    await assert.rejects(
+        () => monadZapper.getSimpleZapCalldata(
+            sameChainDifferentSetupToken,
+            monadToken.asset.address,
+            monadToken.asset.address,
+            1n,
+            false,
+            50n,
+            MONAD_ACCOUNT,
+        ),
+        /simple Zapper on monad-mainnet cannot build calldata for token .* without the same setup snapshot/i,
+    );
+    assert.deepEqual(zapperCalldataCalls, [{
+        method: "swapAndDeposit",
+        ctoken: MONAD_WMON_CTOKEN,
+    }]);
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets, arbResult.markets);
+});
+
+test("explicit native-yield API calls keep older setup snapshots bound after a later chain boot", async (t) => {
+    const harness = installSetupChainBootHarness(t, {
+        marketData: (context) => {
+            if (context.batchKey?.startsWith("monad-mainnet:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(MONAD_MARKET, [
+                            { cToken: MONAD_WMON_CTOKEN, symbol: "WMON", asset: MONAD_WRAPPED_NATIVE },
+                            { cToken: MONAD_USDC_CTOKEN, symbol: "USDC", asset: MONAD_USDC_ASSET },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            if (context.batchKey?.startsWith("arb-sepolia:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(ARB_STABLE_MARKET, [
+                            { cToken: ARB_USDC_CTOKEN, symbol: "USDC" },
+                            { cToken: ARB_AUSD_CTOKEN, symbol: "AUSD" },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            throw new Error(`Unexpected setup boot reader context: ${context.batchKey}`);
+        },
+        fetch: async (url) => {
+            assert.equal(url, "https://api.monad-native.example/v1/monad/native_apy");
+            return {
+                ok: true,
+                json: async () => ({ native_apy: [{ symbol: "WMON", apy: 3.14 }] }),
+            };
+        },
+    });
+
+    const monadResult = await setupChain("monad-mainnet", null, "https://api.monad-native.example", {
+        account: MONAD_ACCOUNT,
+        readProvider: createDecimalsReadProvider(143n) as any,
+    });
+    const arbResult = await setupChain("arb-sepolia", null, "https://api.arb-native.example", {
+        account: ARB_ACCOUNT,
+        readProvider: createDecimalsReadProvider(421614n) as any,
+    });
+
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets, arbResult.markets);
+    assert.deepEqual(harness.externalFetchCalls, ["https://api.monad-native.example/v1/monad/native_apy"]);
+
+    const olderMonadWmon = monadResult.markets[0]!.tokens.find(
+        (token) => token.address.toLowerCase() === MONAD_WMON_CTOKEN.toLowerCase(),
+    );
+    const currentArbUsdc = arbResult.markets[0]!.tokens.find(
+        (token) => token.address.toLowerCase() === ARB_USDC_CTOKEN.toLowerCase(),
+    );
+    assert.ok(olderMonadWmon);
+    assert.ok(currentArbUsdc);
+    assert.equal(olderMonadWmon.nativeApy.toString(), "0.0314");
+    assert.equal(currentArbUsdc.nativeApy.toString(), "0");
+
+    const olderMonadYields = await Api.fetchNativeYields(monadResult.setupConfigSnapshot);
+    const explicitArbYields = await Api.fetchNativeYields(arbResult.setupConfigSnapshot);
+    const currentDefaultYields = await Api.fetchNativeYields();
+
+    assert.deepEqual(olderMonadYields, [{ symbol: "WMON", apy: 3.14 }]);
+    assert.deepEqual(explicitArbYields, []);
+    assert.deepEqual(currentDefaultYields, []);
+    assert.deepEqual(harness.externalFetchCalls, [
+        "https://api.monad-native.example/v1/monad/native_apy",
+        "https://api.monad-native.example/v1/monad/native_apy",
+    ]);
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets, arbResult.markets);
+});
+
+test("explicit LendingOptimizer read providers do not inherit a later singleton signer", async (t) => {
+    installSetupChainBootHarness(t, {
+        marketData: (context) => {
+            if (context.batchKey?.startsWith("monad-mainnet:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(MONAD_MARKET, [
+                            { cToken: MONAD_WMON_CTOKEN, symbol: "WMON", asset: MONAD_WRAPPED_NATIVE },
+                            { cToken: MONAD_USDC_CTOKEN, symbol: "USDC", asset: MONAD_USDC_ASSET },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(MONAD_MARKET, [MONAD_WMON_CTOKEN, MONAD_USDC_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            if (context.batchKey?.startsWith("arb-sepolia:")) {
+                return {
+                    staticMarket: [
+                        createBootStaticMarket(ARB_STABLE_MARKET, [
+                            { cToken: ARB_USDC_CTOKEN, symbol: "USDC" },
+                            { cToken: ARB_AUSD_CTOKEN, symbol: "AUSD" },
+                        ]),
+                    ],
+                    dynamicMarket: [
+                        createBootDynamicMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                    ],
+                    userData: {
+                        locks: [],
+                        markets: [
+                            createBootUserMarket(ARB_STABLE_MARKET, [ARB_USDC_CTOKEN, ARB_AUSD_CTOKEN]),
+                        ],
+                    },
+                };
+            }
+
+            throw new Error(`Unexpected setup boot reader context: ${context.batchKey}`);
+        },
+        fetch: async () => ({
+            ok: true,
+            json: async () => ({ native_apy: [] }),
+        }),
+    });
+
+    const monadSignerTransactions: Array<{ to: string; data: string }> = [];
+    const monadSigner = {
+        address: "0x0000000000000000000000000000000000000a01" as address,
+        provider: createDecimalsReadProvider(143n) as any,
+        sendTransaction: async (tx: { to: string; data: string }) => {
+            monadSignerTransactions.push(tx);
+            return { hash: "0xmonad" };
+        },
+    };
+    const arbSigner = {
+        address: "0x0000000000000000000000000000000000000b01" as address,
+        provider: createDecimalsReadProvider(421614n) as any,
+        sendTransaction: async () => {
+            throw new Error("Arbitrum singleton signer should not be used by detached optimizer");
+        },
+    };
+
+    const monadResult = await setupChain("monad-mainnet", monadSigner as any, "https://api.monad-optimizer.example");
+    const monadReadProvider = monadResult.setupConfigSnapshot.readProvider;
+    await setupChain("arb-sepolia", arbSigner as any, "https://api.arb-optimizer.example");
+
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(setup_config.signer, arbSigner);
+
+    const asset = new ERC20(
+        monadReadProvider,
+        MONAD_TEST_TOKEN,
+        {
+            address: MONAD_TEST_TOKEN,
+            name: "Monad Optimizer Asset",
+            symbol: "MOA",
+            decimals: 18n,
+            totalSupply: 0n,
+        },
+        monadResult.setupConfigSnapshot.contracts.OracleManager as address,
+    );
+    const optimizer = new LendingOptimizer(OPTIMIZER_TEST_ADDRESS, asset, monadReadProvider);
+
+    assert.equal(optimizer.provider, monadReadProvider);
+    assert.equal(optimizer.signer, null);
+    await assert.rejects(
+        () => optimizer.deposit(Decimal(1)),
+        /Provider is not a signer/i,
+    );
+    assert.equal(monadSignerTransactions.length, 0);
+
+    const implicitOptimizer = new LendingOptimizer(OPTIMIZER_TEST_ADDRESS, asset);
+    assert.equal(implicitOptimizer.provider, monadReadProvider);
+    assert.equal(implicitOptimizer.signer, null);
+    await assert.rejects(
+        () => implicitOptimizer.deposit(Decimal(1)),
+        /Provider is not a signer/i,
+    );
+    assert.equal(monadSignerTransactions.length, 0);
+
+    const signerBoundAsset = {
+        provider: monadReadProvider,
+        signer: monadSigner,
+        decimals: 0n,
+        symbol: "MOA",
+        allowance: async (owner: address, spender: address) => {
+            assert.equal(owner, monadSigner.address);
+            assert.equal(spender, OPTIMIZER_TEST_ADDRESS);
+            return 10n;
+        },
+    };
+    const signerBoundOptimizer = new LendingOptimizer(OPTIMIZER_TEST_ADDRESS, signerBoundAsset as any);
+    const signerBoundTx = await signerBoundOptimizer.deposit(Decimal(2));
+
+    assert.equal(signerBoundOptimizer.provider, monadReadProvider);
+    assert.equal(signerBoundOptimizer.signer, monadSigner);
+    assert.deepEqual(signerBoundTx, { hash: "0xmonad" });
+    assert.equal(monadSignerTransactions.length, 1);
+
+    const writableAsset = {
+        decimals: 0n,
+        symbol: "MOA",
+        allowance: async (owner: address, spender: address) => {
+            assert.equal(owner, monadSigner.address);
+            assert.equal(spender, OPTIMIZER_TEST_ADDRESS);
+            return 10n;
+        },
+    };
+    const writableOptimizer = new LendingOptimizer(
+        OPTIMIZER_TEST_ADDRESS,
+        writableAsset as any,
+        monadReadProvider,
+        monadSigner as any,
+    );
+    const tx = await writableOptimizer.deposit(Decimal(2));
+
+    assert.equal(writableOptimizer.provider, monadReadProvider);
+    assert.equal(writableOptimizer.signer, monadSigner);
+    assert.deepEqual(tx, { hash: "0xmonad" });
+    assert.equal(monadSignerTransactions.length, 2);
+    assert.equal(monadSignerTransactions[0]?.to, OPTIMIZER_TEST_ADDRESS);
+    assert.equal(monadSignerTransactions[1]?.to, OPTIMIZER_TEST_ADDRESS);
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(setup_config.signer, arbSigner);
+});
+
+test("cross-chain setup races keep returned-result provenance after singleton moves", async (t) => {
+    const rewardsA = defer<{ milestones: Record<string, any>; incentives: Record<string, any> }>();
+    const rewardsB = defer<{ milestones: Record<string, any>; incentives: Record<string, any> }>();
+
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    let rewardsCall = 0;
+
+    Api.getRewards = (async () => {
+        rewardsCall += 1;
+        return rewardsCall === 1 ? rewardsA.promise : rewardsB.promise;
+    }) as typeof Api.getRewards;
+    Market.getAll = (async (_reader, _oracleManager, _provider, _signer, _account, _milestones, _incentives, setup) => {
+        return [{ setup, marker: setup!.chain }] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    const olderMonad = setupChain("monad-mainnet", null, "https://api.monad-race.example");
+    const newerArb = setupChain("arb-sepolia", null, "https://api.arb-race.example");
+
+    rewardsB.resolve({ milestones: {}, incentives: {} });
+    const arbResult = await newerArb;
+    assert.equal(setup_config.chain, "arb-sepolia");
+
+    rewardsA.resolve({ milestones: {}, incentives: {} });
+    const monadResult = await olderMonad;
+
+    assert.equal(arbResult.chain, "arb-sepolia");
+    assert.equal(arbResult.setupConfigSnapshot.chain, "arb-sepolia");
+    assert.equal(monadResult.chain, "monad-mainnet");
+    assert.equal(monadResult.chainId, 143);
+    assert.equal(monadResult.setupConfigSnapshot.chain, "monad-mainnet");
+    assert.equal((monadResult.markets[0] as any).setup.chain, "monad-mainnet");
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.deepEqual(all_markets, arbResult.markets);
+});
+
+test("setupChain returns DEX aggregators bound to the result markets and fee policy after singleton moves", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async (_reader, _oracleManager, _provider, _signer, _account, _milestones, _incentives, setup) => {
+        const market = setup!.chain === "monad-mainnet"
+            ? createZapMarket("Monad Token", "MONA", MONAD_TEST_TOKEN)
+            : createZapMarket("Arbitrum Token", "ARBA", ARB_TEST_TOKEN);
+        market.setup = setup as any;
+        return [market] as any;
+    }) as typeof Market.getAll;
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+    });
+
+    const monadResult = await setupChain("monad-mainnet", null, "https://api.monad-dex.example");
+    const arbResult = await setupChain("arb-sepolia", null, "https://api.arb-dex.example");
+
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets[0], arbResult.markets[0]);
+
+    const quoteCalls: Array<{ amount: bigint; feeBps: bigint | undefined; feeReceiver: string | undefined }> = [];
+    (monadResult.dexAgg as any).quote = async (
+        _wallet: string,
+        _tokenIn: string,
+        _tokenOut: string,
+        amount: bigint,
+        _slippage: bigint,
+        feeBps?: bigint,
+        feeReceiver?: address,
+    ) => {
+        quoteCalls.push({ amount, feeBps, feeReceiver });
+        return {
+            to: MONAD_TEST_TOKEN,
+            calldata: "0x" as bytes,
+            min_out: 1n,
+            out: 2n,
+        };
+    };
+
+    const zapTokens = await monadResult.dexAgg.getAvailableTokens(
+        createDecimalsProvider() as any,
+        null,
+        "0x0000000000000000000000000000000000000abc" as address,
+    );
+
+    assert.deepEqual(
+        zapTokens.map((token) => token.interface.address),
+        [MONAD_TEST_TOKEN],
+        "returned Monad DEX adapter must not read Arbitrum markets from the moved singleton",
+    );
+
+    assert.ok(zapTokens[0]?.quote, "expected contextual zap token quote closure");
+    await zapTokens[0].quote!(
+        MONAD_TEST_TOKEN,
+        MONAD_TEST_OUTPUT_TOKEN,
+        Decimal(1),
+        Decimal(0.01),
+    );
+
+    assert.deepEqual(quoteCalls, [{
+        amount: 1_000_000_000_000_000_000n,
+        feeBps: CURVANCE_FEE_BPS,
+        feeReceiver: BOOT_DAO_FEE_RECEIVER,
+    }]);
+});
+
+test("setupChain propagates result context through composed DEX aggregators after singleton moves", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const originalMonadDexAgg = chain_config["monad-mainnet"].dexAgg;
+    const contextBindings: Array<{ label: string; chain: string; markets: string[] }> = [];
+    const availableTokenCalls: Array<{ label: string; chain: string; account: string | null | undefined }> = [];
+    const quoteCalls: Array<{
+        label: string;
+        chain: string;
+        tokenIn: string;
+        tokenOut: string;
+        amount: bigint;
+        feeBps: bigint | undefined;
+        feeReceiver: string | undefined;
+    }> = [];
+
+    function createContextualAgg(label: string, tokenAddress: address, minOut: bigint) {
+        const unbound = {
+            dao: BOOT_DAO_FEE_RECEIVER,
+            router: tokenAddress,
+            withContext(context: any) {
+                const chain = context.markets[0]?.setup?.chain ?? "unknown";
+                const markets = context.markets.map((market: any) => market.symbol);
+                contextBindings.push({ label, chain, markets });
+
+                return {
+                    dao: BOOT_DAO_FEE_RECEIVER,
+                    router: tokenAddress,
+                    getAvailableTokens: async (_provider: any, _query: string | null, account: address | null = null) => {
+                        availableTokenCalls.push({ label, chain, account });
+                        return [{
+                            interface: { address: tokenAddress, symbol: label },
+                            type: "simple",
+                        }];
+                    },
+                    quoteAction: async () => {
+                        throw new Error("quoteAction is not used by this test");
+                    },
+                    quoteMin: async () => minOut,
+                    quote: async (
+                        _wallet: string,
+                        tokenIn: string,
+                        tokenOut: string,
+                        amount: bigint,
+                        _slippage: bigint,
+                        feeBps?: bigint,
+                        feeReceiver?: address,
+                    ) => {
+                        quoteCalls.push({ label, chain, tokenIn, tokenOut, amount, feeBps, feeReceiver });
+                        return {
+                            to: tokenAddress,
+                            calldata: "0x" as bytes,
+                            min_out: minOut,
+                            out: minOut + 1n,
+                        };
+                    },
+                };
+            },
+            getAvailableTokens: async () => {
+                throw new Error(`${label} aggregator was used before setup context binding`);
+            },
+            quoteAction: async () => {
+                throw new Error(`${label} aggregator was used before setup context binding`);
+            },
+            quoteMin: async () => {
+                throw new Error(`${label} aggregator was used before setup context binding`);
+            },
+            quote: async () => {
+                throw new Error(`${label} aggregator was used before setup context binding`);
+            },
+        };
+
+        return unbound;
+    }
+
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async (_reader, _oracleManager, _provider, _signer, _account, _milestones, _incentives, setup) => {
+        const market = setup!.chain === "monad-mainnet"
+            ? createZapMarket("Monad Context Market", "MONCTX", MONAD_TEST_TOKEN)
+            : createZapMarket("Arbitrum Context Market", "ARBCTX", ARB_TEST_TOKEN);
+        market.setup = setup as any;
+        return [market] as any;
+    }) as typeof Market.getAll;
+    (chain_config["monad-mainnet"] as any).dexAgg = new MultiDexAgg([
+        createContextualAgg("primary", MONAD_TEST_TOKEN, 90n) as any,
+        createContextualAgg("secondary", MONAD_TEST_OUTPUT_TOKEN, 120n) as any,
+    ]);
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+        (chain_config["monad-mainnet"] as any).dexAgg = originalMonadDexAgg;
+    });
+
+    const monadResult = await setupChain("monad-mainnet", null, "https://api.monad-multidex.example");
+    const arbResult = await setupChain("arb-sepolia", null, "https://api.arb-after-multidex.example");
+
+    assert.equal(setup_config.chain, "arb-sepolia");
+    assert.equal(all_markets[0], arbResult.markets[0]);
+    assert.deepEqual(contextBindings, [
+        { label: "primary", chain: "monad-mainnet", markets: ["MONCTX"] },
+        { label: "secondary", chain: "monad-mainnet", markets: ["MONCTX"] },
+    ]);
+
+    const availableTokens = await monadResult.dexAgg.getAvailableTokens(
+        createDecimalsProvider() as any,
+        null,
+        MONAD_ACCOUNT,
+    );
+    assert.deepEqual(
+        availableTokens.map((token) => token.interface.address),
+        [MONAD_TEST_TOKEN, MONAD_TEST_OUTPUT_TOKEN],
+    );
+
+    const quote = await monadResult.dexAgg.quote(
+        MONAD_ACCOUNT,
+        MONAD_TEST_TOKEN,
+        MONAD_TEST_OUTPUT_TOKEN,
+        1_000n,
+        50n,
+        CURVANCE_FEE_BPS,
+        BOOT_DAO_FEE_RECEIVER,
+    );
+
+    assert.equal(quote.to, MONAD_TEST_OUTPUT_TOKEN);
+    assert.equal(quote.min_out, 120n);
+    assert.deepEqual(availableTokenCalls, [
+        { label: "primary", chain: "monad-mainnet", account: MONAD_ACCOUNT },
+        { label: "secondary", chain: "monad-mainnet", account: MONAD_ACCOUNT },
+    ]);
+    assert.deepEqual(quoteCalls, [
+        {
+            label: "primary",
+            chain: "monad-mainnet",
+            tokenIn: MONAD_TEST_TOKEN,
+            tokenOut: MONAD_TEST_OUTPUT_TOKEN,
+            amount: 1_000n,
+            feeBps: CURVANCE_FEE_BPS,
+            feeReceiver: BOOT_DAO_FEE_RECEIVER,
+        },
+        {
+            label: "secondary",
+            chain: "monad-mainnet",
+            tokenIn: MONAD_TEST_TOKEN,
+            tokenOut: MONAD_TEST_OUTPUT_TOKEN,
+            amount: 1_000n,
+            feeBps: CURVANCE_FEE_BPS,
+            feeReceiver: BOOT_DAO_FEE_RECEIVER,
+        },
+    ]);
 });
 
 test("setupChain publishes the newest successful invocation after newer pending setups fail", async (t) => {
@@ -280,32 +3129,90 @@ test("setupChain supports user-specific public reads without a signer", async (t
     assert.equal(captured.provider, setup_config.readProvider);
 });
 
-test("setupChain defaults Monad mainnet to the live Curvance fee policy", async (t) => {
+test("setupChain defaults every chain to the setup-resolved Curvance fee policy", async (t) => {
     const originalGetRewards = Api.getRewards;
     const originalGetAll = Market.getAll;
+    const previousGetDaoAddress = ProtocolReader.prototype.getDaoAddress;
+    const chainDaos: Array<[typeof setup_config.chain, address]> = [
+        ["monad-mainnet", BOOT_DAO_FEE_RECEIVER],
+        ["arb-sepolia", "0x0000000000000000000000000000000000000aB1" as address],
+    ];
+    let currentDao: address = BOOT_DAO_FEE_RECEIVER;
+    let daoLookups = 0;
 
     Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
     Market.getAll = (async () => [] as any) as typeof Market.getAll;
+    ProtocolReader.prototype.getDaoAddress = async () => {
+        daoLookups += 1;
+        return currentDao;
+    };
 
     t.after(() => {
         Api.getRewards = originalGetRewards;
         Market.getAll = originalGetAll;
+        ProtocolReader.prototype.getDaoAddress = previousGetDaoAddress;
     });
 
-    await setupChain("monad-mainnet", null, "https://api.example");
+    for (const [chain, dao] of chainDaos) {
+        currentDao = dao;
+        await setupChain(chain, null, "https://api.example");
 
-    assert.equal(
-        setup_config.feePolicy.getFeeBps({
-            operation: "zap",
-            inputToken: "0x0000000000000000000000000000000000000001" as any,
-            outputToken: "0x0000000000000000000000000000000000000002" as any,
-            inputAmount: 1n,
-            currentLeverage: null,
-            targetLeverage: null,
-        }),
-        CURVANCE_FEE_BPS,
+        assert.equal(setup_config.feePolicy.chain, chain);
+        assert.equal(
+            setup_config.feePolicy.getFeeBps({
+                operation: "zap",
+                inputToken: "0x0000000000000000000000000000000000000001" as any,
+                outputToken: "0x0000000000000000000000000000000000000002" as any,
+                inputAmount: 1n,
+                currentLeverage: null,
+                targetLeverage: null,
+            }),
+            CURVANCE_FEE_BPS,
+        );
+        assert.equal(setup_config.feePolicy.feeReceiver, dao);
+    }
+    assert.equal(daoLookups, chainDaos.length);
+});
+
+test("setupChain does not query the DAO address when an explicit fee policy is provided", async (t) => {
+    const originalGetRewards = Api.getRewards;
+    const originalGetAll = Market.getAll;
+    const previousGetDaoAddress = ProtocolReader.prototype.getDaoAddress;
+    const explicitPolicy = flatFeePolicy({
+        bps: CURVANCE_FEE_BPS,
+        feeReceiver: BOOT_DAO_FEE_RECEIVER,
+        chain: "monad-mainnet",
+    });
+
+    Api.getRewards = (async () => ({ milestones: {}, incentives: {} })) as typeof Api.getRewards;
+    Market.getAll = (async () => [] as any) as typeof Market.getAll;
+    ProtocolReader.prototype.getDaoAddress = async () => {
+        throw new Error("explicit fee policy should not resolve DAO address");
+    };
+
+    t.after(() => {
+        Api.getRewards = originalGetRewards;
+        Market.getAll = originalGetAll;
+        ProtocolReader.prototype.getDaoAddress = previousGetDaoAddress;
+    });
+
+    await setupChain("monad-mainnet", null, "https://api.example", { feePolicy: explicitPolicy });
+
+    assert.equal(setup_config.feePolicy, explicitPolicy);
+    assert.equal(setup_config.feePolicy.feeReceiver, BOOT_DAO_FEE_RECEIVER);
+});
+
+test("setupChain rejects known chain-bound fee policies for the wrong chain", async () => {
+    const monadPolicy = flatFeePolicy({
+        bps: CURVANCE_FEE_BPS,
+        feeReceiver: BOOT_DAO_FEE_RECEIVER,
+        chain: "monad-mainnet",
+    });
+
+    await assert.rejects(
+        () => setupChain("arb-sepolia", null, "https://api.example", { feePolicy: monadPolicy }),
+        /Fee policy for monad-mainnet cannot be used with setupChain\('arb-sepolia'\)\./,
     );
-    assert.equal(setup_config.feePolicy.feeReceiver, CURVANCE_DAO_FEE_RECEIVER);
 });
 
 test("setupChain wraps explicit read-provider overrides with chain fallbacks", async (t) => {

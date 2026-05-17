@@ -97,7 +97,7 @@ export type MerklOpportunity = {
 
 type FetchRewardsParams = FetchOptions & {
     wallet: string;
-    chainId: number;
+    chainId?: number;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -481,7 +481,15 @@ export function filterMerklUserRewardsByChain(
         return rewards;
     }
 
-    return rewards.filter(({ chain }) => chain.id === chainId);
+    return rewards
+        .filter(({ chain }) => chain.id === chainId)
+        .map((row) => ({
+            ...row,
+            rewards: row.rewards.filter((reward) => (
+                reward.distributionChainId === chainId &&
+                reward.token.chainId === chainId
+            )),
+        }));
 }
 
 export async function fetchMerklUserRewards({
@@ -489,7 +497,10 @@ export async function fetchMerklUserRewards({
     chainId,
     signal,
 }: FetchRewardsParams): Promise<MerklUserRewardsResponse> {
-    const url = new URL(`${MERKL_API_BASE_URL}/users/${wallet}/rewards?chainId=${chainId}`);
+    const url = new URL(`${MERKL_API_BASE_URL}/users/${wallet}/rewards`);
+    if (chainId != undefined) {
+        url.searchParams.set('chainId', String(chainId));
+    }
 
     const response = await fetchWithTimeout(url.toString(), { signal: signal ?? null, cache: 'no-store' });
 
@@ -505,14 +516,32 @@ export async function fetchMerklUserRewards({
 
 type FetchCampaignsParams = FetchOptions & {
     tokenSymbol: string;
+    chainId?: number;
 };
+
+function campaignMatchesChain(campaign: MerklCampaign, chainId: number): boolean {
+    const chainIds = [
+        campaign.chain.id,
+        campaign.computeChainId,
+        campaign.distributionChainId,
+        campaign.distributionChain?.id,
+        campaign.rewardToken.chainId,
+    ].filter((value): value is number => value != undefined);
+
+    return chainIds.length > 0 && chainIds.every((value) => value === chainId);
+}
 
 export async function fetchMerklCampaignsBySymbol({
     tokenSymbol,
+    chainId,
     signal,
 }: FetchCampaignsParams): Promise<MerklCampaign[]> {
     const url = new URL(`${MERKL_API_BASE_URL}/campaigns`);
+    url.searchParams.set('mainProtocolId', PROTOCOL_ID);
     url.searchParams.set('tokenSymbol', tokenSymbol);
+    if (chainId != undefined) {
+        url.searchParams.set('chainId', String(chainId));
+    }
 
     const response = await fetchWithTimeout(url.toString(), { signal: signal ?? null, cache: 'no-store' });
 
@@ -520,7 +549,10 @@ export async function fetchMerklCampaignsBySymbol({
         throw new Error('Failed to fetch Merkl campaigns');
     }
 
-    return normalizeMerklCampaigns(await response.json());
+    const campaigns = normalizeMerklCampaigns(await response.json());
+    return chainId == undefined
+        ? campaigns
+        : campaigns.filter((campaign) => campaignMatchesChain(campaign, chainId));
 }
 
 type FetchOpportunitiesParams = FetchOptions & {

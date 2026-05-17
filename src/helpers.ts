@@ -2,6 +2,7 @@ import { Contract, parseUnits } from "ethers";
 import { Decimal } from "decimal.js";
 import { address, bytes, curvance_provider, curvance_read_provider, curvance_signer, Percentage } from "./types";
 import { chains } from "./contracts";
+import { cloneJson } from "./immutability";
 import FormatConverter from "./classes/FormatConverter";
 
 // Set Decimal.js precision to handle large numbers
@@ -11,6 +12,7 @@ export type ChangeRate = "year" | "month" | "week" | "day";
 export type ChainRpcPrefix = keyof typeof chains;
 
 export const BPS = 10_000n;
+export const BPS_DECIMAL = new Decimal(BPS.toString());
 export const BPS_SQUARED = BPS * BPS;
 export const WAD = 10n ** 18n;
 export const WAD_BPS = WAD * BPS;
@@ -25,7 +27,7 @@ export const SECONDS_PER_WEEK = 604_800n; // 7 days
 export const SECONDS_PER_DAY = 86_400n // 1 day
 
 export const DEFAULT_SLIPPAGE_BPS = 100n; // 1%
-const MAX_SWAP_SLIPPAGE_BPS = 9999n;
+const MAX_SWAP_SLIPPAGE_BPS = BPS - 1n;
 
 export const UINT256_MAX = 115792089237316195423570985008687907853269984665640564039457584007913129639935n;
 export const UINT256_MAX_DECIMAL = Decimal(UINT256_MAX);
@@ -256,7 +258,7 @@ export function getContractAddresses(chain: ChainRpcPrefix) {
         throw new Error(`No configuration found for chain ${chain}`);
     }
 
-    return config;
+    return cloneJson(config);
 }
 
 /**

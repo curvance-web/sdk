@@ -12,7 +12,7 @@ import { chain_config } from "../src/chains";
 import { safeBigInt, validateSlippageBps } from "../src/validation";
 import * as sdk from "../src";
 import type { address, bytes } from "../src/types";
-import type { IDexAgg, Quote, QuoteArgs, SetupChainResult } from "../src";
+import type { IDexAgg, MilestoneResponse, Quote, QuoteArgs, SetupChainResult } from "../src";
 
 // ─── Fee-aware slippage expansion ───────────────────────────────────────────
 //
@@ -63,6 +63,25 @@ test("public SDK surface exports DEX aggregator types", () => {
     assert.equal(typeof sdk.KyberSwap, "function");
     assert.equal(typeof sdk.MultiDexAgg, "function");
     assert.equal("Kuru" in sdk, false);
+});
+
+test("public SDK surface exports setup reward result types", () => {
+    const milestone: MilestoneResponse = {
+        market: TOKEN_IN,
+        tvl: 1,
+        multiplier: 2,
+        fail_multiplier: 0,
+        chain_network: "monad-mainnet",
+        start_date: "2026-01-01",
+        end_date: "2026-01-02",
+        duration_in_days: 1,
+    };
+    const extractGlobalMilestone = (result: SetupChainResult): MilestoneResponse | null =>
+        result.global_milestone;
+
+    assert.equal(typeof sdk.Api, "function");
+    assert.equal(typeof extractGlobalMilestone, "function");
+    assert.equal(milestone.multiplier, 2);
 });
 
 function stubKyberSwapQuote(kyber: KyberSwap) {
@@ -168,7 +187,12 @@ function jsonResponse(body: unknown, ok = true): any {
     };
 }
 
-async function withMockedKyberFetch<T>(kyber: KyberSwap, calldata: bytes, run: () => Promise<T>): Promise<T> {
+async function withMockedKyberFetch<T>(
+    kyber: KyberSwap,
+    calldata: bytes,
+    run: () => Promise<T>,
+    buildDataOverrides: Record<string, unknown> = {},
+): Promise<T> {
     const originalFetch = globalThis.fetch;
     let calls = 0;
 
@@ -218,6 +242,7 @@ async function withMockedKyberFetch<T>(kyber: KyberSwap, calldata: bytes, run: (
                 data: calldata,
                 routerAddress: kyber.router,
                 transactionValue: "0",
+                ...buildDataOverrides,
             },
             requestId: "build",
         });
@@ -306,6 +331,63 @@ test("chain configs keep Monad on KyberSwap and fail closed on Arbitrum Sepolia 
     );
 });
 
+test("KyberSwap rejects insecure custom API bases at construction", () => {
+    assert.throws(
+        () => new KyberSwap(FEE_RECEIVER, TOKEN_IN, "monad-mainnet", "http://aggregator.example"),
+        /api_url must use HTTPS/i,
+    );
+});
+
+test("KyberSwap normalizes trailing slashes in custom API bases", () => {
+    const kyber = new KyberSwap(
+        FEE_RECEIVER,
+        TOKEN_IN,
+        "monad-mainnet",
+        "https://aggregator.example/",
+    );
+
+    assert.equal(kyber.api, "https://aggregator.example/monad");
+});
+
+test("MultiDexAgg rejects invalid routing config before quote fan-out", () => {
+    const agg = {
+        dao: FEE_RECEIVER,
+        router: TOKEN_IN,
+        getAvailableTokens: async () => [],
+        quoteAction: async () => {
+            throw new Error("not used");
+        },
+        quoteMin: async () => 1n,
+        quote: async () => ({
+            to: TOKEN_IN,
+            calldata: "0x" as bytes,
+            min_out: 1n,
+            out: 1n,
+        }),
+    } as any;
+
+    assert.doesNotThrow(() => new MultiDexAgg([agg], {
+        outlierThresholdPercent: 0,
+        quoteTimeoutMs: 1,
+    }));
+    assert.throws(
+        () => new MultiDexAgg([agg], { outlierThresholdPercent: 20.5 }),
+        /outlierThresholdPercent must be a non-negative integer/i,
+    );
+    assert.throws(
+        () => new MultiDexAgg([agg], { outlierThresholdPercent: -1 }),
+        /outlierThresholdPercent must be a non-negative integer/i,
+    );
+    assert.throws(
+        () => new MultiDexAgg([agg], { quoteTimeoutMs: 0 }),
+        /quoteTimeoutMs must be a positive integer/i,
+    );
+    assert.throws(
+        () => new MultiDexAgg([agg], { quoteTimeoutMs: 10.5 }),
+        /quoteTimeoutMs must be a positive integer/i,
+    );
+});
+
 test("KyberSwap.quoteAction rejects effective swap slippage at the contract ceiling before quote", async () => {
     const kyber = new KyberSwap(FEE_RECEIVER);
     (kyber as any).quote = async () => {
@@ -367,6 +449,34 @@ test("KyberSwap.quote validates current router fee calldata without warning", as
     } finally {
         console.warn = originalWarn;
     }
+});
+
+test("KyberSwap.quote rejects nonzero transaction value before returning calldata", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+
+    await assert.rejects(
+        () => withMockedKyberFetch(
+            kyber,
+            encodeKyberSwapCalldata({ feeBps: 4n, feeReceiver: FEE_RECEIVER }),
+            () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+            { transactionValue: "1" },
+        ),
+        /KyberSwap quote transactionValue=1, expected 0/,
+    );
+});
+
+test("KyberSwap.quote rejects malformed transaction value before returning calldata", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+
+    await assert.rejects(
+        () => withMockedKyberFetch(
+            kyber,
+            encodeKyberSwapCalldata({ feeBps: 4n, feeReceiver: FEE_RECEIVER }),
+            () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+            { transactionValue: "not-a-number" },
+        ),
+        /Invalid unsigned numeric value from KyberSwap transactionValue: "not-a-number"/,
+    );
 });
 
 test("KyberSwap.quote accepts currency_in fee-net source amounts", async () => {
@@ -629,6 +739,194 @@ test("validation rejects negative unsigned API integers and 10000 BPS swap slipp
         () => validateSlippageBps(10_000n, "test swap"),
         /Slippage out of range \(0-9999 BPS\) in test swap: 10000/,
     );
+});
+
+test("MultiDexAgg.withContext binds every child adapter without mutating the original", async () => {
+    const contextBindings: Array<{ label: string; chain: string }> = [];
+    const quoteCalls: Array<{ label: string; chain: string; amount: bigint; feeBps: bigint | undefined }> = [];
+
+    function contextAwareAgg(label: string, minOut: bigint, token: address) {
+        return {
+            dao: FEE_RECEIVER,
+            router: token,
+            withContext(context: any) {
+                const chain = context.markets[0]?.setup?.chain ?? "unknown";
+                contextBindings.push({ label, chain });
+
+                return {
+                    dao: FEE_RECEIVER,
+                    router: token,
+                    getAvailableTokens: async () => [{
+                        interface: { address: token, symbol: label },
+                        type: "simple",
+                    }],
+                    quoteAction: async () => {
+                        throw new Error("quoteAction is not used by this test");
+                    },
+                    quoteMin: async () => minOut,
+                    quote: async (
+                        _wallet: string,
+                        _tokenIn: string,
+                        _tokenOut: string,
+                        amount: bigint,
+                        _slippage: bigint,
+                        feeBps?: bigint,
+                    ) => {
+                        quoteCalls.push({ label, chain, amount, feeBps });
+                        return {
+                            to: token,
+                            calldata: "0x" as bytes,
+                            min_out: minOut,
+                            out: minOut + 1n,
+                        };
+                    },
+                };
+            },
+            getAvailableTokens: async () => {
+                throw new Error(`${label} used without context`);
+            },
+            quoteAction: async () => {
+                throw new Error(`${label} used without context`);
+            },
+            quoteMin: async () => {
+                throw new Error(`${label} used without context`);
+            },
+            quote: async () => {
+                throw new Error(`${label} used without context`);
+            },
+        };
+    }
+
+    const original = new MultiDexAgg([
+        contextAwareAgg("primary", 90n, TOKEN_IN) as any,
+        contextAwareAgg("secondary", 120n, TOKEN_OUT) as any,
+    ]);
+    const bound = original.withContext({
+        markets: [{ setup: { chain: "monad-mainnet" } }],
+        feePolicy: { getFeeBps: () => 4n, feeReceiver: FEE_RECEIVER, chain: "monad-mainnet" },
+    } as any);
+
+    const tokens = await bound.getAvailableTokens({} as any, null, WALLET);
+    const quote = await bound.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER);
+
+    assert.deepEqual(contextBindings, [
+        { label: "primary", chain: "monad-mainnet" },
+        { label: "secondary", chain: "monad-mainnet" },
+    ]);
+    assert.deepEqual(tokens.map((token) => token.interface.address), [TOKEN_IN, TOKEN_OUT]);
+    assert.equal(quote.to, TOKEN_OUT);
+    assert.equal(quote.min_out, 120n);
+    assert.deepEqual(quoteCalls, [
+        { label: "primary", chain: "monad-mainnet", amount: 1_000n, feeBps: 4n },
+        { label: "secondary", chain: "monad-mainnet", amount: 1_000n, feeBps: 4n },
+    ]);
+    await assert.rejects(
+        () => original.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n),
+        /used without context/,
+    );
+});
+
+test("KyberSwap.withContext binds the setup fee receiver without mutating the original", () => {
+    const originalReceiver = "0x00000000000000000000000000000000000000d1" as address;
+    const setupReceiver = "0x00000000000000000000000000000000000000d2" as address;
+    const original = new KyberSwap(originalReceiver);
+    const bound = original.withContext({
+        markets: [],
+        feePolicy: { getFeeBps: () => 4n, feeReceiver: setupReceiver, chain: "monad-mainnet" },
+    } as any);
+
+    assert.equal(original.dao, originalReceiver);
+    assert.equal(bound.dao, setupReceiver);
+});
+
+test("MultiDexAgg exposes the first executable child router for route advertisement", () => {
+    const unsupported = {
+        dao: ZERO_ADDRESS,
+        router: ZERO_ADDRESS,
+        getAvailableTokens: async () => [],
+        quoteAction: async () => {
+            throw new Error("unsupported");
+        },
+        quoteMin: async () => {
+            throw new Error("unsupported");
+        },
+        quote: async () => {
+            throw new Error("unsupported");
+        },
+    } as any;
+    const executable = {
+        dao: FEE_RECEIVER,
+        router: TOKEN_OUT,
+        getAvailableTokens: async () => [],
+        quoteAction: async () => {
+            throw new Error("not used");
+        },
+        quoteMin: async () => 1n,
+        quote: async () => ({
+            to: TOKEN_OUT,
+            calldata: "0x" as bytes,
+            min_out: 1n,
+            out: 2n,
+        }),
+    } as any;
+
+    const multi = new MultiDexAgg([unsupported, executable]);
+
+    assert.equal(multi.router, TOKEN_OUT);
+    assert.equal(multi.dao, FEE_RECEIVER);
+});
+
+test("MultiDexAgg preserves quoteable duplicate token options across children", async () => {
+    const unquoteable = {
+        dao: FEE_RECEIVER,
+        router: TOKEN_IN,
+        getAvailableTokens: async () => [{
+            interface: { address: TOKEN_IN, symbol: "DUP" },
+            type: "simple",
+        }],
+        quoteAction: async () => {
+            throw new Error("quoteAction is not used by this test");
+        },
+        quoteMin: async () => 1n,
+        quote: async () => ({
+            to: TOKEN_IN,
+            calldata: "0x" as bytes,
+            min_out: 1n,
+            out: 2n,
+        }),
+    };
+    const quoteable = {
+        dao: FEE_RECEIVER,
+        router: TOKEN_OUT,
+        getAvailableTokens: async () => [{
+            interface: { address: TOKEN_IN, symbol: "DUP" },
+            type: "simple",
+            quote: async () => ({
+                minOut_raw: 11n,
+                output_raw: 12n,
+                minOut: Decimal(11),
+                output: Decimal(12),
+            }),
+        }],
+        quoteAction: async () => {
+            throw new Error("quoteAction is not used by this test");
+        },
+        quoteMin: async () => 2n,
+        quote: async () => ({
+            to: TOKEN_OUT,
+            calldata: "0x" as bytes,
+            min_out: 2n,
+            out: 3n,
+        }),
+    };
+
+    const tokens = await new MultiDexAgg([unquoteable as any, quoteable as any])
+        .getAvailableTokens({} as any, null, WALLET);
+
+    assert.equal(tokens.length, 1);
+    assert.equal(tokens[0]?.interface.address, TOKEN_IN);
+    assert.equal(typeof tokens[0]?.quote, "function");
+    assert.equal((await tokens[0]!.quote!(TOKEN_IN, TOKEN_OUT, Decimal(1), Decimal("0.01"))).minOut_raw, 11n);
 });
 
 test("MultiDexAgg.quoteMin picks the route with the highest guaranteed output", async () => {
@@ -963,4 +1261,42 @@ test("simple zap quote closure passes fee policy output into the quote path", as
         feeBps: 4n,
         feeReceiver,
     }]);
+});
+
+test("simple zap token search does not let a nonmatching duplicate hide a later matching alias", () => {
+    const zapTokens = buildLocalSimpleZapTokens(
+        [
+            {
+                tokens: [
+                    {
+                        name: "Wrapped Monad",
+                        symbol: "WMON",
+                        getAsset: () => ({ address: MONAD_WMON, symbol: "WMON" }),
+                    },
+                ],
+            },
+            {
+                tokens: [
+                    {
+                        name: "Liquid Staked Monad",
+                        symbol: "shMON",
+                        getAsset: () => ({ address: MONAD_WMON, symbol: "shMON" }),
+                    },
+                ],
+            },
+        ] as any,
+        {} as any,
+        "staked",
+        WALLET,
+        async () => ({
+            to: TOKEN_OUT,
+            calldata: "0x" as bytes,
+            min_out: 1n,
+            out: 2n,
+        }),
+    );
+
+    assert.equal(zapTokens.length, 1);
+    assert.equal(zapTokens[0]?.interface.address, MONAD_WMON);
+    assert.equal(zapTokens[0]?.interface.symbol, "shMON");
 });

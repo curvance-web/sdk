@@ -3,6 +3,7 @@ import { BorrowableCToken } from "../classes/BorrowableCToken";
 import { all_markets, setup_config } from "../setup";
 import { address } from "../types";
 import { Decimal } from "decimal.js";
+import { chain_config } from "../chains";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -23,6 +24,8 @@ export interface PositionSnapshot {
 }
 
 export interface MarketSnapshot {
+    chain: string;
+    chainId: number;
     marketAddress: string;
     marketName: string;
     totalDepositsUSD: string;
@@ -50,6 +53,7 @@ export interface PortfolioSnapshotOptions {
     refresh?: boolean;
     markets?: Market[];
     chain?: string;
+    allowMixedChains?: boolean;
 }
 
 function inferSnapshotChain(markets: Market[]): string {
@@ -59,6 +63,42 @@ function inferSnapshotChain(markets: Market[]): string {
 
     const chains = new Set(markets.map((market) => market.setup.chain));
     return chains.size === 1 ? markets[0]!.setup.chain : "multi";
+}
+
+function resolvePortfolioSnapshotChain(markets: Market[], requestedChain?: string): string {
+    const inferredChain = inferSnapshotChain(markets);
+    if (requestedChain == undefined) {
+        return inferredChain;
+    }
+
+    if (markets.length === 0 || requestedChain === inferredChain) {
+        return requestedChain;
+    }
+
+    throw new Error(
+        `takePortfolioSnapshot received chain='${requestedChain}' but market provenance resolves to '${inferredChain}'.`,
+    );
+}
+
+function getMarketChainId(market: Market): number {
+    const chainId = chain_config[market.setup.chain]?.chainId;
+    if (chainId == undefined) {
+        throw new Error(`Cannot snapshot market ${market.address}: unknown chain ${market.setup.chain}.`);
+    }
+
+    return chainId;
+}
+
+function assertMixedChainSnapshotAllowed(markets: Market[], allowMixedChains?: boolean) {
+    const chains = new Set(markets.map((market) => market.setup.chain));
+    if (chains.size <= 1 || allowMixedChains === true) {
+        return;
+    }
+
+    throw new Error(
+        `takePortfolioSnapshot received markets from multiple chains (${[...chains].join(", ")}). ` +
+        `Pass { allowMixedChains: true } to opt into mixed-chain output with per-market provenance.`,
+    );
 }
 
 function groupMarketsByReaderDeployment(markets: Market[]) {
@@ -75,6 +115,23 @@ function groupMarketsByReaderDeployment(markets: Market[]) {
     }
 
     return groups.values();
+}
+
+function buildSnapshotMarketRowIndex<T extends { address: address }>(
+    rows: T[],
+    label: string,
+): Map<string, T> {
+    const index = new Map<string, T>();
+
+    for (const row of rows) {
+        const key = row.address.toLowerCase();
+        if (index.has(key)) {
+            throw new Error(`Duplicate ${label} market data for ${row.address} during snapshot refresh.`);
+        }
+        index.set(key, row);
+    }
+
+    return index;
 }
 
 function assertSnapshotCompatibleMarket(market: Market) {
@@ -140,6 +197,8 @@ export function snapshotMarket(market: Market): MarketSnapshot {
     const health = market.positionHealth;
 
     return {
+        chain: market.setup.chain,
+        chainId: getMarketChainId(market),
         marketAddress: market.address,
         marketName: market.name,
         totalDepositsUSD: decimalSnapshot(market.userDeposits),
@@ -164,6 +223,7 @@ export async function takePortfolioSnapshot(
     options: PortfolioSnapshotOptions = {},
 ): Promise<PortfolioSnapshot> {
     const markets = options.markets ?? all_markets;
+    assertMixedChainSnapshotAllowed(markets, options.allowMixedChains);
 
     if (options.refresh && markets.length > 0) {
         for (const market of markets) {
@@ -178,8 +238,8 @@ export async function takePortfolioSnapshot(
 
         for (const { reader, markets: groupedMarkets } of groupMarketsByReaderDeployment(markets)) {
             const { dynamicMarket, userData } = await reader.getAllDynamicState(account);
-            const dynamicByAddress = new Map(dynamicMarket.map((market) => [market.address.toLowerCase(), market]));
-            const userByAddress = new Map(userData.markets.map((market) => [market.address.toLowerCase(), market]));
+            const dynamicByAddress = buildSnapshotMarketRowIndex(dynamicMarket, "dynamic");
+            const userByAddress = buildSnapshotMarketRowIndex(userData.markets, "user");
 
             for (const market of groupedMarkets) {
                 const dynamic = dynamicByAddress.get(market.address.toLowerCase());
@@ -229,7 +289,7 @@ export async function takePortfolioSnapshot(
 
     return {
         account,
-        chain: options.chain ?? inferSnapshotChain(markets),
+        chain: resolvePortfolioSnapshotChain(markets, options.chain),
         timestamp: Date.now(),
         totalDepositsUSD: decimalSnapshot(totalDepositsUSD),
         totalDebtUSD: decimalSnapshot(totalDebtUSD),

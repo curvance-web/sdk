@@ -1,6 +1,6 @@
 import Decimal from "decimal.js";
 import { address } from "./types";
-import { ChainRpcPrefix } from "./helpers";
+import { BPS, ChainRpcPrefix, EMPTY_ADDRESS, NATIVE_ADDRESS as SDK_NATIVE_ADDRESS } from "./helpers";
 import { chain_config } from "./chains";
 
 /**
@@ -57,14 +57,12 @@ import { chain_config } from "./chains";
  *   would let the protocol, integrators, and a referral program co-receive
  *   fees in one swap call.
  *
- * - **Dynamic DAO address from chain.** `CURVANCE_DAO_FEE_RECEIVER` is
- *   hardcoded. The on-chain KyberSwapChecker validates against
- *   `centralRegistry.daoAddress()` dynamically. If DAO permissions transfer
- *   via `transferDaoPermissions()`, the checker validates against the new
- *   address but the SDK still sends the old one — every swap reverts.
- *   Fix: read `daoAddress` at setupChain time via
- *   `protocolReader.centralRegistry()` → `centralRegistry.daoAddress()`,
- *   store in setup_config, and use at runtime instead of the constant.
+ * - **Dynamic DAO address from chain.** The on-chain KyberSwapChecker
+ *   validates fee receivers against `centralRegistry.daoAddress()`
+ *   dynamically. `setupChain()` resolves that DAO address once through
+ *   ProtocolReader/CentralRegistry and builds the default fee policy with the
+ *   setup-resolved receiver, so quote paths do not need per-swap registry
+ *   reads.
  *
  * - **Per-user fee tiers / discounts.** The current policy is global (one
  *   policy per setupChain). To support staker discounts, volume tiers, or
@@ -110,6 +108,9 @@ export interface FeePolicyContext {
 }
 
 export interface FeePolicy {
+    /** Chain this policy was constructed for. Omit only for custom legacy policies;
+     *  use "any" for chain-agnostic no-op policies. */
+    chain?: ChainRpcPrefix | "any";
     /** Returns the fee in BPS for this operation. Return 0n for no fee. */
     getFeeBps(ctx: FeePolicyContext): bigint;
     /** Address that receives the fee. KyberSwap supports comma-separated
@@ -122,14 +123,6 @@ export interface FeePolicy {
  *  diverge, every swap reverts (checker enforces exact match).
  *  To change the fee: update this constant AND redeploy the checker. */
 export const CURVANCE_FEE_BPS = 4n;
-
-/** Curvance DAO fee receiver — same wallet used for protocol interest fees
- *  and current aggregator routing fees.  Must match
- *  centralRegistry.daoAddress() — the on-chain checker validates
- *  dynamically per-swap.  If DAO permissions transfer on-chain without
- *  updating this constant, every swap reverts. */
-export const CURVANCE_DAO_FEE_RECEIVER: address =
-    '0x0Acb7eF4D8733C719d60e0992B489b629bc55C02';
 
 /** Token classification used by the optional category-tier override.
  *  Consumers provide their own classifier — the SDK does not currently
@@ -155,7 +148,7 @@ export interface FlatFeePolicyConfig {
     classify?: (token: address) => TokenClass | null;
 }
 
-const NATIVE_ADDRESS = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+const NATIVE_ADDRESS_LOWER = SDK_NATIVE_ADDRESS.toLowerCase();
 
 /**
  * Default fee policy: flat BPS for all operations, with no-op exemptions for
@@ -164,9 +157,10 @@ const NATIVE_ADDRESS = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
  *
  * @example
  *   // Simple flat 4 bps everywhere except no-ops:
+ *   const feeReceiver = await reader.getDaoAddress();
  *   flatFeePolicy({
  *       bps: 4n,
- *       feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+ *       feeReceiver,
  *       chain: 'monad-mainnet',
  *   })
  *
@@ -176,7 +170,7 @@ const NATIVE_ADDRESS = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
  *   flatFeePolicy({
  *       bps: 4n,
  *       stableToStableBps: 1n,
- *       feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+ *       feeReceiver,
  *       chain: 'monad-mainnet',
  *       classify: (addr) => STABLES.has(addr.toLowerCase()) ? 'stable' : 'volatile',
  *   })
@@ -187,11 +181,11 @@ export function flatFeePolicy(config: FlatFeePolicyConfig): FeePolicy {
     if (bps < 0n) {
         throw new Error(`flatFeePolicy: bps must be non-negative, got ${bps}`);
     }
-    if (bps >= 10000n) {
+    if (bps >= BPS) {
         throw new Error(`flatFeePolicy: bps must be < 10000 (100%), got ${bps}`);
     }
     if (stableToStableBps !== undefined) {
-        if (stableToStableBps < 0n || stableToStableBps >= 10000n) {
+        if (stableToStableBps < 0n || stableToStableBps >= BPS) {
             throw new Error(`flatFeePolicy: stableToStableBps must be in [0, 10000), got ${stableToStableBps}`);
         }
     }
@@ -206,6 +200,7 @@ export function flatFeePolicy(config: FlatFeePolicyConfig): FeePolicy {
     const wrappedNativeLower = chainCfg.wrapped_native.toLowerCase();
 
     return {
+        chain,
         feeReceiver,
         getFeeBps(ctx: FeePolicyContext): bigint {
             const inLower = ctx.inputToken.toLowerCase();
@@ -221,8 +216,8 @@ export function flatFeePolicy(config: FlatFeePolicyConfig): FeePolicy {
             // unconditional — native↔wrapped is always a no-op regardless of
             // which call site invokes the policy.
             if (
-                (inLower === NATIVE_ADDRESS && outLower === wrappedNativeLower) ||
-                (inLower === wrappedNativeLower && outLower === NATIVE_ADDRESS)
+                (inLower === NATIVE_ADDRESS_LOWER && outLower === wrappedNativeLower) ||
+                (inLower === wrappedNativeLower && outLower === NATIVE_ADDRESS_LOWER)
             ) {
                 return 0n;
             }
@@ -244,40 +239,31 @@ export function flatFeePolicy(config: FlatFeePolicyConfig): FeePolicy {
 
 /**
  * Convenience: a no-op fee policy that returns 0 bps for all operations.
- * This is the default when no policy is configured in setupChain — it
- * preserves backward compatibility with pre-fee-policy SDK behavior.
+ * Pass this explicitly when a caller wants fee-free behavior.
  *
- * The receiver is set to the Curvance DAO address for consistency, but it's
- * never used since getFeeBps always returns 0n.
+ * The receiver is set to the zero address because getFeeBps always returns 0n
+ * and no fee receiver is submitted.
  *
  * Frozen to prevent accidental mutation. Anyone needing a customized no-op
  * variant should construct a fresh `flatFeePolicy({ bps: 0n, ... })` instead
  * of mutating this singleton.
  */
 export const NO_FEE_POLICY: FeePolicy = Object.freeze({
-    feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+    chain: "any",
+    feeReceiver: EMPTY_ADDRESS,
     getFeeBps: () => 0n,
 });
 
-let monadMainnetFeePolicy: FeePolicy | null = null;
-
-export function getMonadMainnetFeePolicy(): FeePolicy {
-    monadMainnetFeePolicy ??= Object.freeze(
-        flatFeePolicy({
-            bps: CURVANCE_FEE_BPS,
-            feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
-            chain: 'monad-mainnet',
-        }),
-    );
-
-    return monadMainnetFeePolicy;
+export function getMonadMainnetFeePolicy(feeReceiver: address): FeePolicy {
+    return defaultFeePolicyForChain('monad-mainnet', feeReceiver);
 }
 
-export function defaultFeePolicyForChain(chain: ChainRpcPrefix): FeePolicy {
-    switch (chain) {
-        case 'monad-mainnet':
-            return getMonadMainnetFeePolicy();
-        default:
-            return NO_FEE_POLICY;
-    }
+export function defaultFeePolicyForChain(chain: ChainRpcPrefix, feeReceiver: address): FeePolicy {
+    return Object.freeze(
+        flatFeePolicy({
+            bps: CURVANCE_FEE_BPS,
+            feeReceiver,
+            chain,
+        }),
+    );
 }

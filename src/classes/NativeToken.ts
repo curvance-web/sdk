@@ -1,5 +1,5 @@
 import Decimal from "decimal.js";
-import { ChainRpcPrefix, requireAccount, resolveReadProvider, WAD } from "../helpers";
+import { ChainRpcPrefix, NATIVE_ADDRESS, requireAccount, resolveReadProvider, WAD } from "../helpers";
 import { address, curvance_provider, curvance_read_provider, curvance_signer, TokenInput, USD } from "../types";
 import { OracleManager } from "./OracleManager";
 import { chain_config } from "../chains";
@@ -19,7 +19,7 @@ export class NativeToken {
     signer: curvance_signer | null;
     account: address | null;
     private oracleManagerAddress: address | undefined;
-    address  = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" as address;
+    address  = NATIVE_ADDRESS;
     decimals = 18n;
 
     constructor(
