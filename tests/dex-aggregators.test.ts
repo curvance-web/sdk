@@ -319,10 +319,16 @@ test("KyberSwap.quoteAction keeps action.slippage unchanged when feeBps is omitt
 test("chain configs keep Monad on KyberSwap and fail closed on Arbitrum Sepolia DEX quotes", async () => {
     const monadDex = chain_config["monad-mainnet"].dexAgg;
     const arbDex = chain_config["arb-sepolia"].dexAgg;
+    const monadKyberConfig = chain_config["monad-mainnet"].services.dexAggregators.kyberSwap;
 
+    assert.ok(monadKyberConfig);
     assert.ok(monadDex instanceof KyberSwap);
+    assert.equal(monadDex.chain, monadKyberConfig.chainSlug);
+    assert.equal(monadDex.api, `${monadKyberConfig.apiBase}/${monadKyberConfig.chainSlug}`);
+    assert.equal(monadDex.router, monadKyberConfig.router);
     assert.ok(arbDex instanceof UnsupportedDexAgg);
     assert.equal(arbDex instanceof KyberSwap, false);
+    assert.equal(chain_config["arb-sepolia"].services.dexAggregators.kyberSwap, null);
     assert.deepEqual(await arbDex.getAvailableTokens({} as any, null, WALLET), []);
 
     await assert.rejects(
@@ -826,17 +832,19 @@ test("MultiDexAgg.withContext binds every child adapter without mutating the ori
     );
 });
 
-test("KyberSwap.withContext binds the setup fee receiver without mutating the original", () => {
+test("KyberSwap.withContext binds the checker DAO without mutating the original", () => {
     const originalReceiver = "0x00000000000000000000000000000000000000d1" as address;
     const setupReceiver = "0x00000000000000000000000000000000000000d2" as address;
+    const checkerDao = "0x00000000000000000000000000000000000000d3" as address;
     const original = new KyberSwap(originalReceiver);
     const bound = original.withContext({
         markets: [],
         feePolicy: { getFeeBps: () => 4n, feeReceiver: setupReceiver, chain: "monad-mainnet" },
+        checkerDao,
     } as any);
 
     assert.equal(original.dao, originalReceiver);
-    assert.equal(bound.dao, setupReceiver);
+    assert.equal(bound.dao, checkerDao);
 });
 
 test("MultiDexAgg exposes the first executable child router for route advertisement", () => {

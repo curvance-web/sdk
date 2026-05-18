@@ -159,6 +159,26 @@ test('getDepositTokens does not expose a duplicate simple native route for nativ
     (token as any).market = {
         signer: null,
         account: null,
+        dexAgg: {
+            router: DEX_ROUTER,
+            getAvailableTokens: async () => ([{
+                interface: {
+                    address: NATIVE_ADDRESS,
+                    decimals: 18n,
+                    symbol: 'MON',
+                    name: 'Monad',
+                },
+                type: 'simple',
+            }, {
+                interface: {
+                    address: ZAP_ASSET,
+                    decimals: 18n,
+                    symbol: 'USDC',
+                    name: 'USD Coin',
+                },
+                type: 'simple',
+            }]),
+        },
         setup: {
             chain: 'monad-mainnet',
             contracts: {
@@ -173,31 +193,6 @@ test('getDepositTokens does not expose a duplicate simple native route for nativ
         decimals: 18n,
         symbol: 'cVAULT',
         name: 'Vault Token',
-    });
-    Object.defineProperty(token, 'currentChainConfig', {
-        configurable: true,
-        get: () => ({
-            dexAgg: {
-                router: DEX_ROUTER,
-                getAvailableTokens: async () => ([{
-                    interface: {
-                        address: NATIVE_ADDRESS,
-                        decimals: 18n,
-                        symbol: 'MON',
-                        name: 'Monad',
-                    },
-                    type: 'simple',
-                }, {
-                    interface: {
-                        address: ZAP_ASSET,
-                        decimals: 18n,
-                        symbol: 'USDC',
-                        name: 'USD Coin',
-                    },
-                    type: 'simple',
-                }]),
-            },
-        }),
     });
 
     const options = await token.getDepositTokens();
@@ -347,8 +342,23 @@ describe('Approval preflights â€” single-path execution', () => {
         (token as any).market = {
             signer: { address: OWNER },
             account: OWNER,
+            dexAgg: {
+                router: DEX_ROUTER,
+                quote: async () => {
+                    throw new Error('unit fixture DEX quote should not be reached');
+                },
+                quoteAction: async () => {
+                    throw new Error('unit fixture DEX quoteAction should not be reached');
+                },
+                getAvailableTokens: async () => {
+                    throw new Error('unit fixture route discovery should not be reached');
+                },
+            },
             setup: {
                 chain: 'monad-mainnet',
+                assets: {
+                    wrapped_native: ADDR,
+                },
                 contracts: {
                     OracleManager: ADDR,
                     zappers: {

@@ -206,20 +206,27 @@ test("filterMerklOpportunitiesByChain preserves metadata-less rows from already 
     ]);
 });
 
-test("filterMerklOpportunitiesByChain uses explicit chain metadata in precedence order", () => {
+test("filterMerklOpportunitiesByChain requires every explicit chain metadata field to match", () => {
     const rows = filterMerklOpportunitiesByChain([
         merklOpportunity({
-            identifier: "chain-object-wins",
+            identifier: "all-explicit-match",
+            chain: { id: 143, name: "Monad" },
+            chainId: 143,
+            computeChainId: 143,
+            distributionChainId: 143,
+        }),
+        merklOpportunity({
+            identifier: "chain-object-conflicts",
             chain: { id: 143, name: "Monad" },
             chainId: 1,
         }),
         merklOpportunity({
-            identifier: "chain-id",
+            identifier: "chain-id-conflicts",
             chainId: 143,
             computeChainId: 1,
         }),
         merklOpportunity({
-            identifier: "compute-chain-id",
+            identifier: "compute-chain-id-conflicts",
             computeChainId: 143,
             distributionChainId: 1,
         }),
@@ -237,9 +244,7 @@ test("filterMerklOpportunitiesByChain uses explicit chain metadata in precedence
     ], 143);
 
     assert.deepEqual(rows.map((row) => row.identifier), [
-        "chain-object-wins",
-        "chain-id",
-        "compute-chain-id",
+        "all-explicit-match",
         "distribution-chain-id",
         "metadata-less",
     ]);
@@ -281,6 +286,71 @@ test("fetchMerklOpportunities does not apply chain filtering when no chainId is 
     assert.deepEqual(rows.map((row) => row.identifier), ["monad-lend", "ethereum-lend"]);
 });
 
+test("fetchMerklOpportunities keeps only matching explicit action rows when action is requested", async (t) => {
+    const originalFetch = globalThis.fetch;
+
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => [
+            {
+                name: "explicit lend",
+                apr: 4,
+                action: "LEND",
+                identifier: "explicit-lend",
+                type: "lend",
+                chainId: 143,
+                tokens: [],
+            },
+            {
+                name: "lowercase lend",
+                apr: 5,
+                action: "lend",
+                identifier: "lowercase-lend",
+                type: "lend",
+                chainId: 143,
+                tokens: [],
+            },
+            {
+                name: "legacy no action",
+                apr: 6,
+                identifier: "0x00000000000000000000000000000000000000a1",
+                type: "lend",
+                tokens: [],
+            },
+            {
+                name: "wrong action",
+                apr: 100,
+                action: "BORROW",
+                identifier: "wrong-action",
+                type: "borrow",
+                chainId: 143,
+                tokens: [],
+            },
+            {
+                name: "malformed action",
+                apr: 200,
+                action: 123,
+                identifier: "malformed-action",
+                type: "lend",
+                chainId: 143,
+                tokens: [],
+            },
+        ],
+    } as Response)) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    const rows = await fetchMerklOpportunities({ action: "LEND", chainId: 143 });
+
+    assert.deepEqual(rows.map((row) => row.identifier), [
+        "explicit-lend",
+        "lowercase-lend",
+        "0x00000000000000000000000000000000000000a1",
+    ]);
+});
+
 test("fetchMerklOpportunities drops malformed explicit chain metadata before filtering", async (t) => {
     const originalFetch = globalThis.fetch;
 
@@ -302,6 +372,33 @@ test("fetchMerklOpportunities drops malformed explicit chain metadata before fil
                 identifier: "bad-chain-lend",
                 type: "lend",
                 chain: { id: "143", name: "Monad" },
+                tokens: [],
+            },
+            {
+                name: "bad chain id lend",
+                apr: 5,
+                action: "LEND",
+                identifier: "bad-chain-id-lend",
+                type: "lend",
+                chainId: "143",
+                tokens: [],
+            },
+            {
+                name: "bad compute chain id lend",
+                apr: 5,
+                action: "LEND",
+                identifier: "bad-compute-chain-id-lend",
+                type: "lend",
+                computeChainId: "143",
+                tokens: [],
+            },
+            {
+                name: "bad distribution chain id lend",
+                apr: 5,
+                action: "LEND",
+                identifier: "bad-distribution-chain-id-lend",
+                type: "lend",
+                distributionChainId: "143",
                 tokens: [],
             },
             {
@@ -881,6 +978,13 @@ test("aggregateMerklAprByToken composes with chain-filtered Merkl opportunities"
             identifier: "ethereum-lend",
             apr: 100,
             chainId: 1,
+            tokens: [{ address: WMON, symbol: "WMON" }],
+        }),
+        merklOpportunity({
+            identifier: "conflicting-lend",
+            apr: 200,
+            chain: { id: 143, name: "Monad" },
+            distributionChainId: 1,
             tokens: [{ address: WMON, symbol: "WMON" }],
         }),
     ], 143);

@@ -2,7 +2,7 @@
     <img src="https://pbs.twimg.com/profile_banners/1445781144125857796/1773687595/1500x500" alt="Curvance"/>
 </p>
 
-A TypeScript SDK for interacting with the Curvance protocol. Built on ethers v6 with a bulk-loaded cache model — `setupChain()` preloads all market data in 1–3 RPC calls, and all subsequent reads are synchronous from cache.
+A TypeScript SDK for interacting with the Curvance protocol. It uses ethers v6 and a setup-bound cache model: `setupChain()` loads market state up front, snapshots the chain configuration it used, and returns markets whose reads are synchronous until an explicit refresh runs.
 
 ## ❯ Install
 
@@ -38,14 +38,14 @@ setupChain(
     provider: curvance_provider | null = null,   // signer (wallet) OR read-only provider; null → SDK default
     api_url: string = "https://api.curvance.com",
     options: {
-        feePolicy?: FeePolicy;                    // default is setup-resolved: 4 bps to CentralRegistry.daoAddress()
+        feePolicy?: FeePolicy;                    // default is setup-resolved; Kyber chains require checker-compatible policy
         account?: address | null;                 // user address for user-specific reads without a signer
         readProvider?: curvance_read_provider | null;  // explicit override for read transport
     } = {}
 ): Promise<{
     chain: ChainRpcPrefix,
     chainId: number,
-    setupConfigSnapshot: Readonly<SetupConfigSnapshot>,
+    setupConfigSnapshot: Readonly<SetupConfigSnapshot>, // includes chain asset metadata and service policies
     markets: Market[],
     reader: ProtocolReader,
     dexAgg: IDexAgg,
@@ -57,6 +57,21 @@ setupChain(
 such as `getActiveUserMarkets()` and snapshot calls without explicit `markets`.
 Multichain-safe code should pass explicit `markets`, `reader`, provider,
 account, or setup context instead of relying on the latest singleton.
+
+### Architecture contract
+
+The current SDK architecture is result-bound. A `setupChain(...)` result owns
+the chain context that produced it, and downstream objects should keep using
+that context even if another chain boots later.
+
+| Layer | Contract |
+|---|---|
+| Setup snapshot | `setupConfigSnapshot` contains chain id, environment, cloned/frozen asset metadata, cloned/frozen external service policy, contract addresses, read transport, signer/account, API URL, and fee policy. |
+| Returned markets | `Market` and `CToken` instances keep the setup snapshot and reader they were created with. Explicit returned-result calls stay on that chain after the module singleton moves. |
+| Compatibility globals | `setup_config` and `all_markets` exist for single-active-chain consumers. Treat no-argument helpers as compatibility paths, not multichain-safe state. |
+| External services | Curvance API reward/native-yield slugs and Kyber API/router/chain aliases live in chain config and are cloned into the setup snapshot. Helper code should read the snapshot, not mutable exported config. |
+| DEX routing | Markets receive a setup-bound `dexAgg` after boot. `CToken` route discovery and zap/leverage execution do not fall back to `chain_config.dexAgg`; unsupported or manually constructed markets fail closed unless a market-bound adapter is attached. |
+| Fee/checker policy | Kyber-backed chains validate checker-compatible fee policy during setup. The current checker requires `CURVANCE_FEE_BPS` and the setup-resolved DAO receiver before routes are advertised or markets finish booting. |
 
 ### RPC routing
 
@@ -94,7 +109,7 @@ for (const market of markets) {
 | `ethers.JsonRpcProvider` | Read-only or custom RPC |
 | `null` | SDK constructs a provider from chain config |
 
-`curvance_signer` = `JsonRpcSigner | Wallet` — required for write operations (deposit, borrow, etc.)
+`curvance_signer` = `JsonRpcSigner | Wallet`, required for write operations (deposit, borrow, etc.)
 
 ## ❯ Markets
 
@@ -122,7 +137,7 @@ market.userDebt             // total outstanding debt
 market.userMaxDebt          // maximum allowable debt
 market.userRemainingCredit  // available borrow capacity (with 0.1% buffer)
 market.userCollateral       // posted collateral (in shares)
-market.positionHealth       // health factor — null means infinite (no debt)
+market.positionHealth       // health factor; null means infinite (no debt)
 market.userNet              // deposits - debt
 ```
 
@@ -315,9 +330,38 @@ const zapper = token.getZapper('simple')
 const positionManager = token.getPositionManager('simple')
 ```
 
+Prefer `token.getZapper(...)` so the zapper carries the token's setup-bound DEX aggregator. Direct construction must use the same setup result as the CToken it will operate on:
+
+```ts
+import { Zapper } from "curvance"
+
+const setup = await setupChain("monad-mainnet", wallet)
+const token = setup.markets[0].tokens[0]
+const zapperAddress = token.getPluginAddress("simple", "zapper")
+if (zapperAddress == null) throw new Error("Simple zapper is not configured")
+
+const zapper = new Zapper(
+    zapperAddress,
+    wallet,
+    "simple",
+    setup.setupConfigSnapshot,
+    setup.dexAgg,
+)
+```
+
+A direct `Zapper` built without the setup-bound adapter throws. A `Zapper`
+from one setup result also refuses to build calldata for a CToken from another
+setup result.
+
 ## ❯ Zapping (Swap + Deposit)
 
-Zap deposits allow depositing any token by swapping to the required underlying via the DEX aggregator.
+Zap deposits allow depositing another token by swapping to the required underlying through the setup-bound DEX aggregator.
+
+`token.getDepositTokens(search?)` is the route-discovery entrypoint. It always
+includes the direct deposit asset and then adds native, vault, and simple-swap
+routes only when the token and chain can execute them. DEX-sourced simple
+routes require a market-bound executable adapter; unsupported DEX chains expose
+readable markets but no simple zap or simple leverage routes.
 
 ```ts
 // Native token (MON) → deposit
@@ -400,7 +444,7 @@ const health = await market.previewPositionHealthBorrow(borrowToken, new Decimal
 if (health === null) {
     // remains solvent with infinite health
 } else if (health.lt(0.1)) {
-    console.warn("Would drop to 10% health — too risky")
+    console.warn("Would drop to 10% health - too risky")
 }
 ```
 
@@ -526,7 +570,7 @@ import {
 | `toDecimal(value, decimals)` | `bigint` → `Decimal` |
 | `toBigInt(value, decimals)` | `Decimal` → `bigint` |
 | `getDepositApy(token, opportunities, apyOverrides)` | Total deposit yield (interest + Merkl + native) |
-| `getBorrowCost(token, opportunities)` | Net borrow cost — may be negative when rewards exceed rate |
+| `getBorrowCost(token, opportunities)` | Net borrow cost; may be negative when rewards exceed rate |
 | `getInterestYield(token)` | Lending APY only |
 | `getNativeYield(token, apyOverrides)` | Native yield component |
 | `getMerklDepositIncentives(tokenAddress, opportunities)` | Merkl reward APR for deposits |
@@ -553,31 +597,42 @@ intentional custom integration override.
 import {
     CURVANCE_FEE_BPS,
     flatFeePolicy,
-    NO_FEE_POLICY,
     setupChain,
 } from "curvance"
 
 const defaultSetup = await setupChain("monad-mainnet", wallet)
 
 const feePolicy = flatFeePolicy({
-    // Custom policies still must use a checker-compatible receiver.
+    // Kyber-backed chains require one exact checker-compatible DEX fee.
     bps: CURVANCE_FEE_BPS,
     feeReceiver: defaultSetup.setupConfigSnapshot.feePolicy.feeReceiver,
     chain: "monad-mainnet",
-    stableToStableBps: 2n,             // optional lower fee for stable↔stable swaps
 })
 
 const { markets } = await setupChain("monad-mainnet", wallet, undefined, { feePolicy })
 ```
 
+On Kyber-backed chains, setup validates explicit policies before rewards or
+markets boot. A zero-fee policy, wrong BPS value, or wrong receiver rejects
+with a checker-policy error. Context-dependent lower tiers such as
+`stableToStableBps` are not valid for checker-bound Kyber routes because the
+on-chain checker enforces one exact BPS value and DAO receiver. On
+unsupported-Dex chains such as `arb-sepolia`, `NO_FEE_POLICY` remains valid and
+setup skips the DAO lookup because no DEX route can execute there.
+
 The SDK automatically returns 0 bps for native ↔ wrapped-native swaps and same-token no-op zaps.
 
 ```ts
-// FeePolicy interface — implement your own
+// FeePolicy interface: implement your own
 interface FeePolicy {
     // "any" marks chain-agnostic no-op policies; chain-bound policies must match setupChain.
     chain?: "monad-mainnet" | "arb-sepolia" | "any";
     feeReceiver: address;
+    // Required on checker-bound routes when the policy is custom.
+    checkerCompatibility?: {
+        exactFeeBpsForDexSwaps: bigint;
+        feeReceiver: address;
+    };
     getFeeBps(ctx: FeePolicyContext): bigint;
 }
 
@@ -671,8 +726,24 @@ type USD_WAD = bigint                 // USD in 1e18 WAD format
 type TokenInput = Decimal             // human-readable token amount
 type TypeBPS = bigint                 // basis points (10000 = 100%)
 type ChainRpcPrefix = "monad-mainnet" | "arb-sepolia"
+type ChainEnvironment = "production-mainnet" | "testnet" | "local"
+type curvance_read_provider = JsonRpcProvider
 type curvance_provider = JsonRpcSigner | Wallet | JsonRpcProvider
 type curvance_signer = JsonRpcSigner | Wallet
+
+interface SetupConfigSnapshot {
+    chain: ChainRpcPrefix
+    chainId: number
+    environment: ChainEnvironment
+    assets: Readonly<ChainAssetConfig>
+    services: Readonly<ChainServiceConfig>
+    contracts: Readonly<Record<string, unknown>>
+    readProvider: curvance_read_provider
+    signer: curvance_signer | null
+    account: address | null
+    api_url: string
+    feePolicy: FeePolicy
+}
 
 // Market categorization
 type MarketCategory = "stablecoin" | "staking" | "restaking" | "yield-stablecoin" | "blue-chip" | "native"
@@ -693,7 +764,9 @@ interface Quote {
 }
 ```
 
-All numeric return values are `bigint` or `Decimal` — never plain JS `number`.
+Core monetary, token, share, health, APY, and fixed-point values use `bigint`
+or `Decimal`. Backend API DTOs may expose raw `number` fields before SDK
+normalization; do not use those DTO fields as contract-scale values.
 
 ## ❯ Constants
 
@@ -711,7 +784,7 @@ DEFAULT_SLIPPAGE_BPS  // 100n  (1%)
 
 ### Leverage tuning (`LEVERAGE`)
 
-Exposed tuning block used by leverage preview / mutation paths. Values are considered tunable across releases — SDK consumers pinning against specific values opt into the coupling.
+Exposed tuning block used by leverage preview / mutation paths. Values are considered tunable across releases. SDK consumers pinning against specific values opt into the coupling.
 
 ```ts
 import { LEVERAGE } from 'curvance';
@@ -730,7 +803,7 @@ LEVERAGE.LEVERAGE_UP_BUFFER_BPS       // 10n
 LEVERAGE.DELEVERAGE_OVERHEAD_BPS      // 60n
 // BPS overhead added to full-deleverage swap sizing to absorb DEX impact
 // and oracle drift without leaving dust debt. The contract returns any
-// excess debt token to the user, so economic loss is zero — but
+// excess debt token to the user, so economic loss is zero, but
 // `checkSlippage` treats the intentional overshoot as equity loss and
 // amplifies it by (L-1), which the contract-slippage expansion compensates.
 
@@ -760,21 +833,42 @@ LEVERAGE.LEVERAGE_UP_VAULT_DRIFT_BPS  // 30n
 
 Run before every `npm publish`:
 
-1. **Deterministic transport gate green.** `npm run test:transport` must pass,
-   or `npm test` must show all `test:transport` tests
-   passing. `tests/rpc-config-shape.test.ts` locks the structural invariants
-   of `chain_rpc_config` (no known-bad RPCs, no duplicate fallbacks, policy
-   fields within sane ranges).
+1. **Typecheck and deterministic transport gate green.**
+
+   ```bash
+   node node_modules/typescript/bin/tsc --noEmit
+   npm run test:transport
+   ```
+
+   `npm test` is an alias for `test:transport`. `tests/rpc-config-shape.test.ts`
+   locks the structural invariants of `chain_rpc_config` (no known-bad RPCs,
+   no duplicate fallbacks, policy fields within sane ranges).
 
 2. **Fork gate green or explicitly skipped with reason.** `npm run test:fork`
    must pass when fork env is available. If it skips, record which env/artifact
    blocker caused the skip before treating the release as covered.
 
-3. **Package artifact smoke green.** `npm run test:dist-smoke` must pass after
-   the fork gate. Package consumers load `dist`, so `npm run build` alone is not
-   enough package-boundary proof.
+3. **Package artifact smoke green.**
 
-4. **Build green.** `npm run build` must pass.
+   ```bash
+   npm run test:dist-smoke
+   npm pack --dry-run --json
+   ```
+
+   `prepack` and `prepublishOnly` rebuild `dist`, and `test:dist-smoke`
+   imports the packed package root. Package consumers load the artifact, so
+   source-green or build-green alone is not package-boundary proof.
+
+4. **Workspace hygiene clean.**
+
+   ```bash
+   git diff --check
+   git status --short
+   ```
+
+   Confirm new imported production files are tracked. This matters because
+   dirty-tree tests can pass while a clean package checkout cannot import an
+   untracked source file.
 
 5. **Live RPC probe against both app origins for RPC-adjacent changes.** In the
    app repo:
@@ -799,13 +893,12 @@ Run before every `npm publish`:
    Deeper-cascade fallbacks (`fallbacks[1]+`) MAY have looser limits if
    documented inline with a comment in `chain_rpc_config`.
 
-3. **Do not add the probe to CI.** The probe fires ~500 requests per run
+6. **Do not add the probe to CI.** The probe fires ~500 requests per run
    across 5-10 public RPCs from a single IP. Running it on every PR would
    trip per-IP rate limits and eventually provoke origin bans from the
-   free RPCs we depend on — recreating the exact failure mode
-   (monadinfra 403'ing `staging.curvance.com`) that motivated building
-   this probe.
+   free RPCs we depend on. That recreates the exact failure mode
+   (monadinfra 403'ing `staging.curvance.com`) that motivated this probe.
 
-4. **Republish workflow.** Version bump → `npm publish` → in app repo,
-   bump `curvance` in `package.json` to the new version → `yarn install`
-   → commit `yarn.lock` → deploy.
+7. **Republish workflow.** Version bump -> `npm publish` -> in app repo,
+   bump `curvance` in `package.json` to the new version -> `yarn install`
+   -> commit `yarn.lock` -> deploy.

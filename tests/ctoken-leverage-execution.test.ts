@@ -56,7 +56,6 @@ function createSimpleExecutionHarness({
     collateralAssetPrice = WAD,
     debtAssetPrice = WAD,
     selectedDebtTokenBalance,
-    useMarketDexAgg = false,
 }: {
     feeByOperation?: Partial<Record<'leverage-up' | 'deposit-and-leverage' | 'leverage-down', bigint>>;
     maxLeverage?: Decimal;
@@ -72,7 +71,6 @@ function createSimpleExecutionHarness({
     collateralAssetPrice?: bigint;
     debtAssetPrice?: bigint;
     selectedDebtTokenBalance?: bigint;
-    useMarketDexAgg?: boolean;
 } = {}) {
     const feeCalls: FeePolicyContext[] = [];
     const quoteCalls: Array<{
@@ -170,18 +168,14 @@ function createSimpleExecutionHarness({
             };
         },
     };
+    (market as any).dexAgg = quoteDexAgg;
     const chainConfig = {
-        dexAgg: useMarketDexAgg
-            ? {
-                async quoteAction() {
-                    throw new Error('chain singleton DEX aggregator should not be used');
-                },
-            }
-            : quoteDexAgg,
+        dexAgg: {
+            async quoteAction() {
+                throw new Error('chain singleton DEX aggregator should not be used');
+            },
+        },
     };
-    if (useMarketDexAgg) {
-        (market as any).dexAgg = quoteDexAgg;
-    }
 
     (token as any).market = market;
     (token as any).cache = {
@@ -660,9 +654,7 @@ describe('CToken simple leverage execution', () => {
     });
 
     test('leverageUp uses the market-bound DEX aggregator instead of the chain singleton', async () => {
-        const { token, borrow, quoteCalls, leverageCalls } = createSimpleExecutionHarness({
-            useMarketDexAgg: true,
-        });
+        const { token, borrow, quoteCalls, leverageCalls } = createSimpleExecutionHarness();
 
         const tx = await token.leverageUp(borrow, Decimal(2), 'simple', Decimal(0.01));
 
@@ -763,9 +755,7 @@ describe('CToken simple leverage execution', () => {
     });
 
     test('depositAndLeverage uses the market-bound DEX aggregator instead of the chain singleton', async () => {
-        const { token, borrow, quoteCalls, depositCalls } = createSimpleExecutionHarness({
-            useMarketDexAgg: true,
-        });
+        const { token, borrow, quoteCalls, depositCalls } = createSimpleExecutionHarness();
 
         const tx = await token.depositAndLeverage(Decimal(10), borrow, Decimal('1.60'), 'simple', Decimal(0.01));
 
@@ -923,9 +913,7 @@ describe('CToken simple leverage execution', () => {
     });
 
     test('leverageDown uses the market-bound DEX aggregator instead of the chain singleton', async () => {
-        const { token, borrow, quoteCalls, deleverageCalls } = createSimpleExecutionHarness({
-            useMarketDexAgg: true,
-        });
+        const { token, borrow, quoteCalls, deleverageCalls } = createSimpleExecutionHarness();
 
         const tx = await token.leverageDown(
             borrow,

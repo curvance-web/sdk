@@ -107,6 +107,13 @@ export interface FeePolicyContext {
     targetLeverage: Decimal | null;
 }
 
+export interface CheckerFeePolicyCompatibility {
+    /** Exact BPS the policy returns for every DEX-executed swap. */
+    exactFeeBpsForDexSwaps: bigint;
+    /** Receiver submitted to the checker-bound DEX route. */
+    feeReceiver: address;
+}
+
 export interface FeePolicy {
     /** Chain this policy was constructed for. Omit only for custom legacy policies;
      *  use "any" for chain-agnostic no-op policies. */
@@ -116,6 +123,9 @@ export interface FeePolicy {
     /** Address that receives the fee. KyberSwap supports comma-separated
      *  multi-receiver lists if extended in the future. */
     feeReceiver: address;
+    /** Declares that non-no-op DEX swaps always use one checker-compatible fee.
+     *  Omit this for context-dependent policies such as stable-tier overrides. */
+    checkerCompatibility?: CheckerFeePolicyCompatibility;
 }
 
 /** Fee BPS charged on all DEX swaps via KyberSwap's `feeAmount` parameter.
@@ -198,8 +208,18 @@ export function flatFeePolicy(config: FlatFeePolicyConfig): FeePolicy {
         throw new Error(`flatFeePolicy: unknown chain '${chain}'`);
     }
     const wrappedNativeLower = chainCfg.wrapped_native.toLowerCase();
+    const dexSwapFeeIsContextInvariant =
+        stableToStableBps === undefined ||
+        classify === undefined ||
+        stableToStableBps === bps;
+    const checkerCompatibility = dexSwapFeeIsContextInvariant
+        ? Object.freeze({
+            exactFeeBpsForDexSwaps: bps,
+            feeReceiver,
+        })
+        : undefined;
 
-    return {
+    const policy = {
         chain,
         feeReceiver,
         getFeeBps(ctx: FeePolicyContext): bigint {
@@ -235,6 +255,13 @@ export function flatFeePolicy(config: FlatFeePolicyConfig): FeePolicy {
             return bps;
         },
     };
+
+    return checkerCompatibility == null
+        ? policy
+        : {
+            ...policy,
+            checkerCompatibility,
+        };
 }
 
 /**
@@ -251,6 +278,10 @@ export function flatFeePolicy(config: FlatFeePolicyConfig): FeePolicy {
 export const NO_FEE_POLICY: FeePolicy = Object.freeze({
     chain: "any",
     feeReceiver: EMPTY_ADDRESS,
+    checkerCompatibility: Object.freeze({
+        exactFeeBpsForDexSwaps: 0n,
+        feeReceiver: EMPTY_ADDRESS,
+    }),
     getFeeBps: () => 0n,
 });
 

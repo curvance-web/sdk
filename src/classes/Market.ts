@@ -1,4 +1,4 @@
-import { aggregateMerklAprByToken, BPS, ChainRpcPrefix, ChangeRate, contractSetup, EMPTY_ADDRESS, getRateSeconds, requireAccount, toBigInt, toDecimal, UINT256_MAX, WAD, WAD_DECIMAL } from "../helpers";
+import { aggregateMerklAprByToken, BPS, ChangeRate, contractSetup, EMPTY_ADDRESS, getRateSeconds, requireAccount, toBigInt, toDecimal, UINT256_MAX, WAD, WAD_DECIMAL } from "../helpers";
 import { Contract } from "ethers";
 import {
     DynamicMarketData,
@@ -20,7 +20,6 @@ import { fetchMerklOpportunities, MerklOpportunity } from "../integrations/merkl
 import { BorrowableCToken } from "./BorrowableCToken";
 import FormatConverter from "./FormatConverter";
 import { Api, IncentiveResponse, Incentives, MilestoneResponse, Milestones } from "./Api";
-import { chain_config } from "../chains";
 import type { PositionManagerTypes } from "./PositionManager";
 import { validateAddress } from "../validation";
 import type IDexAgg from "./DexAggregators/IDexAgg";
@@ -772,10 +771,11 @@ export class Market {
         return index;
     }
 
-    private static shouldSuppressNativeYield(yieldEntry: NativeYield, chain: ChainRpcPrefix): boolean {
-        // DeFiLlama currently returns a YZM vault yield row labeled as USDC on Monad.
-        // Keep that workaround scoped to the source/chain where it is known to apply.
-        return chain === "monad-mainnet" && yieldEntry.symbol.toUpperCase() === "USDC";
+    private static shouldSuppressNativeYield(yieldEntry: NativeYield, setup: SetupConfigSnapshot): boolean {
+        const suppressedSymbols = setup.services.curvanceApi.suppressedNativeYieldSymbols;
+        return suppressedSymbols.some(
+            (symbol) => symbol.toUpperCase() === yieldEntry.symbol.toUpperCase(),
+        );
     }
 
     private static buildMarketPayloadIndex<T extends { address: address }>(
@@ -1281,12 +1281,12 @@ export class Market {
         const resolvedAccount = account === undefined
             ? hasExplicitProvider ? null : resolvedSetup.account
             : account;
-        const chainId = chain_config[resolvedSetup.chain]?.chainId;
+        const chainId = resolvedSetup.chainId;
 
         const all_data = await reader.getAllMarketData(resolvedAccount);
         const [yields, merklLendOpps, merklBorrowOpps] = await Promise.all([
             Api.fetchNativeYields(resolvedSetup).then(y => (
-                y.filter(yieldEntry => !this.shouldSuppressNativeYield(yieldEntry, resolvedSetup.chain))
+                y.filter(yieldEntry => !this.shouldSuppressNativeYield(yieldEntry, resolvedSetup))
             )),
             fetchMerklOpportunities({ action: 'LEND', chainId }).catch(() => [] as MerklOpportunity[]),
             fetchMerklOpportunities({ action: 'BORROW', chainId }).catch(() => [] as MerklOpportunity[]),
@@ -1313,7 +1313,7 @@ export class Market {
             const userData = userByAddress.get(market_address.toLowerCase());
 
             if(deploy_data == undefined) {
-                if (chain_config[resolvedSetup.chain]?.environment === "production-mainnet") {
+                if (resolvedSetup.environment === "production-mainnet") {
                     throw new Error(
                         `Missing deployment metadata for market ${market_address} during ` +
                         `${resolvedSetup.chain} production setup.`,

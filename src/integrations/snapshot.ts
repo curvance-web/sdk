@@ -3,7 +3,6 @@ import { BorrowableCToken } from "../classes/BorrowableCToken";
 import { all_markets, setup_config } from "../setup";
 import { address } from "../types";
 import { Decimal } from "decimal.js";
-import { chain_config } from "../chains";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -81,7 +80,7 @@ function resolvePortfolioSnapshotChain(markets: Market[], requestedChain?: strin
 }
 
 function getMarketChainId(market: Market): number {
-    const chainId = chain_config[market.setup.chain]?.chainId;
+    const chainId = market.setup.chainId;
     if (chainId == undefined) {
         throw new Error(`Cannot snapshot market ${market.address}: unknown chain ${market.setup.chain}.`);
     }

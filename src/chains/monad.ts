@@ -1,12 +1,27 @@
 import { address } from "../types";
 import { KyberSwap } from "../classes/DexAggregators/KyberSwap";
+import { EMPTY_ADDRESS } from "../helpers";
 import { ChainConfig } from ".";
 import { createChainFallbackProviders, createChainPrimaryProvider, getChainRpcConfig } from "./rpc";
+import { MONAD_KYBER_SWAP_SERVICE } from "./services";
+
+const kyberSwap = MONAD_KYBER_SWAP_SERVICE;
 
 export const mainnet: ChainConfig = {
     chainId: 143,
     environment: "production-mainnet",
-    dexAgg: new KyberSwap(),
+    services: {
+        curvanceApi: {
+            rewardsSlug: "monad-mainnet",
+            rewardChainAliases: ["monad"],
+            nativeYieldSlug: "monad",
+            suppressedNativeYieldSymbols: ["USDC"],
+        },
+        dexAggregators: {
+            kyberSwap,
+        },
+    },
+    dexAgg: new KyberSwap(EMPTY_ADDRESS, kyberSwap.router, kyberSwap.chainSlug, kyberSwap.apiBase),
     rpc: getChainRpcConfig("monad-mainnet"),
     provider: createChainPrimaryProvider("monad-mainnet"),
     fallbackProviders: createChainFallbackProviders("monad-mainnet"),

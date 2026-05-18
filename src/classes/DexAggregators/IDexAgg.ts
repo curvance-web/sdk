@@ -25,6 +25,7 @@ export type Quote = {
 export type DexAggContext = {
     markets: readonly Market[];
     feePolicy: FeePolicy;
+    checkerDao?: address | undefined;
 };
 
 export default interface IDexAgg {

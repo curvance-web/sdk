@@ -411,19 +411,31 @@ function normalizeMerklOpportunity(value: unknown): MerklOpportunity | null {
         type: value.type,
         tokens,
     };
-    if (isString(value.action)) {
+    if (value.action != undefined) {
+        if (!isString(value.action)) {
+            return null;
+        }
         opportunity.action = value.action;
     }
     if (chain != undefined) {
         opportunity.chain = chain;
     }
-    if (isFiniteNumber(value.chainId)) {
+    if (value.chainId != undefined) {
+        if (!isFiniteNumber(value.chainId)) {
+            return null;
+        }
         opportunity.chainId = value.chainId;
     }
-    if (isFiniteNumber(value.computeChainId)) {
+    if (value.computeChainId != undefined) {
+        if (!isFiniteNumber(value.computeChainId)) {
+            return null;
+        }
         opportunity.computeChainId = value.computeChainId;
     }
-    if (isFiniteNumber(value.distributionChainId)) {
+    if (value.distributionChainId != undefined) {
+        if (!isFiniteNumber(value.distributionChainId)) {
+            return null;
+        }
         opportunity.distributionChainId = value.distributionChainId;
     }
     if (isRecord(value.rewardsRecord)) {
@@ -442,11 +454,13 @@ function normalizeMerklOpportunity(value: unknown): MerklOpportunity | null {
     return opportunity;
 }
 
-function getOpportunityChainId(opportunity: MerklOpportunity): number | undefined {
-    return opportunity.chain?.id
-        ?? opportunity.chainId
-        ?? opportunity.computeChainId
-        ?? opportunity.distributionChainId;
+function getOpportunityChainIds(opportunity: MerklOpportunity): number[] {
+    return [
+        opportunity.chain?.id,
+        opportunity.chainId,
+        opportunity.computeChainId,
+        opportunity.distributionChainId,
+    ].filter((value): value is number => value != undefined);
 }
 
 export function filterMerklOpportunitiesByChain(
@@ -458,9 +472,24 @@ export function filterMerklOpportunitiesByChain(
     }
 
     return opportunities.filter((opportunity) => {
-        const opportunityChainId = getOpportunityChainId(opportunity);
-        return opportunityChainId == undefined || opportunityChainId === chainId;
+        const opportunityChainIds = getOpportunityChainIds(opportunity);
+        return opportunityChainIds.length === 0 ||
+            opportunityChainIds.every((opportunityChainId) => opportunityChainId === chainId);
     });
+}
+
+function filterMerklOpportunitiesByAction(
+    opportunities: MerklOpportunity[],
+    action?: 'LEND' | 'BORROW',
+): MerklOpportunity[] {
+    if (action == undefined) {
+        return opportunities;
+    }
+
+    return opportunities.filter((opportunity) => (
+        opportunity.action == undefined ||
+        opportunity.action.toUpperCase() === action
+    ));
 }
 
 function normalizeMerklOpportunities(value: unknown): MerklOpportunity[] {
@@ -580,8 +609,11 @@ export async function fetchMerklOpportunities({
         throw new Error('Failed to fetch Merkl opportunities');
     }
 
-    return filterMerklOpportunitiesByChain(
-        normalizeMerklOpportunities(await response.json()),
-        chainId,
+    return filterMerklOpportunitiesByAction(
+        filterMerklOpportunitiesByChain(
+            normalizeMerklOpportunities(await response.json()),
+            chainId,
+        ),
+        action,
     );
 }

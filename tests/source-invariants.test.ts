@@ -71,9 +71,14 @@ test("test:fork includes every env-backed fork test file", () => {
 
 test("package lifecycle rebuilds dist before pack and publish", () => {
     const packageJson = JSON.parse(readRepoFile("package.json"));
+    const distSmokeSource = readRepoFile("tests/dist-smoke.cjs");
 
     assert.equal(packageJson.scripts.prepack, "npm run build");
     assert.equal(packageJson.scripts.prepublishOnly, "npm run build");
+    assert.doesNotMatch(distSmokeSource, /--ignore-scripts/);
+    assert.match(distSmokeSource, /require\(packageRoot\)/);
+    assert.match(distSmokeSource, /dist\/chains\/services\.js/);
+    assert.match(distSmokeSource, /dist\/chains\/services\.d\.ts/);
 });
 
 test("test scripts that name concrete test files point to existing files", () => {
@@ -109,9 +114,92 @@ test("chain config, RPC config, and contract manifests stay aligned", () => {
 
     for (const [chain, config] of Object.entries(chain_config)) {
         assert.ok(config.environment, `${chain} must declare an environment`);
+        assert.ok(config.services?.curvanceApi, `${chain} must declare Curvance API service aliases`);
+        assert.ok(
+            typeof config.services.curvanceApi.rewardsSlug === "string" &&
+            config.services.curvanceApi.rewardsSlug.trim().length > 0,
+            `${chain} rewardsSlug must be an explicit non-empty string`,
+        );
+        assert.ok(
+            Array.isArray(config.services.curvanceApi.rewardChainAliases),
+            `${chain} rewardChainAliases must be explicit`,
+        );
+        assert.ok(
+            config.services.curvanceApi.rewardChainAliases.every((alias) => (
+                typeof alias === "string" && alias.trim().length > 0
+            )),
+            `${chain} rewardChainAliases must be non-empty strings`,
+        );
+        assert.ok(
+            typeof config.services.curvanceApi.nativeYieldSlug === "string" ||
+            config.services.curvanceApi.nativeYieldSlug === null,
+            `${chain} nativeYieldSlug must be explicit string or null`,
+        );
+        if (typeof config.services.curvanceApi.nativeYieldSlug === "string") {
+            assert.ok(
+                config.services.curvanceApi.nativeYieldSlug.trim().length > 0,
+                `${chain} nativeYieldSlug must be non-empty when enabled`,
+            );
+        }
+        assert.ok(
+            Array.isArray(config.services.curvanceApi.suppressedNativeYieldSymbols),
+            `${chain} suppressedNativeYieldSymbols must be explicit`,
+        );
+        assert.ok(
+            config.services.curvanceApi.suppressedNativeYieldSymbols.every((symbol) => (
+                typeof symbol === "string" && symbol.trim().length > 0
+            )),
+            `${chain} suppressedNativeYieldSymbols must be non-empty strings`,
+        );
+        assert.ok(
+            config.services.dexAggregators,
+            `${chain} must explicitly declare DEX aggregator service config`,
+        );
+        const kyberSwap = config.services.dexAggregators.kyberSwap;
+        if (kyberSwap != null) {
+            assert.ok(
+                typeof kyberSwap.chainSlug === "string" && kyberSwap.chainSlug.trim().length > 0,
+                `${chain} KyberSwap chainSlug must be an explicit non-empty string`,
+            );
+            assert.ok(
+                typeof kyberSwap.apiBase === "string" && kyberSwap.apiBase.trim().length > 0,
+                `${chain} KyberSwap apiBase must be an explicit non-empty string`,
+            );
+            assert.ok(
+                typeof kyberSwap.router === "string" && kyberSwap.router.trim().length > 0,
+                `${chain} KyberSwap router must be an explicit non-empty string`,
+            );
+        }
         assert.ok((chains as any)[chain].ProtocolReader, `${chain} contracts must include ProtocolReader`);
         assert.ok((chains as any)[chain].OracleManager, `${chain} contracts must include OracleManager`);
     }
+});
+
+test("external service aliases stay in chain config", () => {
+    const apiSource = readRepoFile("src/classes/Api.ts");
+    const marketSource = readRepoFile("src/classes/Market.ts");
+    const monadChainSource = readRepoFile("src/chains/monad.ts");
+    const chainServicesSource = readRepoFile("src/chains/services.ts");
+    const kyberSource = readRepoFile("src/classes/DexAggregators/KyberSwap.ts");
+
+    assert.match(apiSource, /resolveCurvanceApiServices/);
+    assert.match(apiSource, /chain_config\[config\.chain\]\?\.services\.curvanceApi/);
+    assert.match(apiSource, /const rewardsSlug = resolveCurvanceApiServices\(resolvedConfig\)\.rewardsSlug;/);
+    assert.match(apiSource, /\/v1\/rewards\/active\/\$\{rewardsSlug\}/);
+    assert.match(apiSource, /services\.rewardChainAliases/);
+    assert.match(apiSource, /resolveCurvanceApiServices\(resolvedConfig\)\.nativeYieldSlug/);
+    assert.match(marketSource, /setup\.services\.curvanceApi\.suppressedNativeYieldSymbols/);
+    assert.doesNotMatch(apiSource, /normalized === "monad-mainnet"|normalized === "arb-sepolia"/);
+    assert.doesNotMatch(apiSource, /chain == 'monad-mainnet'|\['monad'\]\.includes/);
+    assert.doesNotMatch(
+        marketSource,
+        /chain === "monad-mainnet" && yieldEntry\.symbol\.toUpperCase\(\) === "USDC"/,
+    );
+    assert.match(chainServicesSource, /export const MONAD_KYBER_SWAP_SERVICE: KyberSwapServiceConfig = \{/);
+    assert.match(chainServicesSource, /chainSlug: "monad"/);
+    assert.match(monadChainSource, /new KyberSwap\(EMPTY_ADDRESS,\s*kyberSwap\.router,\s*kyberSwap\.chainSlug,\s*kyberSwap\.apiBase\)/);
+    assert.match(kyberSource, /router: address = MONAD_KYBER_SWAP_SERVICE\.router/);
+    assert.doesNotMatch(kyberSource, /https:\/\/aggregator-api\.kyberswap\.com/);
 });
 
 test("production RPC origins have fallback or explicit non-production environment", () => {
@@ -168,7 +256,14 @@ test("README public examples stay multichain-safe", () => {
     assert.match(readme, /chainId:\s*number/);
     assert.match(readme, /setupConfigSnapshot:\s*Readonly<SetupConfigSnapshot>/);
     assert.match(readme, /chain\?:\s*"monad-mainnet"\s*\|\s*"arb-sepolia"\s*\|\s*"any"/);
+    assert.match(readme, /checkerCompatibility\?:\s*\{/);
     assert.doesNotMatch(readme, /bps:\s*10n/);
+    const feePolicyExampleStart = readme.indexOf("const feePolicy = flatFeePolicy({");
+    const feePolicyExampleEnd = readme.indexOf("const { markets }", feePolicyExampleStart);
+    assert.notEqual(feePolicyExampleStart, -1, "README checker-compatible fee policy example must exist");
+    assert.notEqual(feePolicyExampleEnd, -1, "README checker-compatible fee policy example must be bounded");
+    const feePolicyExample = readme.slice(feePolicyExampleStart, feePolicyExampleEnd);
+    assert.doesNotMatch(feePolicyExample, /stableToStableBps/);
     assert.match(merklSection, /fetchMerklOpportunities\(\{\s*chainId:\s*143\s*\}\)/);
     assert.match(merklSection, /fetchMerklUserRewards\(\{\s*wallet:\s*address,\s*chainId:\s*143\s*\}\)/);
     assert.match(merklSection, /fetchMerklCampaignsBySymbol\(\{\s*tokenSymbol:\s*"USDC",\s*chainId:\s*143\s*\}\)/);
@@ -185,9 +280,10 @@ test("default fee receiver is setup-resolved instead of hardcoded in production 
     assert.match(setupSource, /await reader\.getDaoAddress\(\)/);
     assert.match(
         setupSource,
-        /const feePolicy = options\.feePolicy \?\? defaultFeePolicyForChain\([\s\S]*chain,[\s\S]*await reader\.getDaoAddress\(\),[\s\S]*\);/,
+        /const setupDaoAddress = options\.feePolicy == null \|\| requiresCheckerPolicy[\s\S]*\? await reader\.getDaoAddress\(\)[\s\S]*: null;/,
     );
-    assert.match(kyberSource, /new KyberSwap\(context\.feePolicy\.feeReceiver,/);
+    assert.match(setupSource, /validateCheckerFeePolicy\(nextSetupConfig,\s*setupDaoAddress\);/);
+    assert.match(kyberSource, /new KyberSwap\(context\.checkerDao \?\? this\.dao,/);
 });
 
 test("Kyber current-router calldata validation fails closed in source", () => {
@@ -215,6 +311,7 @@ test("Kyber current-router calldata validation fails closed in source", () => {
 
 test("Merkl campaign lookups stay protocol and chain scoped", () => {
     const source = readRepoFile("src/integrations/merkl.ts");
+    const marketSource = readRepoFile("src/classes/Market.ts");
     const start = source.indexOf("export async function fetchMerklCampaignsBySymbol");
     const end = source.indexOf("type FetchOpportunitiesParams", start);
     assert.notEqual(start, -1, "fetchMerklCampaignsBySymbol must exist");
@@ -225,6 +322,18 @@ test("Merkl campaign lookups stay protocol and chain scoped", () => {
     assert.match(body, /url\.searchParams\.set\('tokenSymbol', tokenSymbol\);/);
     assert.match(body, /url\.searchParams\.set\('chainId', String\(chainId\)\);/);
     assert.match(body, /campaigns\.filter\(\(campaign\) => campaignMatchesChain\(campaign, chainId\)\)/);
+    assert.match(marketSource, /const chainId = resolvedSetup\.chainId;/);
+    assert.match(marketSource, /resolvedSetup\.environment === "production-mainnet"/);
+    assert.doesNotMatch(
+        marketSource,
+        /chain_config\[resolvedSetup\.chain\]\?\.chainId/,
+        "Market boot should pass Merkl the setup snapshot chainId instead of exported chain config",
+    );
+    assert.doesNotMatch(
+        marketSource,
+        /chain_config\[resolvedSetup\.chain\]\?\.environment/,
+        "Market boot should use the setup snapshot environment for production-only boot checks",
+    );
 });
 
 test("deposit approval source keeps zap delegation branch-specific", () => {
@@ -253,26 +362,46 @@ test("deposit approval source keeps zap delegation branch-specific", () => {
 test("CToken DEX execution paths stay behind the market-bound adapter getter", () => {
     const source = readRepoFile("src/classes/CToken.ts");
     const zapperSource = readRepoFile("src/classes/Zapper.ts");
+    const nativeTokenSource = readRepoFile("src/classes/NativeToken.ts");
     const directStaticDexReads = [...source.matchAll(/currentChainConfig\.dexAgg/g)].map((match) => match.index);
 
     assert.equal(
         directStaticDexReads.length,
-        1,
-        "CToken should only read currentChainConfig.dexAgg inside the currentDexAgg compatibility getter",
+        0,
+        "CToken should not fall back to mutable chain_config.dexAgg for route discovery or execution",
     );
-    assert.match(
+    assert.match(source, /private get boundDexAgg\(\): IDexAgg \| null \{ return this\.market\.dexAgg \?\? null; \}/);
+    assert.match(source, /DEX aggregator is not bound for token/);
+    assert.match(source, /private get currentChainAssets\(\) \{ return this\.setup\.assets; \}/);
+    assert.match(source, /const chainSettings = this\.currentChainAssets;/);
+    assert.match(source, /\? this\.currentChainAssets\.wrapped_native/);
+    assert.doesNotMatch(
         source,
-        /private get currentDexAgg\(\) \{ return this\.market\.dexAgg \?\? this\.currentChainConfig\.dexAgg; \}/,
+        /currentChainConfig\.(wrapped_native|native_vaults|vaults)/,
+        "CToken route and vault/native asset logic should use the setup snapshot, not mutable exported chain config",
     );
     assert.match(source, /const supportsNativeVaultZaps =[\s\S]{0,160}?nativeVaultZapper\.toLowerCase\(\) !== EMPTY_ADDRESS\.toLowerCase\(\);/);
     assert.match(source, /const supportsVaultZaps =[\s\S]{0,160}?vaultZapper\.toLowerCase\(\) !== EMPTY_ADDRESS\.toLowerCase\(\);/);
-    assert.match(source, /private get hasExecutableDexRoute\(\) \{ return this\.currentDexAgg\.router\.toLowerCase\(\) !== EMPTY_ADDRESS\.toLowerCase\(\); \}/);
+    assert.match(source, /const router = this\.boundDexAgg\?\.router;/);
+    assert.match(source, /typeof router === "string" && router\.toLowerCase\(\) !== EMPTY_ADDRESS\.toLowerCase\(\)/);
     assert.match(source, /const supportsSimpleZaps =[\s\S]{0,240}?this\.hasExecutableDexRoute;/);
     assert.match(source, /if\(supportsNativeVaultZaps && this\.isNativeVault\) this\.zapTypes\.push\('native-vault'\);/);
     assert.match(source, /if\(supportsVaultZaps && this\.isVault\) this\.zapTypes\.push\('vault'\);/);
     assert.match(source, /if\(supportsSimpleZaps\) this\.zapTypes\.push\('simple'\);/);
     assert.match(source, /if\(supportsSimpleZaps && "simplePositionManager" in this\.market\.plugins\) this\.leverageTypes\.push\('simple'\);/);
     assert.match(source, /if\(this\.zapTypes\.includes\('simple'\) && this\.hasExecutableDexRoute\)/);
+    const nativeTokenConstructorArgs = [...source.matchAll(/new NativeToken\(([\s\S]*?)\)/g)]
+        .map((match) => match[1] ?? "");
+    assert.ok(nativeTokenConstructorArgs.length > 0, "CToken should construct native token helpers");
+    for (const args of nativeTokenConstructorArgs) {
+        assert.match(
+            args,
+            /this\.currentChainAssets/,
+            "Every CToken-created NativeToken should use setup snapshot metadata",
+        );
+    }
+    assert.match(nativeTokenSource, /nativeMetadata\?: NativeTokenMetadata/);
+    assert.match(nativeTokenSource, /const metadata = nativeMetadata \?\? chain_config\[chain\]/);
     assert.doesNotMatch(
         source,
         /(?:const|let|var)\s+\w+\s*=\s*this\.currentChainConfig[\s\S]{0,400}?\w+\.dexAgg\.quoteAction/,
@@ -281,8 +410,22 @@ test("CToken DEX execution paths stay behind the market-bound adapter getter", (
         source,
         /new Zapper\(zap_contract,\s*signer,\s*type,\s*this\.setup,\s*this\.currentDexAgg\)/,
     );
+    assert.doesNotMatch(
+        zapperSource,
+        /getChainConfig/,
+        "Zapper should not fall back to mutable chain config for DEX routing",
+    );
+    assert.match(zapperSource, /constructor\(address: address, signer: curvance_signer, type: ZapperTypes, setup: SetupConfigSnapshot, dexAgg: IDexAgg\)/);
+    assert.match(zapperSource, /requires a setup-bound DEX aggregator/);
     assert.doesNotMatch(zapperSource, /config\.dexAgg\.quote/);
     assert.match(zapperSource, /this\.dexAgg\.quote/);
+    assert.match(zapperSource, /const wrappedNative = this\.setup\.assets\.wrapped_native;/);
+    assert.match(zapperSource, /outputToken\.toLowerCase\(\) === wrappedNative\.toLowerCase\(\)/);
+    assert.doesNotMatch(
+        zapperSource,
+        /config\.wrapped_native/,
+        "Zapper native/wrapped calldata should use the setup snapshot, not mutable exported chain config",
+    );
 });
 
 test("setupChain refreshes token route metadata after binding the context DEX adapter", () => {
@@ -301,6 +444,17 @@ test("setupChain result types expose typed global milestone data", () => {
     assert.match(source, /import type \{ MilestoneResponse \} from "\.\/classes\/Api";/);
     assert.match(source, /global_milestone: MilestoneResponse \| null;/);
     assert.match(classesIndex, /export \* from '\.\/Api';/);
+});
+
+test("portfolio snapshots read market provenance from setup snapshots", () => {
+    const source = readRepoFile("src/integrations/snapshot.ts");
+
+    assert.match(source, /const chainId = market\.setup\.chainId;/);
+    assert.doesNotMatch(
+        source,
+        /chain_config/,
+        "Snapshot chain ids should come from each market setup snapshot, not exported chain config",
+    );
 });
 
 test("MultiDex route advertisement uses an executable child router", () => {

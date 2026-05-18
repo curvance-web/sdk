@@ -3,6 +3,7 @@ import test from "node:test";
 import Decimal from "decimal.js";
 import { Api } from "../src/classes/Api";
 import { Market } from "../src/classes/Market";
+import { chain_config } from "../src/chains";
 import * as setupModule from "../src/setup";
 
 const merklModule = require("../src/integrations/merkl");
@@ -113,8 +114,20 @@ function createUserMarket(marketAddress: string, tokenAddress: string, userAsset
 }
 
 function createSetup(overrides: Record<string, any> = {}) {
+    const chain = overrides.chain ?? "monad-mainnet";
+    const chainConfig = chain_config[chain as keyof typeof chain_config];
     const setup = {
-        chain: "monad-mainnet",
+        chain,
+        chainId: chainConfig.chainId,
+        environment: chainConfig.environment,
+        assets: {
+            native_symbol: chainConfig.native_symbol,
+            native_name: chainConfig.native_name,
+            wrapped_native: chainConfig.wrapped_native,
+            native_vaults: chainConfig.native_vaults.map((vault) => ({ ...vault })),
+            vaults: chainConfig.vaults.map((vault) => ({ ...vault })),
+        },
+        services: chainConfig.services,
         readProvider: {} as any,
         signer: null,
         account: ACCOUNT,
@@ -408,9 +421,15 @@ test("Market.getAll fails clearly when a static market is missing dynamic state"
     );
 });
 
-test("Market.getAll fails production boot when deploy metadata is missing", async () => {
+test("Market.getAll fails production boot when deploy metadata is missing", async (t) => {
     Api.fetchNativeYields = async () => [];
     merklModule.fetchMerklOpportunities = async () => [];
+    const setup = createSetup({ contracts: { markets: {} } });
+    const originalEnvironment = chain_config["monad-mainnet"].environment;
+    (chain_config["monad-mainnet"] as any).environment = "testnet";
+    t.after(() => {
+        (chain_config["monad-mainnet"] as any).environment = originalEnvironment;
+    });
 
     const reader = {
         getAllMarketData: async () => ({
@@ -432,7 +451,7 @@ test("Market.getAll fails production boot when deploy metadata is missing", asyn
             ACCOUNT as any,
             {},
             {},
-            createSetup({ contracts: { markets: {} } }) as any,
+            setup as any,
         ),
         /Missing deployment metadata for market .* during monad-mainnet production setup/i,
     );
@@ -599,8 +618,10 @@ test("Market.getAll joins rewards by market address case-insensitively", async (
     assert.deepEqual(markets[0]?.incentives, [incentive]);
 });
 
-test("Market.getAll forwards chainId to Merkl and aggregates duplicate opportunities during boot", async () => {
+test("Market.getAll forwards setup snapshot chainId to Merkl and aggregates duplicate opportunities during boot", async (t) => {
     Api.fetchNativeYields = async () => [];
+    const setup = createSetup();
+    const originalChainId = chain_config["monad-mainnet"].chainId;
     const merklCalls: Array<{ action: string | undefined; chainId: number | undefined }> = [];
     merklModule.fetchMerklOpportunities = async (params: { action?: string; chainId?: number }) => {
         merklCalls.push({ action: params.action, chainId: params.chainId });
@@ -629,6 +650,179 @@ test("Market.getAll forwards chainId to Merkl and aggregates duplicate opportuni
             { identifier: TOKEN_A.toUpperCase(), apr: 7, name: "borrow-second", type: "merkl", tokens: [] },
         ];
     };
+    (chain_config["monad-mainnet"] as any).chainId = 999_999;
+    t.after(() => {
+        (chain_config["monad-mainnet"] as any).chainId = originalChainId;
+    });
+
+    const reader = {
+        getAllMarketData: async () => ({
+            staticMarket: [createStaticMarket(MARKET_A, TOKEN_A)],
+            dynamicMarket: [createDynamicMarket(MARKET_A, TOKEN_A, 111n)],
+            userData: {
+                locks: [],
+                markets: [createUserMarket(MARKET_A, TOKEN_A, 11n)],
+            },
+        }),
+    } as any;
+
+    const markets = await Market.getAll(
+        reader,
+        {} as any,
+        {} as any,
+        null,
+        ACCOUNT as any,
+        {},
+        {},
+        setup as any,
+    );
+
+    const token = markets[0]?.tokens[0] as any;
+    assert.deepEqual(merklCalls, [
+        { action: "LEND", chainId: 143 },
+        { action: "BORROW", chainId: 143 },
+    ]);
+    assertDecimalString(token.incentiveSupplyApy, "0.46", "boot should attach summed supply incentive APY");
+    assertDecimalString(token.incentiveBorrowApy, "0.12", "boot should attach summed borrow incentive APY");
+});
+
+test("Market.getAll consumes Merkl chain filtering through the real opportunity fetch path", async (t) => {
+    Api.fetchNativeYields = async () => [];
+    merklModule.fetchMerklOpportunities = originalFetchMerklOpportunities;
+    const originalFetch = globalThis.fetch;
+    const requestedUrls: string[] = [];
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+        const requestedUrl =
+            typeof input === "string"
+                ? input
+                : input instanceof URL
+                    ? input.toString()
+                    : input.url;
+        requestedUrls.push(requestedUrl);
+
+        const url = new URL(requestedUrl);
+        const action = url.searchParams.get("action");
+        const body = action === "LEND"
+            ? [
+                {
+                    identifier: "monad-lend",
+                    apr: 10,
+                    name: "monad-lend",
+                    type: "merkl",
+                    action: "LEND",
+                    chain: { id: 143, name: "Monad" },
+                    chainId: 143,
+                    computeChainId: 143,
+                    distributionChainId: 143,
+                    tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
+                },
+                {
+                    identifier: TOKEN_A,
+                    apr: 5,
+                    name: "metadata-less-lend",
+                    type: "merkl",
+                    tokens: [],
+                },
+                {
+                    identifier: "wrong-chain-lend",
+                    apr: 100,
+                    name: "wrong-chain-lend",
+                    type: "merkl",
+                    chainId: 421614,
+                    tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
+                },
+                {
+                    identifier: "conflicting-lend",
+                    apr: 200,
+                    name: "conflicting-lend",
+                    type: "merkl",
+                    chain: { id: 143, name: "Monad" },
+                    distributionChainId: 421614,
+                    tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
+                },
+                {
+                    identifier: "malformed-chain-lend",
+                    apr: 300,
+                    name: "malformed-chain-lend",
+                    type: "merkl",
+                    chainId: "143",
+                    tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
+                },
+                {
+                    identifier: "wrong-action-lend",
+                    apr: 400,
+                    name: "wrong-action-lend",
+                    type: "merkl",
+                    action: "BORROW",
+                    chainId: 143,
+                    tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
+                },
+            ]
+            : [
+                {
+                    identifier: TOKEN_A,
+                    apr: 2,
+                    name: "monad-borrow",
+                    type: "merkl",
+                    action: "BORROW",
+                    chainId: 143,
+                    computeChainId: 143,
+                    distributionChainId: 143,
+                    tokens: [],
+                },
+                {
+                    identifier: TOKEN_A.toUpperCase(),
+                    apr: 3,
+                    name: "metadata-less-borrow",
+                    type: "merkl",
+                    tokens: [],
+                },
+                {
+                    identifier: TOKEN_A,
+                    apr: 100,
+                    name: "wrong-chain-borrow",
+                    type: "merkl",
+                    chainId: 1,
+                    tokens: [],
+                },
+                {
+                    identifier: TOKEN_A,
+                    apr: 200,
+                    name: "conflicting-borrow",
+                    type: "merkl",
+                    chainId: 143,
+                    computeChainId: 1,
+                    tokens: [],
+                },
+                {
+                    identifier: TOKEN_A,
+                    apr: 300,
+                    name: "malformed-chain-borrow",
+                    type: "merkl",
+                    distributionChainId: "143",
+                    tokens: [],
+                },
+                {
+                    identifier: TOKEN_A,
+                    apr: 400,
+                    name: "wrong-action-borrow",
+                    type: "merkl",
+                    action: "LEND",
+                    chainId: 143,
+                    tokens: [],
+                },
+            ];
+
+        return {
+            ok: true,
+            json: async () => body,
+        } as Response;
+    }) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
 
     const reader = {
         getAllMarketData: async () => ({
@@ -652,13 +846,18 @@ test("Market.getAll forwards chainId to Merkl and aggregates duplicate opportuni
         createSetup() as any,
     );
 
+    const requestsByAction = new Map(
+        requestedUrls.map((request) => {
+            const url = new URL(request);
+            return [url.searchParams.get("action"), url] as const;
+        }),
+    );
+    assert.equal(requestsByAction.get("LEND")?.searchParams.get("chainId"), "143");
+    assert.equal(requestsByAction.get("BORROW")?.searchParams.get("chainId"), "143");
+
     const token = markets[0]?.tokens[0] as any;
-    assert.deepEqual(merklCalls, [
-        { action: "LEND", chainId: 143 },
-        { action: "BORROW", chainId: 143 },
-    ]);
-    assertDecimalString(token.incentiveSupplyApy, "0.46", "boot should attach summed supply incentive APY");
-    assertDecimalString(token.incentiveBorrowApy, "0.12", "boot should attach summed borrow incentive APY");
+    assertDecimalString(token.incentiveSupplyApy, "0.15", "boot should exclude wrong/conflicting-chain lend APY");
+    assertDecimalString(token.incentiveBorrowApy, "0.05", "boot should exclude wrong/conflicting-chain borrow APY");
 });
 
 test("Market.getAll scopes native-yield USDC suppression to Monad", async () => {
@@ -702,6 +901,89 @@ test("Market.getAll scopes native-yield USDC suppression to Monad", async () => 
 
     assertDecimalString((monadMarkets[0]?.tokens[0] as any).nativeApy, "0", "Monad USDC native yield remains suppressed");
     assertDecimalString((arbMarkets[0]?.tokens[0] as any).nativeApy, "0.05", "Non-Monad USDC native yield must not inherit Monad suppression");
+});
+
+test("Market.getAll rejects duplicate native-yield symbols before ambiguous hydration", async () => {
+    merklModule.fetchMerklOpportunities = async () => [];
+    Api.fetchNativeYields = async () => [
+        { symbol: "WMON", apy: 5 },
+        { symbol: "wmon", apy: 10 },
+    ];
+
+    const staticMarket = createStaticMarket(MARKET_A, TOKEN_A);
+    (staticMarket.tokens[0] as any).asset.symbol = "WMON";
+    const reader = {
+        getAllMarketData: async () => ({
+            staticMarket: [staticMarket],
+            dynamicMarket: [createDynamicMarket(MARKET_A, TOKEN_A, 111n)],
+            userData: {
+                locks: [],
+                markets: [createUserMarket(MARKET_A, TOKEN_A, 11n)],
+            },
+        }),
+    } as any;
+
+    await assert.rejects(
+        () => Market.getAll(
+            reader,
+            {} as any,
+            {} as any,
+            null,
+            ACCOUNT as any,
+            {},
+            {},
+            createSetup() as any,
+        ),
+        /Duplicate native-yield symbol wmon/i,
+    );
+});
+
+test("Market.getAll treats disabled native-yield service as graceful empty enrichment", async (t) => {
+    const originalFetch = globalThis.fetch;
+    const originalError = console.error;
+    let fetchCalls = 0;
+    let errorCalls = 0;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+        console.error = originalError;
+    });
+
+    globalThis.fetch = (async () => {
+        fetchCalls += 1;
+        throw new Error("disabled native yield should not fetch");
+    }) as unknown as typeof fetch;
+    console.error = () => {
+        errorCalls += 1;
+    };
+    merklModule.fetchMerklOpportunities = async () => [];
+
+    const reader = {
+        getAllMarketData: async () => ({
+            staticMarket: [createStaticMarket(MARKET_A, TOKEN_A)],
+            dynamicMarket: [createDynamicMarket(MARKET_A, TOKEN_A, 111n)],
+            userData: {
+                locks: [],
+                markets: [createUserMarket(MARKET_A, TOKEN_A, 11n)],
+            },
+        }),
+    } as any;
+
+    const markets = await Market.getAll(
+        reader,
+        {} as any,
+        {} as any,
+        null,
+        ACCOUNT as any,
+        {},
+        {},
+        createSetup({ chain: "arb-sepolia", api_url: null }) as any,
+    );
+
+    assert.equal(markets.length, 1);
+    assert.equal(fetchCalls, 0);
+    assert.equal(errorCalls, 0);
+    assertDecimalString((markets[0]?.tokens[0] as any).nativeApy, "0", "disabled native-yield service should hydrate as zero APY");
 });
 
 test("Market.hypotheticalLiquidityOf routes through ProtocolReader with the market address", async () => {

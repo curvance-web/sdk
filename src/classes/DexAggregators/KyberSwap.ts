@@ -7,6 +7,7 @@ import { BPS, EMPTY_ADDRESS, toContractSwapSlippage } from "../../helpers";
 import { safeBigInt, fetchWithTimeout, validateAddress, validateApiUrl, validateRouterAddress, validateSlippageBps } from "../../validation";
 import { AbiCoder } from "ethers";
 import { buildLocalSimpleZapTokens } from "./helpers";
+import { MONAD_KYBER_SWAP_SERVICE } from "../../chains/services";
 
 // ── Calldata validation ─────────────────────────────────────────────
 // The KyberSwap API returns an opaque calldata blob. We trust the API to
@@ -320,9 +321,9 @@ export class KyberSwap implements IDexAgg {
 
     constructor(
         dao: address = EMPTY_ADDRESS,
-        router: address = "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5",
-        chain: string = "monad-mainnet",
-        api: string = "https://aggregator-api.kyberswap.com",
+        router: address = MONAD_KYBER_SWAP_SERVICE.router,
+        chain: string = MONAD_KYBER_SWAP_SERVICE.chainSlug,
+        api: string = MONAD_KYBER_SWAP_SERVICE.apiBase,
         context?: DexAggContext,
     ) {
         // KyberSwap uses 'monad' instead of 'monad-mainnet' like other providers, so we adjust here
@@ -339,7 +340,7 @@ export class KyberSwap implements IDexAgg {
     }
 
     withContext(context: DexAggContext): KyberSwap {
-        return new KyberSwap(context.feePolicy.feeReceiver, this.router, this.chain, this.apiBase, context);
+        return new KyberSwap(context.checkerDao ?? this.dao, this.router, this.chain, this.apiBase, context);
     }
 
     async getAvailableTokens(

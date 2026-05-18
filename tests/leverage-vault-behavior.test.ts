@@ -18,6 +18,16 @@ const DEBT = '0x00000000000000000000000000000000000000d1';
 const WRAPPED_NATIVE = '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A';
 const USDC_ASSET = '0x00000000000000000000000000000000000000d2';
 
+function createSetupAssets() {
+    return {
+        native_symbol: 'MON',
+        native_name: 'Monad',
+        wrapped_native: WRAPPED_NATIVE,
+        native_vaults: [],
+        vaults: [],
+    };
+}
+
 function createPreviewStub(targetLeverage: Decimal) {
     return {
         currentLeverage: Decimal(1),
@@ -64,6 +74,7 @@ function createVaultExecutionHarness({ borrowAsset = WRAPPED_NATIVE }: { borrowA
         cache: { user: { debt: 0n } },
         setup: {
             chain: 'monad-mainnet',
+            assets: createSetupAssets(),
             feePolicy: {
                 feeReceiver: ACCOUNT,
                 getFeeBps: () => 0n,
@@ -134,6 +145,7 @@ function createVaultZapHarness() {
     (zapper as any).signer = { address: ACCOUNT };
     (zapper as any).setup = {
         chain: 'monad-mainnet',
+        assets: createSetupAssets(),
         feePolicy: {
             feeReceiver: ACCOUNT,
             getFeeBps: () => 0n,

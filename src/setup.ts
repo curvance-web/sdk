@@ -8,14 +8,18 @@ import { chain_config } from "./chains";
 import { Api } from "./classes/Api";
 import type { MilestoneResponse } from "./classes/Api";
 import { validateApiUrl } from "./validation";
-import { FeePolicy, NO_FEE_POLICY, defaultFeePolicyForChain } from "./feePolicy";
+import { CURVANCE_FEE_BPS, FeePolicy, NO_FEE_POLICY, defaultFeePolicyForChain } from "./feePolicy";
 import type IDexAgg from "./classes/DexAggregators/IDexAgg";
 import type { DexAggContext } from "./classes/DexAggregators/IDexAgg";
 import { deepFreeze, DeepReadonly } from "./immutability";
+import type { ChainAssetConfig, ChainEnvironment, ChainServiceConfig } from "./chains";
 
 export interface SetupConfigSnapshot {
     chain: ChainRpcPrefix;
     chainId: number;
+    environment: ChainEnvironment;
+    assets: DeepReadonly<ChainAssetConfig>;
+    services: DeepReadonly<ChainServiceConfig>;
     contracts: DeepReadonly<ReturnType<typeof getContractAddresses>>;
     readProvider: curvance_read_provider;
     signer: curvance_signer | null;
@@ -68,6 +72,9 @@ function createSetupConfig(
     return Object.freeze({
         chain,
         chainId: chain_config[chain].chainId,
+        environment: chain_config[chain].environment,
+        assets: deepFreeze(cloneChainAssets(chain_config[chain])),
+        services: deepFreeze(cloneChainServices(chain_config[chain].services)),
         readProvider,
         signer,
         account,
@@ -76,6 +83,32 @@ function createSetupConfig(
         api_url,
         feePolicy,
     }) as SetupConfigSnapshot;
+}
+
+function cloneChainAssets(config: ChainAssetConfig): ChainAssetConfig {
+    return {
+        native_symbol: config.native_symbol,
+        native_name: config.native_name,
+        wrapped_native: config.wrapped_native,
+        native_vaults: config.native_vaults.map((vault) => ({ ...vault })),
+        vaults: config.vaults.map((vault) => ({ ...vault })),
+    };
+}
+
+function cloneChainServices(services: ChainServiceConfig): ChainServiceConfig {
+    return {
+        curvanceApi: {
+            rewardsSlug: services.curvanceApi.rewardsSlug,
+            rewardChainAliases: [...services.curvanceApi.rewardChainAliases],
+            nativeYieldSlug: services.curvanceApi.nativeYieldSlug,
+            suppressedNativeYieldSymbols: [...services.curvanceApi.suppressedNativeYieldSymbols],
+        },
+        dexAggregators: {
+            kyberSwap: services.dexAggregators.kyberSwap == null
+                ? null
+                : { ...services.dexAggregators.kyberSwap },
+        },
+    };
 }
 
 function validateSetupConfig(config: SetupConfigSnapshot) {
@@ -89,6 +122,50 @@ function validateSetupConfig(config: SetupConfigSnapshot) {
     if (policyChain != undefined && policyChain !== "any" && policyChain !== config.chain) {
         throw new Error(
             `Fee policy for ${policyChain} cannot be used with setupChain('${config.chain}').`,
+        );
+    }
+}
+
+function validateCheckerFeePolicy(config: SetupConfigSnapshot, checkerDao: address | null) {
+    if (config.services.dexAggregators.kyberSwap == null) {
+        return;
+    }
+    if (checkerDao == null) {
+        throw new Error(`KyberSwap checker validation for ${config.chain} requires the setup DAO address.`);
+    }
+
+    const checkerCompatibility = config.feePolicy.checkerCompatibility;
+    if (checkerCompatibility == null) {
+        throw new Error(
+            `KyberSwap checker for ${config.chain} requires a checker-compatible fee policy ` +
+            `with exact feeBps=${CURVANCE_FEE_BPS} and feeReceiver=${checkerDao}. ` +
+            `Context-dependent policies are not allowed on checker-bound routes. ` +
+            `Omit options.feePolicy to use the setup-resolved default or pass a policy ` +
+            `that declares checkerCompatibility.`,
+        );
+    }
+
+    const sampleFeeBps = config.feePolicy.getFeeBps({
+        operation: "zap",
+        inputToken: "0x0000000000000000000000000000000000000001" as address,
+        outputToken: "0x0000000000000000000000000000000000000002" as address,
+        inputAmount: 1n,
+        currentLeverage: null,
+        targetLeverage: null,
+    });
+    const feeReceiver = checkerCompatibility.feeReceiver;
+    if (
+        checkerCompatibility.exactFeeBpsForDexSwaps !== CURVANCE_FEE_BPS ||
+        sampleFeeBps !== checkerCompatibility.exactFeeBpsForDexSwaps ||
+        feeReceiver == null ||
+        feeReceiver.toLowerCase() !== checkerDao.toLowerCase()
+    ) {
+        throw new Error(
+            `KyberSwap checker for ${config.chain} requires feeBps=${CURVANCE_FEE_BPS} ` +
+            `and feeReceiver=${checkerDao}; got ` +
+            `feeBps=${checkerCompatibility.exactFeeBpsForDexSwaps} ` +
+            `sampleFeeBps=${sampleFeeBps} feeReceiver=${feeReceiver ?? "undefined"}. ` +
+            `Omit options.feePolicy to use the setup-resolved default or pass a checker-compatible policy.`,
         );
     }
 }
@@ -254,9 +331,13 @@ export async function setupChain(
             nextSetupConfig.readProvider,
             nextSetupConfig.chain,
         );
+        const requiresCheckerPolicy = nextSetupConfig.services.dexAggregators.kyberSwap != null;
+        const setupDaoAddress = options.feePolicy == null || requiresCheckerPolicy
+            ? await reader.getDaoAddress()
+            : null;
         const feePolicy = options.feePolicy ?? defaultFeePolicyForChain(
             chain,
-            await reader.getDaoAddress(),
+            setupDaoAddress as address,
         );
         nextSetupConfig = createSetupConfig(
             chain,
@@ -267,6 +348,7 @@ export async function setupChain(
             feePolicy,
         );
         validateSetupConfig(nextSetupConfig);
+        validateCheckerFeePolicy(nextSetupConfig, setupDaoAddress);
 
         const { milestones, incentives } = await Api.getRewards(nextSetupConfig);
         const oracle_manager = new OracleManager(
@@ -286,6 +368,7 @@ export async function setupChain(
         const dexAgg = bindDexAggContext(chain_config[chain].dexAgg, {
             markets,
             feePolicy: nextSetupConfig.feePolicy,
+            checkerDao: setupDaoAddress ?? undefined,
         });
         for (const market of markets) {
             market.dexAgg = dexAgg;

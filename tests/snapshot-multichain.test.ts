@@ -4,6 +4,7 @@ import Decimal from "decimal.js";
 import { Market } from "../src/classes/Market";
 import { ProtocolReader } from "../src/classes/ProtocolReader";
 import { snapshotMarket, takePortfolioSnapshot } from "../src/integrations/snapshot";
+import { chain_config } from "../src/chains";
 
 const ACCOUNT = "0x00000000000000000000000000000000000000aa";
 const OTHER_ACCOUNT = "0x00000000000000000000000000000000000000bb";
@@ -60,11 +61,12 @@ function createSnapshotMarket({
 }) {
     const market = Object.create(Market.prototype) as Market;
     const token = createToken(name, true);
+    const chainId = chain_config[chain as keyof typeof chain_config]?.chainId;
     market.address = address as any;
     market.account = account as any;
     market.signer = signer as any ?? null;
     market.reader = (reader ?? { batchKey: null, getAllDynamicState: async () => ({ dynamicMarket: [], userData: { markets: [] } }) }) as any;
-    market.setup = { chain } as any;
+    market.setup = { chain, chainId } as any;
     market.tokens = [token] as any;
     market.applyState = (applyState ?? (() => undefined)) as any;
 
@@ -113,6 +115,25 @@ test("takePortfolioSnapshot uses explicit markets and infers a single-chain labe
     assert.equal(snapshot.markets[0]?.chainId, 143);
     assert.equal(snapshot.totalDepositsUSD, "10");
     assert.equal(snapshot.totalDebtUSD, "2");
+});
+
+test("snapshotMarket uses market setup chainId after exported chain config moves", (t) => {
+    const market = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Monad Market",
+        chain: "monad-mainnet",
+    });
+    const originalChainId = chain_config["monad-mainnet"].chainId;
+
+    (chain_config["monad-mainnet"] as any).chainId = 999_999;
+    t.after(() => {
+        (chain_config["monad-mainnet"] as any).chainId = originalChainId;
+    });
+
+    const snapshot = snapshotMarket(market);
+
+    assert.equal(snapshot.chain, "monad-mainnet");
+    assert.equal(snapshot.chainId, 143);
 });
 
 test("takePortfolioSnapshot rejects explicit chain labels that contradict market provenance", async () => {

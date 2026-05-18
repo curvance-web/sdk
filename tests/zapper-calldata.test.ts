@@ -10,6 +10,16 @@ const ZAPPER = "0x00000000000000000000000000000000000000b1" as address;
 const TOKEN = "0x00000000000000000000000000000000000000d1" as address;
 const RECEIVER = "0x00000000000000000000000000000000000000f2" as address;
 
+function createSetupAssets(wrappedNative: address = chain_config["monad-mainnet"].wrapped_native) {
+    return {
+        native_symbol: chain_config["monad-mainnet"].native_symbol,
+        native_name: chain_config["monad-mainnet"].native_name,
+        wrapped_native: wrappedNative,
+        native_vaults: [],
+        vaults: [],
+    };
+}
+
 function createBufferedToken() {
     const calls: Array<{ assets: bigint; bufferBps: bigint }> = [];
     const token = Object.create(CToken.prototype) as CToken;
@@ -27,7 +37,11 @@ function createBufferedToken() {
     return { token, calls };
 }
 
-function createZapper(feeBps: bigint = 0n, dexAgg: any = chain_config["monad-mainnet"].dexAgg) {
+function createZapper(
+    feeBps: bigint = 0n,
+    dexAgg: any = chain_config["monad-mainnet"].dexAgg,
+    wrappedNative: address = chain_config["monad-mainnet"].wrapped_native,
+) {
     const calls: Array<{ method: string; args: unknown[] }> = [];
     const zapper = Object.create(Zapper.prototype) as Zapper;
     (zapper as any).address = ZAPPER;
@@ -39,6 +53,7 @@ function createZapper(feeBps: bigint = 0n, dexAgg: any = chain_config["monad-mai
             getFeeBps: () => feeBps,
             feeReceiver: feeBps > 0n ? RECEIVER : undefined,
         },
+        assets: createSetupAssets(wrappedNative),
     };
     (zapper as any).getCallData = (method: string, args: unknown[]) => {
         calls.push({ method, args });
@@ -196,6 +211,7 @@ test("CToken.getZapper binds simple zap quotes to the market DEX aggregator", as
                 getFeeBps: () => 4n,
                 feeReceiver: RECEIVER,
             },
+            assets: createSetupAssets(),
         },
     };
     (token as any).getCallData = () => "0xtoken";
@@ -232,6 +248,76 @@ test("CToken.getZapper binds simple zap quotes to the market DEX aggregator", as
         assets: 9_800n,
         bufferBps: LEVERAGE.SHARES_BUFFER_BPS,
     }]);
+});
+
+test("Zapper constructor requires the setup-bound DEX aggregator", () => {
+    assert.throws(
+        () => new (Zapper as any)(
+            ZAPPER,
+            { address: RECEIVER },
+            "simple",
+            {
+                chain: "monad-mainnet",
+                feePolicy: {
+                    getFeeBps: () => 0n,
+                    feeReceiver: undefined,
+                },
+                assets: createSetupAssets(),
+            },
+        ),
+        /requires a setup-bound DEX aggregator/i,
+    );
+});
+
+test("CToken native deposit tokens use setup snapshot metadata after chain config moves", async (t) => {
+    const originalSymbol = chain_config["monad-mainnet"].native_symbol;
+    const originalName = chain_config["monad-mainnet"].native_name;
+    const token = Object.create(CToken.prototype) as CToken;
+
+    (token as any).provider = {};
+    (token as any).cache = {
+        asset: {
+            address: TOKEN,
+            decimals: 18n,
+            symbol: "OUT",
+            name: "Output Token",
+        },
+    };
+    (token as any).zapTypes = ["native-simple"];
+    (token as any).market = {
+        signer: null,
+        account: null,
+        setup: {
+            chain: "monad-mainnet",
+            contracts: {
+                OracleManager: "0x00000000000000000000000000000000000000a2",
+                zappers: {
+                    simpleZapper: ZAPPER,
+                },
+            },
+            assets: {
+                native_symbol: "SMON",
+                native_name: "Snapshot MON",
+                wrapped_native: TOKEN,
+                native_vaults: [],
+                vaults: [],
+            },
+        },
+    };
+
+    (chain_config["monad-mainnet"] as any).native_symbol = "MOVED";
+    (chain_config["monad-mainnet"] as any).native_name = "Moved Native";
+    t.after(() => {
+        (chain_config["monad-mainnet"] as any).native_symbol = originalSymbol;
+        (chain_config["monad-mainnet"] as any).native_name = originalName;
+    });
+
+    const tokens = await token.getDepositTokens();
+    const nativeOption = tokens.find((option) => option.type === "native-simple");
+
+    assert.ok(nativeOption);
+    assert.equal(nativeOption.interface.symbol, "SMON");
+    assert.equal(nativeOption.interface.name, "Snapshot MON");
 });
 
 test("native simple zap expectedShares uses buffered convertToShares", async () => {
@@ -274,6 +360,56 @@ test("Zapper.nativeZap wraps native input for native-simple wrapped-native depos
     assert.equal(args[1], true);
     assert.equal(args[2].inputToken, NATIVE_ADDRESS);
     assert.notEqual(args[2].outputToken.toLowerCase(), NATIVE_ADDRESS.toLowerCase());
+});
+
+test("Zapper native calldata uses setup snapshot wrapped native after chain config moves", async (t) => {
+    const snapshotWrapped = "0x0000000000000000000000000000000000000aa1" as address;
+    const movedWrapped = "0x0000000000000000000000000000000000000bb1" as address;
+    const originalWrapped = chain_config["monad-mainnet"].wrapped_native;
+    const { token } = createBufferedToken();
+    const quoteCalls: Array<{ tokenIn: string; tokenOut: string; amount: bigint }> = [];
+    const { zapper, calls: calldataCalls } = createZapper(0n, {
+        quote: async (
+            _wallet: string,
+            tokenIn: string,
+            tokenOut: string,
+            amount: bigint,
+        ) => {
+            quoteCalls.push({ tokenIn, tokenOut, amount });
+            return {
+                to: "0x00000000000000000000000000000000000000e1" as address,
+                min_out: amount - 100n,
+                out: amount,
+                calldata: "0x1234",
+            };
+        },
+    }, snapshotWrapped);
+
+    (chain_config["monad-mainnet"] as any).wrapped_native = movedWrapped;
+    t.after(() => {
+        (chain_config["monad-mainnet"] as any).wrapped_native = originalWrapped;
+    });
+
+    await zapper.getSimpleZapCalldata(token, NATIVE_ADDRESS, snapshotWrapped, 20_000n, false, 50n, RECEIVER);
+
+    assert.deepEqual(quoteCalls, []);
+    let args = calldataCalls[0]?.args as any[];
+    assert.equal(args[1], true);
+    assert.equal(args[2].inputToken, NATIVE_ADDRESS);
+    assert.equal(args[2].outputToken, snapshotWrapped);
+
+    await zapper.getSimpleZapCalldata(token, NATIVE_ADDRESS, TOKEN, 30_000n, false, 50n, RECEIVER);
+
+    assert.deepEqual(quoteCalls, [{
+        tokenIn: snapshotWrapped,
+        tokenOut: TOKEN,
+        amount: 30_000n,
+    }]);
+    args = calldataCalls[1]?.args as any[];
+    assert.equal(args[1], true);
+    assert.equal(args[2].inputToken, NATIVE_ADDRESS);
+    assert.equal(args[2].outputToken, TOKEN);
+    assert.equal(args[2].target, "0x00000000000000000000000000000000000000e1");
 });
 
 test("Zapper.simpleZap forwards native input value to the zapper call", async () => {

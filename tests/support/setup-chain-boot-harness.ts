@@ -52,7 +52,7 @@ export interface SetupChainBootHarnessOptions {
         milestones: Milestones;
         incentives: Incentives;
     }>);
-    merkl?: (params: MerklOpportunityParams) => MaybePromise<MerklOpportunity[]>;
+    merkl?: false | ((params: MerklOpportunityParams) => MaybePromise<MerklOpportunity[]>);
     daoAddress?: address;
     fetch?: (url: string) => MaybePromise<any>;
     captureWarnings?: boolean;
@@ -119,13 +119,16 @@ export function installSetupChainBootHarness(
         return options.daoAddress ?? BOOT_DAO_ADDRESS;
     }) as unknown as typeof ProtocolReader.prototype.getDaoAddress;
 
-    merklModule.fetchMerklOpportunities = async (params: MerklOpportunityParams) => {
-        harness.merklCalls.push({
-            action: params.action,
-            chainId: params.chainId,
-        });
-        return options.merkl == null ? [] : await options.merkl(params);
-    };
+    const merklHandler = options.merkl;
+    if (merklHandler !== false) {
+        merklModule.fetchMerklOpportunities = async (params: MerklOpportunityParams) => {
+            harness.merklCalls.push({
+                action: params.action,
+                chainId: params.chainId,
+            });
+            return merklHandler == null ? [] : await merklHandler(params);
+        };
+    }
 
     if (captureWarnings) {
         console.warn = (...args: unknown[]) => {

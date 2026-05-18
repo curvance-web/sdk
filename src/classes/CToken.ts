@@ -1,5 +1,5 @@
 import { Contract, TransactionResponse } from "ethers";
-import { contractSetup, BPS, BPS_DECIMAL, ChangeRate, getRateSeconds, requireAccount, requireSigner, WAD, getChainConfig, EMPTY_ADDRESS, toDecimal, SECONDS_PER_YEAR, toBps, NATIVE_ADDRESS, UINT256_MAX, amplifyContractSlippage } from "../helpers";
+import { contractSetup, BPS, BPS_DECIMAL, ChangeRate, getRateSeconds, requireAccount, requireSigner, WAD, EMPTY_ADDRESS, toDecimal, SECONDS_PER_YEAR, toBps, NATIVE_ADDRESS, UINT256_MAX, amplifyContractSlippage } from "../helpers";
 import { AdaptorTypes, DynamicMarketToken, StaticMarketToken, UserMarketToken } from "./ProtocolReader";
 import { ERC20 } from "./ERC20";
 import { Market, PluginTypes } from "./Market";
@@ -13,6 +13,7 @@ import { BorrowableCToken } from "./BorrowableCToken";
 import { NativeToken } from "./NativeToken";
 import { ERC4626 } from "./ERC4626";
 import FormatConverter from "./FormatConverter";
+import type IDexAgg from "./DexAggregators/IDexAgg";
 
 const EXCLUDED_ZAP_SYMBOLS = new Set([
     'eBTC', 'vUSD', 'ezETH', 'YZM', 'wsrUSD', 'sAUSD',
@@ -322,7 +323,7 @@ export class CToken extends Calldata<ICToken> {
         this.cache = cache;
         this.market = market;
 
-        const chainSettings = this.currentChainConfig;
+        const chainSettings = this.currentChainAssets;
         const assetAddr = this.asset.address.toLowerCase();
         this.isNativeVault = chainSettings.native_vaults.some(vault => vault.contract.toLowerCase() == assetAddr);
         this.isVault = chainSettings.vaults.some(vault => vault.contract.toLowerCase() == assetAddr);
@@ -397,9 +398,22 @@ export class CToken extends Calldata<ICToken> {
 
     private get setup() { return this.market.setup; }
     private get currentChain() { return this.setup.chain; }
-    private get currentChainConfig() { return getChainConfig(this.currentChain); }
-    private get currentDexAgg() { return this.market.dexAgg ?? this.currentChainConfig.dexAgg; }
-    private get hasExecutableDexRoute() { return this.currentDexAgg.router.toLowerCase() !== EMPTY_ADDRESS.toLowerCase(); }
+    private get currentChainAssets() { return this.setup.assets; }
+    private get boundDexAgg(): IDexAgg | null { return this.market.dexAgg ?? null; }
+    private get currentDexAgg() {
+        const dexAgg = this.boundDexAgg;
+        if (dexAgg == null) {
+            throw new Error(
+                `DEX aggregator is not bound for token ${this.address} on ${this.currentChain}. ` +
+                `Use setupChain(...) result markets or attach a setup-bound dexAgg before route discovery/execution.`,
+            );
+        }
+        return dexAgg;
+    }
+    private get hasExecutableDexRoute() {
+        const router = this.boundDexAgg?.router;
+        return typeof router === "string" && router.toLowerCase() !== EMPTY_ADDRESS.toLowerCase();
+    }
     protected requireSigner() { return requireSigner(this.signer); }
     protected getAccountOrThrow(account: address | null = null) {
         return requireAccount(account ?? this.account, this.signer);
@@ -492,7 +506,7 @@ export class CToken extends Calldata<ICToken> {
     ) {
         this.assertBorrowTokenBelongsToMarket(borrow);
         const expectedAsset = type === "native-vault"
-            ? this.currentChainConfig.wrapped_native
+            ? this.currentChainAssets.wrapped_native
             : await this.getVaultAsset(false);
         const actualAsset = borrow.asset.address;
 
@@ -1285,6 +1299,7 @@ export class CToken extends Calldata<ICToken> {
                     this.setup.contracts.OracleManager as address,
                     this.signer,
                     this.account,
+                    this.currentChainAssets,
                 );
             } else {
                 asset = new ERC20(
@@ -1306,6 +1321,7 @@ export class CToken extends Calldata<ICToken> {
                         this.setup.contracts.OracleManager as address,
                         this.signer,
                         this.account,
+                        this.currentChainAssets,
                     );
                     break;
                 case 'native-simple':
@@ -1315,6 +1331,7 @@ export class CToken extends Calldata<ICToken> {
                         this.setup.contracts.OracleManager as address,
                         this.signer,
                         this.account,
+                        this.currentChainAssets,
                     );
                     break;
                 default: throw new Error("Unsupported zap type for balance fetch");
@@ -1485,6 +1502,7 @@ export class CToken extends Calldata<ICToken> {
                     this.setup.contracts.OracleManager as address,
                     this.signer,
                     this.account,
+                    this.currentChainAssets,
                 ),
                 type: 'native-vault'
             });
@@ -1499,6 +1517,7 @@ export class CToken extends Calldata<ICToken> {
                     this.setup.contracts.OracleManager as address,
                     this.signer,
                     this.account,
+                    this.currentChainAssets,
                 ),
                 type: 'native-simple'
             });
@@ -1531,6 +1550,7 @@ export class CToken extends Calldata<ICToken> {
                         this.setup.contracts.OracleManager as address,
                         this.signer,
                         this.account,
+                        this.currentChainAssets,
                     ),
                     type: 'simple'
                 });

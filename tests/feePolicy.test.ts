@@ -55,6 +55,10 @@ describe('FeePolicy', () => {
             assert.strictEqual(policy.chain, 'monad-mainnet');
             assert.strictEqual(policy.getFeeBps(baseCtx()), CURVANCE_FEE_BPS);
             assert.strictEqual(policy.feeReceiver, FEE_RECEIVER);
+            assert.deepStrictEqual(policy.checkerCompatibility, {
+                exactFeeBpsForDexSwaps: CURVANCE_FEE_BPS,
+                feeReceiver: FEE_RECEIVER,
+            });
         });
 
         test('defaults non-Monad chains to the same setup-resolved 4 bps policy', () => {
@@ -155,6 +159,13 @@ describe('FeePolicy', () => {
         test('feeReceiver is preserved', () => {
             assert.strictEqual(policy.feeReceiver, FEE_RECEIVER);
         });
+
+        test('declares checker compatibility for context-invariant DEX swap fees', () => {
+            assert.deepStrictEqual(policy.checkerCompatibility, {
+                exactFeeBpsForDexSwaps: 4n,
+                feeReceiver: FEE_RECEIVER,
+            });
+        });
     });
 
     describe('flatFeePolicy no-op exemptions', () => {
@@ -231,6 +242,30 @@ describe('FeePolicy', () => {
                 0n,
             );
         });
+
+        test('captures wrapped-native at construction when chain config moves later', (t) => {
+            const originalWrapped = chain_config['monad-mainnet'].wrapped_native;
+            const movedWrapped = '0x0000000000000000000000000000000000000bb2' as address;
+            const policy = flatFeePolicy({
+                bps: 4n,
+                feeReceiver: FEE_RECEIVER,
+                chain: 'monad-mainnet',
+            });
+
+            t.after(() => {
+                (chain_config['monad-mainnet'] as any).wrapped_native = originalWrapped;
+            });
+            (chain_config['monad-mainnet'] as any).wrapped_native = movedWrapped;
+
+            assert.strictEqual(
+                policy.getFeeBps(baseCtx({ inputToken: NATIVE, outputToken: originalWrapped })),
+                0n,
+            );
+            assert.strictEqual(
+                policy.getFeeBps(baseCtx({ inputToken: NATIVE, outputToken: movedWrapped })),
+                4n,
+            );
+        });
     });
 
     describe('flatFeePolicy stable-tier override', () => {
@@ -252,6 +287,10 @@ describe('FeePolicy', () => {
                 policy.getFeeBps(baseCtx({ inputToken: USDC, outputToken: AUSD })),
                 1n,
             );
+        });
+
+        test('does not declare checker compatibility for lower context-dependent tiers', () => {
+            assert.equal(policy.checkerCompatibility, undefined);
         });
 
         test('charges default rate on volatile→volatile swap', () => {
@@ -331,6 +370,21 @@ describe('FeePolicy', () => {
                 noTierPolicy.getFeeBps(baseCtx({ inputToken: USDC, outputToken: AUSD })),
                 4n,
             );
+        });
+
+        test('declares checker compatibility when the stable tier matches default bps', () => {
+            const sameBpsPolicy = flatFeePolicy({
+                bps: CURVANCE_FEE_BPS,
+                stableToStableBps: CURVANCE_FEE_BPS,
+                feeReceiver: FEE_RECEIVER,
+                chain: 'monad-mainnet',
+                classify,
+            });
+
+            assert.deepStrictEqual(sameBpsPolicy.checkerCompatibility, {
+                exactFeeBpsForDexSwaps: CURVANCE_FEE_BPS,
+                feeReceiver: FEE_RECEIVER,
+            });
         });
     });
 });

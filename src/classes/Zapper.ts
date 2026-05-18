@@ -1,6 +1,6 @@
 import { Contract, TransactionResponse } from "ethers";
 import { address, bytes, curvance_signer } from "../types";
-import { contractSetup, EMPTY_ADDRESS, EMPTY_BYTES, getChainConfig, NATIVE_ADDRESS, toContractSwapSlippage } from "../helpers";
+import { contractSetup, EMPTY_ADDRESS, EMPTY_BYTES, NATIVE_ADDRESS, toContractSwapSlippage } from "../helpers";
 import { CToken } from "./CToken";
 import { Calldata } from "./Calldata";
 import abi from '../abis/SimpleZapper.json';
@@ -44,13 +44,19 @@ export class Zapper extends Calldata<IZapper> {
     setup: SetupConfigSnapshot;
     dexAgg: IDexAgg;
 
-    constructor(address: address, signer: curvance_signer, type: ZapperTypes, setup: SetupConfigSnapshot, dexAgg?: IDexAgg) {
+    constructor(address: address, signer: curvance_signer, type: ZapperTypes, setup: SetupConfigSnapshot, dexAgg: IDexAgg) {
         super();
         this.address = address;
         this.signer = signer;
         this.type = type;
         this.setup = setup;
-        this.dexAgg = dexAgg ?? getChainConfig(setup.chain).dexAgg;
+        if (dexAgg == undefined) {
+            throw new Error(
+                `${type} Zapper requires a setup-bound DEX aggregator. ` +
+                `Use CToken.getZapper(...) or pass the dexAgg returned by setupChain(...).`,
+            );
+        }
+        this.dexAgg = dexAgg;
         this.contract = contractSetup<IZapper>(signer, address, abi);
     }
 
@@ -89,16 +95,16 @@ export class Zapper extends Calldata<IZapper> {
     async getSimpleZapCalldata(ctoken: CToken, inputToken: address, outputToken: address, amount: bigint, collateralize: boolean, slippage: bigint, receiver: address = this.signer.address as address) {
         this.assertCTokenBelongsToSetup(ctoken);
         const isNative = inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
-        const config = getChainConfig(this.setup.chain);
+        const wrappedNative = this.setup.assets.wrapped_native;
 
         // For native MON: if the deposit token IS wrapped native, just wrap (no swap needed)
-        if (isNative && outputToken.toLowerCase() === config.wrapped_native.toLowerCase()) {
+        if (isNative && outputToken.toLowerCase() === wrappedNative.toLowerCase()) {
             return this.getNativeZapCalldata(ctoken, amount, collateralize, true, receiver);
         }
 
         // For native MON into non-WMON tokens: wrap first, then swap WMON → target
         // The contract handles wrapping when depositAsWrappedNative=true
-        const swapInputToken = isNative ? config.wrapped_native as address : inputToken;
+        const swapInputToken = isNative ? wrappedNative : inputToken;
 
         // No-op short-circuit: same-token zap (e.g., USDC → USDC market). The
         // SimpleZapper.swapAndDeposit contract handles this on-chain via
@@ -203,12 +209,12 @@ export class Zapper extends Calldata<IZapper> {
         const expected_shares = (ctoken.isVault || ctoken.isNativeVault)
             ? vaultAssets
             : await ctoken.convertToShares(vaultAssets);
-        const config = getChainConfig(this.setup.chain);
+        const wrappedNative = this.setup.assets.wrapped_native;
 
         const swap: Swap = {
             inputToken: NATIVE_ADDRESS,
             inputAmount: amount,
-            outputToken: wrapped ? config.wrapped_native : NATIVE_ADDRESS,
+            outputToken: wrapped ? wrappedNative : NATIVE_ADDRESS,
             target: EMPTY_ADDRESS,
             slippage: 0n,
             call: EMPTY_BYTES
