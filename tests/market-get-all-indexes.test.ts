@@ -4,29 +4,30 @@ import { Market } from "../src/classes/Market";
 import { aggregateMerklAprByToken } from "../src/helpers";
 import Decimal from "decimal.js";
 
-test("buildDeployDataIndex normalizes addresses and keeps the first deployment entry", () => {
-    const index = (Market as any).buildDeployDataIndex({
-        contracts: {
-            markets: {
-                first: {
-                    address: "0xAbC",
-                    plugins: { simplePositionManager: "0x1" },
-                },
-                second: {
-                    address: "0xaBc",
-                    plugins: { simplePositionManager: "0x2" },
-                },
-                ignoredPrimitive: "0xdef",
-                ignoredNull: null,
-            },
-        },
-    });
+function assertDecimalString(actual: Decimal | undefined, expected: string, message: string) {
+    assert.equal(actual?.toString(), expected, message);
+}
 
-    assert.equal(index.size, 1);
-    assert.deepEqual(index.get("0xabc"), {
-        name: "first",
-        plugins: { simplePositionManager: "0x1" },
-    });
+test("buildDeployDataIndex rejects duplicate deployment market addresses", () => {
+    assert.throws(
+        () => (Market as any).buildDeployDataIndex({
+            contracts: {
+                markets: {
+                    first: {
+                        address: "0x00000000000000000000000000000000000000a1",
+                        plugins: { simplePositionManager: "0x0000000000000000000000000000000000000001" },
+                    },
+                    second: {
+                        address: "0x00000000000000000000000000000000000000A1",
+                        plugins: { simplePositionManager: "0x0000000000000000000000000000000000000002" },
+                    },
+                    ignoredPrimitive: "0xdef",
+                    ignoredNull: null,
+                },
+            },
+        }),
+        /Duplicate deployment market address/i,
+    );
 });
 
 test("aggregateMerklAprByToken sums duplicate opportunities by the shared matching policy", () => {
@@ -56,20 +57,17 @@ test("aggregateMerklAprByToken sums duplicate opportunities by the shared matchi
     ], "borrow");
 
     assert.equal(depositApy.size, 1);
-    assert.ok(depositApy.get("0xabc")?.eq(new Decimal(0.46)));
+    assertDecimalString(depositApy.get("0xabc"), "0.46", "deposit APY should sum duplicate token membership rows");
     assert.equal(borrowApy.size, 1);
-    assert.ok(borrowApy.get("0xabc")?.eq(new Decimal(0.12)));
+    assertDecimalString(borrowApy.get("0xabc"), "0.12", "borrow APY should sum identifier and membership matches");
 });
 
-test("buildYieldIndex keeps the first match for a token symbol", () => {
-    const index = (Market as any).buildYieldIndex([
-        { symbol: "ausd", apy: 1.23 },
-        { symbol: "AUSD", apy: 4.56 },
-    ]);
-
-    assert.equal(index.size, 1);
-    assert.deepEqual(index.get("AUSD"), {
-        symbol: "ausd",
-        apy: 1.23,
-    });
+test("buildYieldIndex rejects duplicate token symbols", () => {
+    assert.throws(
+        () => (Market as any).buildYieldIndex([
+            { symbol: "ausd", apy: 1.23 },
+            { symbol: "AUSD", apy: 4.56 },
+        ]),
+        /Duplicate native-yield symbol AUSD/i,
+    );
 });

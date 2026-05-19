@@ -4,7 +4,6 @@ import {
     flatFeePolicy,
     NO_FEE_POLICY,
     CURVANCE_FEE_BPS,
-    CURVANCE_DAO_FEE_RECEIVER,
     defaultFeePolicyForChain,
     getMonadMainnetFeePolicy,
     type FeePolicyContext,
@@ -12,6 +11,7 @@ import {
 } from '../src/feePolicy';
 import { chain_config } from '../src/chains';
 import { address } from '../src/types';
+import { EMPTY_ADDRESS } from '../src/helpers';
 import Decimal from 'decimal.js';
 
 // Monad mainnet addresses for tests — these are what `chain_config['monad-mainnet'].wrapped_native`
@@ -19,6 +19,7 @@ import Decimal from 'decimal.js';
 const WMON: address = '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A';
 const ARB_WRAPPED_NATIVE: address = '0x980B62Da83eFf3D4576C647993b0c1D7faf17c73';
 const NATIVE: address = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+const FEE_RECEIVER: address = '0x0000000000000000000000000000000000000da0';
 const USDC: address = '0x754704Bc059F8C67012fEd69BC8A327a5aafb603';
 const AUSD: address = '0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a';
 const WBTC: address = '0x0555E30da8f98308EdB960aa94C0Db47230d2B9c';
@@ -40,25 +41,38 @@ describe('FeePolicy', () => {
             assert.strictEqual(NO_FEE_POLICY.getFeeBps(baseCtx({ operation: 'zap' })), 0n);
             assert.strictEqual(NO_FEE_POLICY.getFeeBps(baseCtx({ operation: 'leverage-down' })), 0n);
             assert.strictEqual(NO_FEE_POLICY.getFeeBps(baseCtx({ operation: 'deposit-and-leverage' })), 0n);
+            assert.strictEqual(NO_FEE_POLICY.chain, 'any');
         });
 
-        test('feeReceiver is the Curvance DAO address', () => {
-            assert.strictEqual(NO_FEE_POLICY.feeReceiver, CURVANCE_DAO_FEE_RECEIVER);
+        test('feeReceiver is the zero address because no-fee policy never submits fees', () => {
+            assert.strictEqual(NO_FEE_POLICY.feeReceiver, EMPTY_ADDRESS);
         });
     });
 
     describe('defaultFeePolicyForChain', () => {
-        test('defaults monad-mainnet to the live Curvance swap fee policy', () => {
-            const policy = defaultFeePolicyForChain('monad-mainnet');
-            assert.strictEqual(policy, getMonadMainnetFeePolicy());
+        test('defaults monad-mainnet to the setup-resolved Curvance swap fee policy', () => {
+            const policy = defaultFeePolicyForChain('monad-mainnet', FEE_RECEIVER);
+            assert.strictEqual(policy.chain, 'monad-mainnet');
             assert.strictEqual(policy.getFeeBps(baseCtx()), CURVANCE_FEE_BPS);
-            assert.strictEqual(policy.feeReceiver, CURVANCE_DAO_FEE_RECEIVER);
+            assert.strictEqual(policy.feeReceiver, FEE_RECEIVER);
+            assert.deepStrictEqual(policy.checkerCompatibility, {
+                exactFeeBpsForDexSwaps: CURVANCE_FEE_BPS,
+                feeReceiver: FEE_RECEIVER,
+            });
         });
 
-        test('keeps non-Monad chains on the no-fee default', () => {
-            const policy = defaultFeePolicyForChain('arb-sepolia');
-            assert.strictEqual(policy, NO_FEE_POLICY);
-            assert.strictEqual(policy.getFeeBps(baseCtx()), 0n);
+        test('defaults non-Monad chains to the same setup-resolved 4 bps policy', () => {
+            const policy = defaultFeePolicyForChain('arb-sepolia', FEE_RECEIVER);
+            assert.strictEqual(policy.chain, 'arb-sepolia');
+            assert.strictEqual(policy.getFeeBps(baseCtx()), CURVANCE_FEE_BPS);
+            assert.strictEqual(policy.feeReceiver, FEE_RECEIVER);
+        });
+
+        test('getMonadMainnetFeePolicy keeps the public convenience helper receiver-explicit', () => {
+            const policy = getMonadMainnetFeePolicy(FEE_RECEIVER);
+            assert.strictEqual(policy.chain, 'monad-mainnet');
+            assert.strictEqual(policy.getFeeBps(baseCtx()), CURVANCE_FEE_BPS);
+            assert.strictEqual(policy.feeReceiver, FEE_RECEIVER);
         });
     });
 
@@ -66,7 +80,7 @@ describe('FeePolicy', () => {
         test('throws on negative bps', () => {
             assert.throws(() => flatFeePolicy({
                 bps: -1n,
-                feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+                feeReceiver: FEE_RECEIVER,
                 chain: 'monad-mainnet',
             }), /non-negative/);
         });
@@ -74,7 +88,7 @@ describe('FeePolicy', () => {
         test('throws on bps >= 10000', () => {
             assert.throws(() => flatFeePolicy({
                 bps: 10000n,
-                feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+                feeReceiver: FEE_RECEIVER,
                 chain: 'monad-mainnet',
             }), /must be < 10000/);
         });
@@ -83,7 +97,7 @@ describe('FeePolicy', () => {
             assert.throws(() => flatFeePolicy({
                 bps: 4n,
                 stableToStableBps: -1n,
-                feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+                feeReceiver: FEE_RECEIVER,
                 chain: 'monad-mainnet',
             }), /stableToStableBps/);
         });
@@ -92,7 +106,7 @@ describe('FeePolicy', () => {
             assert.throws(() => flatFeePolicy({
                 bps: 4n,
                 stableToStableBps: 10000n,
-                feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+                feeReceiver: FEE_RECEIVER,
                 chain: 'monad-mainnet',
             }), /stableToStableBps/);
         });
@@ -100,7 +114,7 @@ describe('FeePolicy', () => {
         test('throws on unknown chain', () => {
             assert.throws(() => flatFeePolicy({
                 bps: 4n,
-                feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+                feeReceiver: FEE_RECEIVER,
                 chain: 'fake-chain' as any,
             }), /unknown chain/);
         });
@@ -108,9 +122,10 @@ describe('FeePolicy', () => {
         test('accepts 0 bps (free swaps)', () => {
             const policy = flatFeePolicy({
                 bps: 0n,
-                feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+                feeReceiver: FEE_RECEIVER,
                 chain: 'monad-mainnet',
             });
+            assert.strictEqual(policy.chain, 'monad-mainnet');
             assert.strictEqual(policy.getFeeBps(baseCtx()), 0n);
         });
     });
@@ -118,7 +133,7 @@ describe('FeePolicy', () => {
     describe('flatFeePolicy default rate', () => {
         const policy = flatFeePolicy({
             bps: 4n,
-            feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+            feeReceiver: FEE_RECEIVER,
             chain: 'monad-mainnet',
         });
 
@@ -142,14 +157,21 @@ describe('FeePolicy', () => {
         });
 
         test('feeReceiver is preserved', () => {
-            assert.strictEqual(policy.feeReceiver, CURVANCE_DAO_FEE_RECEIVER);
+            assert.strictEqual(policy.feeReceiver, FEE_RECEIVER);
+        });
+
+        test('declares checker compatibility for context-invariant DEX swap fees', () => {
+            assert.deepStrictEqual(policy.checkerCompatibility, {
+                exactFeeBpsForDexSwaps: 4n,
+                feeReceiver: FEE_RECEIVER,
+            });
         });
     });
 
     describe('flatFeePolicy no-op exemptions', () => {
         const policy = flatFeePolicy({
             bps: 4n,
-            feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+            feeReceiver: FEE_RECEIVER,
             chain: 'monad-mainnet',
         });
 
@@ -212,12 +234,36 @@ describe('FeePolicy', () => {
         test('exempts native → wrapped native on arb-sepolia using chain config', () => {
             const arbPolicy = flatFeePolicy({
                 bps: 4n,
-                feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+                feeReceiver: FEE_RECEIVER,
                 chain: 'arb-sepolia',
             });
             assert.strictEqual(
                 arbPolicy.getFeeBps(baseCtx({ inputToken: NATIVE, outputToken: ARB_WRAPPED_NATIVE })),
                 0n,
+            );
+        });
+
+        test('captures wrapped-native at construction when chain config moves later', (t) => {
+            const originalWrapped = chain_config['monad-mainnet'].wrapped_native;
+            const movedWrapped = '0x0000000000000000000000000000000000000bb2' as address;
+            const policy = flatFeePolicy({
+                bps: 4n,
+                feeReceiver: FEE_RECEIVER,
+                chain: 'monad-mainnet',
+            });
+
+            t.after(() => {
+                (chain_config['monad-mainnet'] as any).wrapped_native = originalWrapped;
+            });
+            (chain_config['monad-mainnet'] as any).wrapped_native = movedWrapped;
+
+            assert.strictEqual(
+                policy.getFeeBps(baseCtx({ inputToken: NATIVE, outputToken: originalWrapped })),
+                0n,
+            );
+            assert.strictEqual(
+                policy.getFeeBps(baseCtx({ inputToken: NATIVE, outputToken: movedWrapped })),
+                4n,
             );
         });
     });
@@ -231,7 +277,7 @@ describe('FeePolicy', () => {
         const policy = flatFeePolicy({
             bps: 4n,
             stableToStableBps: 1n,
-            feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+            feeReceiver: FEE_RECEIVER,
             chain: 'monad-mainnet',
             classify,
         });
@@ -241,6 +287,10 @@ describe('FeePolicy', () => {
                 policy.getFeeBps(baseCtx({ inputToken: USDC, outputToken: AUSD })),
                 1n,
             );
+        });
+
+        test('does not declare checker compatibility for lower context-dependent tiers', () => {
+            assert.equal(policy.checkerCompatibility, undefined);
         });
 
         test('charges default rate on volatile→volatile swap', () => {
@@ -272,7 +322,7 @@ describe('FeePolicy', () => {
             const partialPolicy = flatFeePolicy({
                 bps: 4n,
                 stableToStableBps: 1n,
-                feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+                feeReceiver: FEE_RECEIVER,
                 chain: 'monad-mainnet',
                 classify: partialClassify,
             });
@@ -297,7 +347,7 @@ describe('FeePolicy', () => {
             const noClassifyPolicy = flatFeePolicy({
                 bps: 4n,
                 stableToStableBps: 1n,
-                feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+                feeReceiver: FEE_RECEIVER,
                 chain: 'monad-mainnet',
                 // no classify
             });
@@ -311,7 +361,7 @@ describe('FeePolicy', () => {
         test('stable tier ignored when stableToStableBps is omitted', () => {
             const noTierPolicy = flatFeePolicy({
                 bps: 4n,
-                feeReceiver: CURVANCE_DAO_FEE_RECEIVER,
+                feeReceiver: FEE_RECEIVER,
                 chain: 'monad-mainnet',
                 classify,
                 // no stableToStableBps
@@ -320,6 +370,21 @@ describe('FeePolicy', () => {
                 noTierPolicy.getFeeBps(baseCtx({ inputToken: USDC, outputToken: AUSD })),
                 4n,
             );
+        });
+
+        test('declares checker compatibility when the stable tier matches default bps', () => {
+            const sameBpsPolicy = flatFeePolicy({
+                bps: CURVANCE_FEE_BPS,
+                stableToStableBps: CURVANCE_FEE_BPS,
+                feeReceiver: FEE_RECEIVER,
+                chain: 'monad-mainnet',
+                classify,
+            });
+
+            assert.deepStrictEqual(sameBpsPolicy.checkerCompatibility, {
+                exactFeeBpsForDexSwaps: CURVANCE_FEE_BPS,
+                feeReceiver: FEE_RECEIVER,
+            });
         });
     });
 });

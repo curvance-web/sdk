@@ -18,6 +18,17 @@ const DEBT = '0x00000000000000000000000000000000000000d1';
 const WRAPPED_NATIVE = '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A';
 const USDC_ASSET = '0x00000000000000000000000000000000000000d2';
 
+function createSetupAssets() {
+    return {
+        native_symbol: 'MON',
+        native_name: 'Monad',
+        wrapped_native: WRAPPED_NATIVE,
+        native_vaults: [],
+        vaults: [],
+        excluded_zap_symbols: [],
+    };
+}
+
 function createPreviewStub(targetLeverage: Decimal) {
     return {
         currentLeverage: Decimal(1),
@@ -64,6 +75,7 @@ function createVaultExecutionHarness({ borrowAsset = WRAPPED_NATIVE }: { borrowA
         cache: { user: { debt: 0n } },
         setup: {
             chain: 'monad-mainnet',
+            assets: createSetupAssets(),
             feePolicy: {
                 feeReceiver: ACCOUNT,
                 getFeeBps: () => 0n,
@@ -134,6 +146,7 @@ function createVaultZapHarness() {
     (zapper as any).signer = { address: ACCOUNT };
     (zapper as any).setup = {
         chain: 'monad-mainnet',
+        assets: createSetupAssets(),
         feePolicy: {
             feeReceiver: ACCOUNT,
             getFeeBps: () => 0n,
@@ -284,6 +297,64 @@ describe('vault leverage behavior', () => {
 
         assert.equal(expectedShares, 49_991n);
         assert.deepEqual(convertCalls, [49_990n]);
+    });
+
+    test('getVaultExpectedShares accepts same-deployment reader clones', async () => {
+        const depositToken = Object.create(CToken.prototype) as CToken;
+        const borrowToken = Object.create(CToken.prototype) as CToken;
+        const previewCalls: bigint[] = [];
+        const convertCalls: bigint[] = [];
+        const setup = { chain: 'monad-mainnet' };
+        const marketAddress = '0x0000000000000000000000000000000000000def';
+        const readerKey = 'monad-mainnet:vault-planner';
+
+        (depositToken as any).address = COLLATERAL;
+        (depositToken as any).market = {
+            address: marketAddress,
+            setup,
+            reader: {
+                address: '0x0000000000000000000000000000000000000a01',
+                batchKey: readerKey,
+            },
+        };
+        (depositToken as any).cache = {
+            asset: { address: COLLATERAL, decimals: 18n },
+            decimals: 18n,
+        };
+        (depositToken as any).getUnderlyingVault = () => ({
+            previewDeposit: async (assets: bigint) => {
+                previewCalls.push(assets);
+                return 20_000n;
+            },
+        });
+        (depositToken as any).convertToShares = async (assets: bigint) => {
+            convertCalls.push(assets);
+            return assets + 2n;
+        };
+
+        (borrowToken as any).address = DEBT;
+        (borrowToken as any).market = {
+            address: marketAddress,
+            setup,
+            reader: {
+                address: '0x0000000000000000000000000000000000000a02',
+                batchKey: readerKey,
+            },
+        };
+        (borrowToken as any).cache = {
+            asset: { address: DEBT, decimals: 6n },
+            decimals: 18n,
+        };
+
+        const expectedShares = await PositionManager.getVaultExpectedShares(
+            depositToken,
+            borrowToken,
+            Decimal('1.25'),
+        );
+
+        assert.equal(expectedShares, 19_998n);
+        assert.deepEqual(previewCalls, [1_250_000n]);
+        assert.deepEqual(convertCalls, [19_996n]);
     });
 
     test('vault zaps buffer the inner previewDeposit result before encoding expectedShares', async () => {

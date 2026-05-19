@@ -1,8 +1,11 @@
 import Decimal from "decimal.js";
-import { ChainRpcPrefix, requireAccount, resolveReadProvider, WAD } from "../helpers";
+import { ChainRpcPrefix, NATIVE_ADDRESS, requireAccount, resolveReadProvider, WAD } from "../helpers";
 import { address, curvance_provider, curvance_read_provider, curvance_signer, TokenInput, USD } from "../types";
 import { OracleManager } from "./OracleManager";
 import { chain_config } from "../chains";
+import type { ChainAssetConfig } from "../chains";
+
+type NativeTokenMetadata = Readonly<Pick<ChainAssetConfig, "native_symbol" | "native_name">>;
 
 function getSetupConfig() {
     return (require("../setup") as typeof import("../setup")).setup_config;
@@ -19,7 +22,7 @@ export class NativeToken {
     signer: curvance_signer | null;
     account: address | null;
     private oracleManagerAddress: address | undefined;
-    address  = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" as address;
+    address  = NATIVE_ADDRESS;
     decimals = 18n;
 
     constructor(
@@ -28,8 +31,9 @@ export class NativeToken {
         oracleManagerAddress?: address,
         signer?: curvance_signer | null,
         account?: address | null,
+        nativeMetadata?: NativeTokenMetadata,
     ) {
-        const config = chain_config[chain];
+        const metadata = nativeMetadata ?? chain_config[chain];
         const legacySigner = "address" in provider ? provider as curvance_signer : null;
         const legacyAccount = legacySigner?.address as address | undefined;
         const resolvedProvider =
@@ -37,8 +41,8 @@ export class NativeToken {
                 ? provider as curvance_read_provider
                 : resolveReadProvider(provider, `NativeToken ${chain}`);
 
-        this.symbol = config.native_symbol;
-        this.name = config.native_name || config.native_symbol;
+        this.symbol = metadata.native_symbol;
+        this.name = metadata.native_name || metadata.native_symbol;
         this.provider = resolvedProvider;
         this.signer = signer ?? legacySigner ?? null;
         this.account = account ?? legacyAccount ?? null;

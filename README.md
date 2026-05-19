@@ -2,7 +2,7 @@
     <img src="https://pbs.twimg.com/profile_banners/1445781144125857796/1773687595/1500x500" alt="Curvance"/>
 </p>
 
-A TypeScript SDK for interacting with the Curvance protocol. Built on ethers v6 with a bulk-loaded cache model — `setupChain()` preloads all market data in 1–3 RPC calls, and all subsequent reads are synchronous from cache.
+A TypeScript SDK for interacting with the Curvance protocol. It uses ethers v6 and a setup-bound cache model: `setupChain()` loads market state up front, snapshots the chain configuration it used, and returns markets whose reads are synchronous until an explicit refresh runs.
 
 ## ❯ Install
 
@@ -14,10 +14,21 @@ $ npm install --save curvance
 
 Chain identifiers use Alchemy-style prefixes:
 
-| Chain | Identifier |
-|---|---|
-| Monad Mainnet | `monad-mainnet` |
-| Arbitrum Sepolia | `arb-sepolia` |
+| Chain | Identifier | Support |
+|---|---|---|
+| Monad Mainnet | `monad-mainnet` | Production mainnet; setup/read, rewards, Kyber-backed simple zaps/leverage where configured |
+| Arbitrum Sepolia | `arb-sepolia` | Testnet read/setup surface; DEX routes fail closed through `UnsupportedDexAgg` |
+
+Adding a production chain is an explicit SDK release task. A chain is not
+supported just because a wallet or app can switch to it. The SDK needs:
+
+- a `chain_config` entry and `chain_rpc_config` entry with matching `chainId`
+- a contract manifest under `src/contracts`
+- Curvance API service aliases or an explicit disabled state
+- DEX service config, fee/checker policy, or `UnsupportedDexAgg`
+- native/wrapped-native and vault metadata in chain config
+- route-matrix tests for advertised zap/leverage support
+- fork or live-read proof once deployments exist
 
 ## ❯ Quick Start
 
@@ -26,7 +37,8 @@ import { setupChain } from "curvance";
 import { ethers } from "ethers";
 
 const wallet = new ethers.Wallet(privateKey, provider);
-const { markets, reader, dexAgg, global_milestone } = await setupChain("monad-mainnet", wallet);
+const { chain, chainId, setupConfigSnapshot, markets, reader, dexAgg, global_milestone } =
+    await setupChain("monad-mainnet", wallet);
 ```
 
 `setupChain` signature:
@@ -37,17 +49,40 @@ setupChain(
     provider: curvance_provider | null = null,   // signer (wallet) OR read-only provider; null → SDK default
     api_url: string = "https://api.curvance.com",
     options: {
-        feePolicy?: FeePolicy;                    // zap/leverage fee routing (default: NO_FEE_POLICY)
+        feePolicy?: FeePolicy;                    // default is setup-resolved; Kyber chains require checker-compatible policy
         account?: address | null;                 // user address for user-specific reads without a signer
         readProvider?: curvance_read_provider | null;  // explicit override for read transport
     } = {}
 ): Promise<{
+    chain: ChainRpcPrefix,
+    chainId: number,
+    setupConfigSnapshot: Readonly<SetupConfigSnapshot>, // includes chain asset metadata and service policies
     markets: Market[],
     reader: ProtocolReader,
     dexAgg: IDexAgg,
     global_milestone: MilestoneResponse | null
 }>
 ```
+
+`setupChain()` still publishes a single active setup for compatibility helpers
+such as `getActiveUserMarkets()` and snapshot calls without explicit `markets`.
+Multichain-safe code should pass explicit `markets`, `reader`, provider,
+account, or setup context instead of relying on the latest singleton.
+
+### Architecture contract
+
+The current SDK architecture is result-bound. A `setupChain(...)` result owns
+the chain context that produced it, and downstream objects should keep using
+that context even if another chain boots later.
+
+| Layer | Contract |
+|---|---|
+| Setup snapshot | `setupConfigSnapshot` contains chain id, environment, cloned/frozen asset metadata, cloned/frozen external service policy, contract addresses, read transport, signer/account, API URL, and fee policy. |
+| Returned markets | `Market` and `CToken` instances keep the setup snapshot and reader they were created with. Explicit returned-result calls stay on that chain after the module singleton moves. |
+| Compatibility globals | `setup_config` and `all_markets` exist for single-active-chain consumers. Treat no-argument helpers as compatibility paths, not multichain-safe state. |
+| External services | Curvance API reward/native-yield slugs and Kyber API/router/chain aliases live in chain config and are cloned into the setup snapshot. Helper code should read the snapshot, not mutable exported config. |
+| DEX routing | Markets receive a setup-bound `dexAgg` after boot. `CToken` route discovery and zap/leverage execution do not fall back to `chain_config.dexAgg`; unsupported or manually constructed markets fail closed unless a market-bound adapter is attached. |
+| Fee/checker policy | Kyber-backed chains validate checker-compatible fee policy during setup. The current checker requires `CURVANCE_FEE_BPS` and the setup-resolved DAO receiver before routes are advertised or markets finish booting. |
 
 ### RPC routing
 
@@ -69,7 +104,7 @@ setupChain(
 for (const market of markets) {
     console.log(`${market.name} | deposits: ${market.totalDeposits} | debt: ${market.totalDebt}`);
     for (const token of market.tokens) {
-        console.log(`  ${token.symbol} | price: ${token.getPrice()} | apy: ${token.getApy(true)}%`);
+        console.log(`  ${token.symbol} | price: ${token.getPrice(true)} | apy: ${token.getApy(true)}%`);
     }
 }
 ```
@@ -85,7 +120,7 @@ for (const market of markets) {
 | `ethers.JsonRpcProvider` | Read-only or custom RPC |
 | `null` | SDK constructs a provider from chain config |
 
-`curvance_signer` = `JsonRpcSigner | Wallet` — required for write operations (deposit, borrow, etc.)
+`curvance_signer` = `JsonRpcSigner | Wallet`, required for write operations (deposit, borrow, etc.)
 
 ## ❯ Markets
 
@@ -113,7 +148,7 @@ market.userDebt             // total outstanding debt
 market.userMaxDebt          // maximum allowable debt
 market.userRemainingCredit  // available borrow capacity (with 0.1% buffer)
 market.userCollateral       // posted collateral (in shares)
-market.positionHealth       // health factor — null means infinite (no debt)
+market.positionHealth       // health factor; null means infinite (no debt)
 market.userNet              // deposits - debt
 ```
 
@@ -166,8 +201,8 @@ token.mintPaused
 ### Prices & conversions
 
 ```ts
-token.getPrice()                         // asset price (USD, Decimal)
-token.getPrice(true)                     // share price
+token.getPrice()                         // share price (USD, Decimal)
+token.getPrice(true)                     // asset price
 token.convertTokensToUsd(amount)         // TokenInput → USD
 token.convertUsdToTokens(usd)            // USD → TokenInput
 token.convertTokenInputToShares(amount)  // user input → shares
@@ -306,29 +341,60 @@ const zapper = token.getZapper('simple')
 const positionManager = token.getPositionManager('simple')
 ```
 
+Prefer `token.getZapper(...)` so the zapper carries the token's setup-bound DEX aggregator. Direct construction must use the same setup result as the CToken it will operate on:
+
+```ts
+import { Zapper } from "curvance"
+
+const setup = await setupChain("monad-mainnet", wallet)
+const token = setup.markets[0].tokens[0]
+const zapperAddress = token.getPluginAddress("simple", "zapper")
+if (zapperAddress == null) throw new Error("Simple zapper is not configured")
+
+const zapper = new Zapper(
+    zapperAddress,
+    wallet,
+    "simple",
+    setup.setupConfigSnapshot,
+    setup.dexAgg,
+)
+```
+
+A direct `Zapper` built without the setup-bound adapter throws. A `Zapper`
+from one setup result also refuses to build calldata for a CToken from another
+setup result.
+
 ## ❯ Zapping (Swap + Deposit)
 
-Zap deposits allow depositing any token by swapping to the required underlying via the DEX aggregator.
+Zap deposits allow depositing another token by swapping to the required underlying through the setup-bound DEX aggregator.
+
+`token.getDepositTokens(search?)` is the route-discovery entrypoint. It always
+includes the direct deposit asset and then adds native, vault, and simple-swap
+routes only when the token and chain can execute them. DEX-sourced simple
+routes require a market-bound executable adapter; unsupported DEX chains expose
+readable markets but no simple zap or simple leverage routes.
 
 ```ts
 // Native token (MON) → deposit
 await token.approvePlugin('native-simple', 'zapper')
-await zapper.nativeZap(ctoken, amount, collateralize)
+await token.depositAsCollateral(amount, 'native-simple')
 
 // Any ERC20 → swap → deposit
 await token.approvePlugin('simple', 'zapper')
-await token.approveUnderlying(amount)
-await token.depositAsCollateral(amount, {
+const simpleZap = {
     type: 'simple',
     inputToken: inputTokenAddress,
     slippage: new Decimal(0.01)   // 1%
-})
+} as const
+await token.approveZapAsset(simpleZap, amount)
+await token.depositAsCollateral(amount, simpleZap)
 ```
 
 Check approval status for a zap before executing:
 
 ```ts
-const approved = await token.isZapAssetApproved(instructions, amount)
+const rawZapAmount = toBigInt(amount, inputTokenDecimals)
+const approved = await token.isZapAssetApproved(instructions, rawZapAmount)
 if (!approved) await token.approveZapAsset(instructions, amount)
 ```
 
@@ -338,11 +404,14 @@ Leverage uses the PositionManager plugin to atomically borrow and swap into the 
 
 ```ts
 // One-step: deposit collateral + leverage
-await collateralToken.approveUnderlying(amount)
-await collateralToken.approvePlugin('simple', 'positionManager')
+const positionManager = collateralToken.getPluginAddress('simple', 'positionManager')
+if (positionManager == null) throw new Error("Simple position manager is not configured")
+
+await collateralToken.approveUnderlying(amount, positionManager)
 await collateralToken.depositAndLeverage(amount, borrowToken, targetLeverage, 'simple', slippage)
 
 // Separate: deposit first, then leverage
+await collateralToken.approveUnderlying(amount)
 await collateralToken.depositAsCollateral(amount)
 await collateralToken.leverageUp(borrowToken, new Decimal(3), 'simple', new Decimal(0.005))
 
@@ -371,7 +440,7 @@ await market.previewPositionHealthDeposit(ctoken, amount)
 await market.previewPositionHealthRedeem(ctoken, amount)
 await market.previewPositionHealthBorrow(borrowToken, amount)
 await market.previewPositionHealthRepay(borrowToken, amount)
-await market.previewPositionHealthLeverageUp(depositCToken, depositAmount, borrowCToken, borrowAmount)
+await market.previewPositionHealthLeverageUp(depositCToken, borrowCToken, newLeverage, depositAmount)
 await market.previewPositionHealthLeverageDown(depositCToken, borrowCToken, newLeverage, currentLeverage)
 
 // Generic preview
@@ -386,7 +455,7 @@ const health = await market.previewPositionHealthBorrow(borrowToken, new Decimal
 if (health === null) {
     // remains solvent with infinite health
 } else if (health.lt(0.1)) {
-    console.warn("Would drop to 10% health — too risky")
+    console.warn("Would drop to 10% health - too risky")
 }
 ```
 
@@ -402,7 +471,10 @@ await market.multiHoldExpiresAt(markets) // cooldown across multiple markets
 
 ## ❯ Format Utilities
 
-Pure calculation helpers for building UI or simulating outcomes. All accept and return `Decimal`.
+Pure calculation helpers for building UI or simulating outcomes. Amount and
+leverage helpers primarily use `Decimal`; validation, health-status, slippage,
+and normalization helpers also expose `number`, `bigint`, string, and structured
+result types where those are the safer UI boundary.
 
 ### Leverage math
 
@@ -431,13 +503,13 @@ import { amplifyContractSlippage, toContractSwapSlippage } from "curvance"
 // user's raw `slippage` budget (reserved for variable DEX impact + drift).
 amplifyContractSlippage(baseSlippageBps, leverageDelta, bpsToAmplify)
 
-// Used by DEX aggregator adapters (KyberSwap etc.) in `quoteAction` to
+// Used by DEX aggregator adapters in `quoteAction` to
 // compute the WAD-BPS slippage tolerance for the `Swap.slippage` struct
-// field consumed by on-chain `_swapSafe`. When the aggregator pre-deducts
-// a currency_in fee, the expansion absorbs that fee so `_swapSafe` doesn't
-// double-count it as swap slippage. Adapters whose fee model does NOT
-// pre-deduct (e.g., out-of-band referrer paid from output) should call
-// with `feeBps` omitted / 0n so no expansion applies.
+// field consumed by on-chain `_swapSafe`. When an adapter's fee model is
+// represented as value loss in the swap calldata (for example Kyber's
+// currency_in fee), pass `feeBps` so `_swapSafe`
+// does not treat deterministic fee loss as user slippage. Adapters whose
+// fees are not observable as swap value loss should omit `feeBps` / pass 0n.
 toContractSwapSlippage(userSlippageBps, feeBps?)
 ```
 
@@ -509,7 +581,7 @@ import {
 | `toDecimal(value, decimals)` | `bigint` → `Decimal` |
 | `toBigInt(value, decimals)` | `Decimal` → `bigint` |
 | `getDepositApy(token, opportunities, apyOverrides)` | Total deposit yield (interest + Merkl + native) |
-| `getBorrowCost(token, opportunities)` | Net borrow cost — may be negative when rewards exceed rate |
+| `getBorrowCost(token, opportunities)` | Net borrow cost; may be negative when rewards exceed rate |
 | `getInterestYield(token)` | Lending APY only |
 | `getNativeYield(token, apyOverrides)` | Native yield component |
 | `getMerklDepositIncentives(tokenAddress, opportunities)` | Merkl reward APR for deposits |
@@ -520,25 +592,58 @@ import {
 
 The SDK supports configurable fees applied at the DEX aggregator layer for swaps. Fees are denominated in BPS of the swap input and charged on leverage, deleverage, deposit+leverage, and zap operations.
 
+For standard Curvance app/front-end usage, omit `options.feePolicy` and let
+`setupChain()` build the default Curvance fee policy:
+
 ```ts
-import { flatFeePolicy, NO_FEE_POLICY } from "curvance"
+const { markets } = await setupChain("monad-mainnet", wallet)
+```
+
+The default policy charges `CURVANCE_FEE_BPS` and resolves the fee receiver from
+`CentralRegistry.daoAddress()` once during setup. App consumers should not
+hardcode or pin a DAO fee receiver locally. Pass `options.feePolicy` only for an
+intentional custom integration override.
+
+```ts
+import {
+    CURVANCE_FEE_BPS,
+    flatFeePolicy,
+    setupChain,
+} from "curvance"
+
+const defaultSetup = await setupChain("monad-mainnet", wallet)
 
 const feePolicy = flatFeePolicy({
-    bps: 10n,                          // 0.1% default fee
-    feeReceiver: "0xYourAddress",
+    // Kyber-backed chains require one exact checker-compatible DEX fee.
+    bps: CURVANCE_FEE_BPS,
+    feeReceiver: defaultSetup.setupConfigSnapshot.feePolicy.feeReceiver,
     chain: "monad-mainnet",
-    stableToStableBps: 2n,             // optional lower fee for stable↔stable swaps
 })
 
 const { markets } = await setupChain("monad-mainnet", wallet, undefined, { feePolicy })
 ```
 
+On Kyber-backed chains, setup validates explicit policies before rewards or
+markets boot. A zero-fee policy, wrong BPS value, or wrong receiver rejects
+with a checker-policy error. Context-dependent lower tiers such as
+`stableToStableBps` are not valid for checker-bound Kyber routes because the
+on-chain checker enforces one exact BPS value and DAO receiver. On
+unsupported-Dex chains such as `arb-sepolia`, `NO_FEE_POLICY` remains valid and
+setup skips the DAO lookup because no DEX route can execute there.
+
 The SDK automatically returns 0 bps for native ↔ wrapped-native swaps and same-token no-op zaps.
 
 ```ts
-// FeePolicy interface — implement your own
+// FeePolicy interface: implement your own
 interface FeePolicy {
+    // "any" marks chain-agnostic no-op policies; chain-bound policies must match setupChain.
+    chain?: "monad-mainnet" | "arb-sepolia" | "any";
     feeReceiver: address;
+    // Required on checker-bound routes when the policy is custom.
+    checkerCompatibility?: {
+        exactFeeBpsForDexSwaps: bigint;
+        feeReceiver: address;
+    };
     getFeeBps(ctx: FeePolicyContext): bigint;
 }
 
@@ -560,14 +665,18 @@ interface FeePolicyContext {
 ```ts
 import { fetchMerklOpportunities, fetchMerklUserRewards, fetchMerklCampaignsBySymbol } from "curvance"
 
-// All active opportunities (APR, token, type)
-const opportunities = await fetchMerklOpportunities()
+// Active opportunities for a production display path (APR, token, type)
+const opportunities = await fetchMerklOpportunities({ chainId: 143 })
 
 // Pending rewards for a user
 const rewards = await fetchMerklUserRewards({ wallet: address, chainId: 143 })
 
-// Campaigns for a specific token
-const campaigns = await fetchMerklCampaignsBySymbol({ tokenSymbol: "USDC" })
+// Campaigns for a specific token on one chain
+const campaigns = await fetchMerklCampaignsBySymbol({ tokenSymbol: "USDC", chainId: 143 })
+
+// Chainless Merkl calls are all-chain utilities. Filter explicitly before
+// using them in production multichain display paths.
+const allChainOpportunities = await fetchMerklOpportunities({})
 ```
 
 ### Portfolio snapshots
@@ -575,9 +684,11 @@ const campaigns = await fetchMerklCampaignsBySymbol({ tokenSymbol: "USDC" })
 ```ts
 import { takePortfolioSnapshot, snapshotMarket } from "curvance"
 
-// Full portfolio across all markets
+// Full portfolio across the current active-chain markets
 const snapshot = await takePortfolioSnapshot(account)
 // Returns: { account, chain, timestamp, totalDepositsUSD, totalDebtUSD, netUSD, dailyEarnings, dailyCost, markets[] }
+// Each market row includes { chain, chainId }. Mixed-chain snapshots require:
+// takePortfolioSnapshot(account, { markets, allowMixedChains: true })
 
 // Single market
 const marketSnapshot = snapshotMarket(market)
@@ -592,18 +703,18 @@ The `OptimizerReader` reads yield-rebalancing vaults that allocate across market
 ```ts
 import { ERC20, LendingOptimizer, OptimizerReader } from "curvance"
 
-const optimizer = new OptimizerReader(optimizerReaderAddress, provider)
+const optimizerReader = new OptimizerReader(optimizerReaderAddress, provider)
 
-await optimizer.getOptimizerAPY(optimizerAddress)
+await optimizerReader.getOptimizerAPY(optimizerAddress)
 // Returns: weighted-average optimizer APY in WAD
 
-await optimizer.getOptimizerMarketData(optimizerAddresses)
+await optimizerReader.getOptimizerMarketData(optimizerAddresses)
 // Returns: { totalAssets, sharePrice, performanceFee, apy, markets[] }
 
-await optimizer.getOptimizerUserData(optimizerAddresses, account)
+await optimizerReader.getOptimizerUserData(optimizerAddresses, account)
 // Returns: user balance and redeemable amounts
 
-await optimizer.optimalRebalance(optimizer, 100n)
+await optimizerReader.optimalRebalance(optimizerAddress, 100n)
 // Returns: { actions: { cToken, assetsOrBps }[], bounds: { cToken, minBps, maxBps }[] }
 
 const asset = new ERC20(provider, assetAddress, undefined, undefined, signer)
@@ -626,8 +737,24 @@ type USD_WAD = bigint                 // USD in 1e18 WAD format
 type TokenInput = Decimal             // human-readable token amount
 type TypeBPS = bigint                 // basis points (10000 = 100%)
 type ChainRpcPrefix = "monad-mainnet" | "arb-sepolia"
+type ChainEnvironment = "production-mainnet" | "testnet" | "local"
+type curvance_read_provider = JsonRpcProvider
 type curvance_provider = JsonRpcSigner | Wallet | JsonRpcProvider
 type curvance_signer = JsonRpcSigner | Wallet
+
+interface SetupConfigSnapshot {
+    chain: ChainRpcPrefix
+    chainId: number
+    environment: ChainEnvironment
+    assets: Readonly<ChainAssetConfig>
+    services: Readonly<ChainServiceConfig>
+    contracts: Readonly<Record<string, unknown>>
+    readProvider: curvance_read_provider
+    signer: curvance_signer | null
+    account: address | null
+    api_url: string
+    feePolicy: FeePolicy
+}
 
 // Market categorization
 type MarketCategory = "stablecoin" | "staking" | "restaking" | "yield-stablecoin" | "blue-chip" | "native"
@@ -648,7 +775,9 @@ interface Quote {
 }
 ```
 
-All numeric return values are `bigint` or `Decimal` — never plain JS `number`.
+Core monetary, token, share, health, APY, and fixed-point values use `bigint`
+or `Decimal`. Backend API DTOs may expose raw `number` fields before SDK
+normalization; do not use those DTO fields as contract-scale values.
 
 ## ❯ Constants
 
@@ -666,7 +795,7 @@ DEFAULT_SLIPPAGE_BPS  // 100n  (1%)
 
 ### Leverage tuning (`LEVERAGE`)
 
-Exposed tuning block used by leverage preview / mutation paths. Values are considered tunable across releases — SDK consumers pinning against specific values opt into the coupling.
+Exposed tuning block used by leverage preview / mutation paths. Values are considered tunable across releases. SDK consumers pinning against specific values opt into the coupling.
 
 ```ts
 import { LEVERAGE } from 'curvance';
@@ -682,10 +811,10 @@ LEVERAGE.LEVERAGE_UP_BUFFER_BPS       // 10n
 // Oracle price drift between snapshot RPC and tx broadcast. NOT amplified
 // by (L-1); the contract's equity-fraction denominator handles amplification.
 
-LEVERAGE.DELEVERAGE_OVERHEAD_BPS      // 20n
+LEVERAGE.DELEVERAGE_OVERHEAD_BPS      // 60n
 // BPS overhead added to full-deleverage swap sizing to absorb DEX impact
 // and oracle drift without leaving dust debt. The contract returns any
-// excess debt token to the user, so economic loss is zero — but
+// excess debt token to the user, so economic loss is zero, but
 // `checkSlippage` treats the intentional overshoot as equity loss and
 // amplifies it by (L-1), which the contract-slippage expansion compensates.
 
@@ -711,17 +840,67 @@ LEVERAGE.LEVERAGE_UP_VAULT_DRIFT_BPS  // 30n
 | [ethers v6](https://www.npmjs.com/package/ethers) | Typed contract interactions, providers, and signer handling |
 | [decimal.js](https://www.npmjs.com/package/decimal.js) | Arbitrary-precision math for all token amounts, prices, and rates |
 
-## ❯ Pre-Publish Checklist
+## ❯ SDK Pre-Publish Checklist
 
-Run before every `npm publish` that touches `src/chains/`, `src/setup.ts`,
-`src/retry-provider.ts`, or any RPC-adjacent code:
+Run before every SDK `npm publish`:
 
-1. **Unit tests green.** `npm test` — must show all `test:transport` tests
-   passing. `tests/rpc-config-shape.test.ts` locks the structural invariants
-   of `chain_rpc_config` (no known-bad RPCs, no duplicate fallbacks, policy
-   fields within sane ranges).
+1. **Typecheck, build, and deterministic transport gate green.**
 
-2. **Live RPC probe against both app origins.** In the app repo:
+   ```bash
+   node node_modules/typescript/bin/tsc --noEmit
+   npm run build
+   npm run test:transport
+   ```
+
+   `npm test` is an alias for `test:transport`. `tests/rpc-config-shape.test.ts`
+   locks the structural invariants of `chain_rpc_config` (no known-bad RPCs,
+   no duplicate fallbacks, policy fields within sane ranges).
+
+2. **Fork gate green, or explicitly classified as pending.** `npm run test:fork`
+   is the live fork/write gate. If it skips because `TEST_RPC`, deployer keys,
+   or a generated fixture are missing, the SDK can be called
+   deterministic/package covered, but not fork-covered.
+
+3. **Package artifact smoke green.**
+
+   ```bash
+   npm run test:dist-smoke
+   npm pack --dry-run --json
+   ```
+
+   `prepack` and `prepublishOnly` rebuild `dist`, and `test:dist-smoke`
+   imports the packed package root. Package consumers load the artifact, so
+   source-green or build-green alone is not package-boundary proof.
+   The dry-run package should contain `README.md`, `package.json`, and `dist/**`;
+   source files and tests should not be published.
+
+4. **Workspace hygiene clean.**
+
+   ```bash
+   git diff --check
+   git status --short
+   ```
+
+   Confirm new imported production files are tracked. This matters because
+   dirty-tree tests can pass while a clean package checkout cannot import an
+   untracked source file.
+
+### SDK gate interpretation
+
+- `test:transport`, `test:all`, `test:dist-smoke`, `npm pack --dry-run --json`,
+  and `git diff --check` green means the SDK is deterministic/package covered.
+- `test:fork` must execute against a local Anvil-compatible fork before calling
+  the SDK fork-covered. A command that exits 0 after skip messages is not live
+  fork proof.
+- App build, app Cypress/Vitest, and app RPC-origin probes are downstream
+  adoption checks. Run them after publishing or linking the packed SDK into the
+  app repo; they are not part of the SDK-only publish gate.
+
+### Post-Publish App Rollout Checks
+
+After publishing or linking a packed SDK artifact into the app repo:
+
+1. **For RPC-adjacent SDK changes, run the app-origin RPC probe.**
 
    ```bash
    cd path/to/curvance-app
@@ -743,13 +922,12 @@ Run before every `npm publish` that touches `src/chains/`, `src/setup.ts`,
    Deeper-cascade fallbacks (`fallbacks[1]+`) MAY have looser limits if
    documented inline with a comment in `chain_rpc_config`.
 
-3. **Do not add the probe to CI.** The probe fires ~500 requests per run
+2. **Do not add the probe to CI.** The probe fires ~500 requests per run
    across 5-10 public RPCs from a single IP. Running it on every PR would
    trip per-IP rate limits and eventually provoke origin bans from the
-   free RPCs we depend on — recreating the exact failure mode
-   (monadinfra 403'ing `staging.curvance.com`) that motivated building
-   this probe.
+   free RPCs we depend on. That recreates the exact failure mode
+   (monadinfra 403'ing `staging.curvance.com`) that motivated this probe.
 
-4. **Republish workflow.** Version bump → `npm publish` → in app repo,
-   bump `curvance` in `package.json` to the new version → `yarn install`
-   → commit `yarn.lock` → deploy.
+3. **App rollout workflow.** Version bump -> `npm publish` -> in app repo,
+   bump `curvance` in `package.json` to the new version -> `yarn install`
+   -> commit `yarn.lock` -> deploy.

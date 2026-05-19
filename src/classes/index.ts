@@ -2,6 +2,7 @@ export * from './ProtocolReader';
 export * from './OptimizerReader';
 export * from './LendingOptimizer';
 export * from './OracleManager';
+export * from './Api';
 export * from './Market';
 export * from './CToken';
 export * from './ERC20';

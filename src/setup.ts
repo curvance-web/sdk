@@ -6,13 +6,21 @@ import { OracleManager } from "./classes/OracleManager";
 import { getActiveRetryConfig, getRetryableProviderTarget, wrapProviderWithRetries } from "./retry-provider";
 import { chain_config } from "./chains";
 import { Api } from "./classes/Api";
+import type { MilestoneResponse } from "./classes/Api";
 import { validateApiUrl } from "./validation";
-import { FeePolicy, defaultFeePolicyForChain } from "./feePolicy";
+import { CURVANCE_FEE_BPS, FeePolicy, NO_FEE_POLICY, defaultFeePolicyForChain } from "./feePolicy";
 import type IDexAgg from "./classes/DexAggregators/IDexAgg";
+import type { DexAggContext } from "./classes/DexAggregators/IDexAgg";
+import { deepFreeze, DeepReadonly } from "./immutability";
+import type { ChainAssetConfig, ChainEnvironment, ChainServiceConfig } from "./chains";
 
 export interface SetupConfigSnapshot {
     chain: ChainRpcPrefix;
-    contracts: ReturnType<typeof getContractAddresses>;
+    chainId: number;
+    environment: ChainEnvironment;
+    assets: DeepReadonly<ChainAssetConfig>;
+    services: DeepReadonly<ChainServiceConfig>;
+    contracts: DeepReadonly<ReturnType<typeof getContractAddresses>>;
     readProvider: curvance_read_provider;
     signer: curvance_signer | null;
     account: address | null;
@@ -35,7 +43,7 @@ const successful_setup_results = new Map<number, {
 
 export interface SetupChainOptions {
     /** Optional fee policy for SDK-initiated DEX swaps (zaps + leverage).
-     *  Defaults to the chain's live Curvance fee policy when required. */
+     *  Defaults to the chain's setup-resolved Curvance fee policy. */
     feePolicy?: FeePolicy;
     /** Optional dedicated account for user-specific reads when no signer is available. */
     account?: address | null;
@@ -44,10 +52,13 @@ export interface SetupChainOptions {
 }
 
 export interface SetupChainResult {
+    chain: ChainRpcPrefix;
+    chainId: number;
+    setupConfigSnapshot: Readonly<SetupConfigSnapshot>;
     markets: Market[];
     reader: ProtocolReader;
     dexAgg: IDexAgg;
-    global_milestone: any | null;
+    global_milestone: MilestoneResponse | null;
 }
 
 function createSetupConfig(
@@ -56,17 +67,48 @@ function createSetupConfig(
     signer: curvance_signer | null,
     account: address | null,
     api_url: string,
-    options: SetupChainOptions,
+    feePolicy: FeePolicy,
 ): SetupConfigSnapshot {
-    return {
+    return Object.freeze({
         chain,
+        chainId: chain_config[chain].chainId,
+        environment: chain_config[chain].environment,
+        assets: deepFreeze(cloneChainAssets(chain_config[chain])),
+        services: deepFreeze(cloneChainServices(chain_config[chain].services)),
         readProvider,
         signer,
         account,
         provider: signer ?? readProvider,
-        contracts: getContractAddresses(chain),
+        contracts: deepFreeze(getContractAddresses(chain)),
         api_url,
-        feePolicy: options.feePolicy ?? defaultFeePolicyForChain(chain),
+        feePolicy,
+    }) as SetupConfigSnapshot;
+}
+
+function cloneChainAssets(config: ChainAssetConfig): ChainAssetConfig {
+    return {
+        native_symbol: config.native_symbol,
+        native_name: config.native_name,
+        wrapped_native: config.wrapped_native,
+        native_vaults: config.native_vaults.map((vault) => ({ ...vault })),
+        vaults: config.vaults.map((vault) => ({ ...vault })),
+        excluded_zap_symbols: [...config.excluded_zap_symbols],
+    };
+}
+
+function cloneChainServices(services: ChainServiceConfig): ChainServiceConfig {
+    return {
+        curvanceApi: {
+            rewardsSlug: services.curvanceApi.rewardsSlug,
+            rewardChainAliases: [...services.curvanceApi.rewardChainAliases],
+            nativeYieldSlug: services.curvanceApi.nativeYieldSlug,
+            suppressedNativeYieldSymbols: [...services.curvanceApi.suppressedNativeYieldSymbols],
+        },
+        dexAggregators: {
+            kyberSwap: services.dexAggregators.kyberSwap == null
+                ? null
+                : { ...services.dexAggregators.kyberSwap },
+        },
     };
 }
 
@@ -76,6 +118,61 @@ function validateSetupConfig(config: SetupConfigSnapshot) {
     } else if (!("OracleManager" in config.contracts)) {
         throw new Error(`Chain configuration for ${config.chain} is missing OracleManager address.`);
     }
+
+    const policyChain = config.feePolicy.chain;
+    if (policyChain != undefined && policyChain !== "any" && policyChain !== config.chain) {
+        throw new Error(
+            `Fee policy for ${policyChain} cannot be used with setupChain('${config.chain}').`,
+        );
+    }
+}
+
+function validateCheckerFeePolicy(config: SetupConfigSnapshot, checkerDao: address | null) {
+    if (config.services.dexAggregators.kyberSwap == null) {
+        return;
+    }
+    if (checkerDao == null) {
+        throw new Error(`KyberSwap checker validation for ${config.chain} requires the setup DAO address.`);
+    }
+
+    const checkerCompatibility = config.feePolicy.checkerCompatibility;
+    if (checkerCompatibility == null) {
+        throw new Error(
+            `KyberSwap checker for ${config.chain} requires a checker-compatible fee policy ` +
+            `with exact feeBps=${CURVANCE_FEE_BPS} and feeReceiver=${checkerDao}. ` +
+            `Context-dependent policies are not allowed on checker-bound routes. ` +
+            `Omit options.feePolicy to use the setup-resolved default or pass a policy ` +
+            `that declares checkerCompatibility.`,
+        );
+    }
+
+    const sampleFeeBps = config.feePolicy.getFeeBps({
+        operation: "zap",
+        inputToken: "0x0000000000000000000000000000000000000001" as address,
+        outputToken: "0x0000000000000000000000000000000000000002" as address,
+        inputAmount: 1n,
+        currentLeverage: null,
+        targetLeverage: null,
+    });
+    const feeReceiver = checkerCompatibility.feeReceiver;
+    if (
+        checkerCompatibility.exactFeeBpsForDexSwaps !== CURVANCE_FEE_BPS ||
+        sampleFeeBps !== checkerCompatibility.exactFeeBpsForDexSwaps ||
+        feeReceiver == null ||
+        feeReceiver.toLowerCase() !== checkerDao.toLowerCase()
+    ) {
+        throw new Error(
+            `KyberSwap checker for ${config.chain} requires feeBps=${CURVANCE_FEE_BPS} ` +
+            `and feeReceiver=${checkerDao}; got ` +
+            `feeBps=${checkerCompatibility.exactFeeBpsForDexSwaps} ` +
+            `sampleFeeBps=${sampleFeeBps} feeReceiver=${feeReceiver ?? "undefined"}. ` +
+            `Omit options.feePolicy to use the setup-resolved default or pass a checker-compatible policy.`,
+        );
+    }
+}
+
+function bindDexAggContext(dexAgg: IDexAgg, context: DexAggContext): IDexAgg {
+    return dexAgg.withContext?.(context) ?? dexAgg;
 }
 
 async function validateProviderChain(chain: ChainRpcPrefix, provider: curvance_read_provider, label: string) {
@@ -220,22 +317,41 @@ export async function setupChain(
         }
         const account = requestedAccount ?? signerAccount;
 
-        const nextSetupConfig = createSetupConfig(
+        let nextSetupConfig = createSetupConfig(
             chain,
             readProvider,
             signer,
             account,
             api_url,
-            options,
+            options.feePolicy ?? NO_FEE_POLICY,
         );
         validateSetupConfig(nextSetupConfig);
 
-        const { milestones, incentives } = await Api.getRewards(nextSetupConfig);
         const reader = new ProtocolReader(
             nextSetupConfig.contracts.ProtocolReader as address,
             nextSetupConfig.readProvider,
             nextSetupConfig.chain,
         );
+        const requiresCheckerPolicy = nextSetupConfig.services.dexAggregators.kyberSwap != null;
+        const setupDaoAddress = options.feePolicy == null || requiresCheckerPolicy
+            ? await reader.getDaoAddress()
+            : null;
+        const feePolicy = options.feePolicy ?? defaultFeePolicyForChain(
+            chain,
+            setupDaoAddress as address,
+        );
+        nextSetupConfig = createSetupConfig(
+            chain,
+            readProvider,
+            signer,
+            account,
+            api_url,
+            feePolicy,
+        );
+        validateSetupConfig(nextSetupConfig);
+        validateCheckerFeePolicy(nextSetupConfig, setupDaoAddress);
+
+        const { milestones, incentives } = await Api.getRewards(nextSetupConfig);
         const oracle_manager = new OracleManager(
             nextSetupConfig.contracts.OracleManager as address,
             nextSetupConfig.readProvider,
@@ -250,6 +366,17 @@ export async function setupChain(
             incentives,
             nextSetupConfig,
         );
+        const dexAgg = bindDexAggContext(chain_config[chain].dexAgg, {
+            markets,
+            feePolicy: nextSetupConfig.feePolicy,
+            checkerDao: setupDaoAddress ?? undefined,
+        });
+        for (const market of markets) {
+            market.dexAgg = dexAgg;
+            for (const token of market.tokens ?? []) {
+                token.refreshRouteCapabilities?.();
+            }
+        }
 
         pending_setup_invocations.delete(setupInvocation);
         successful_setup_results.set(setupInvocation, {
@@ -259,9 +386,12 @@ export async function setupChain(
         publishLatestSuccessfulSetup();
 
         return {
+            chain,
+            chainId: nextSetupConfig.chainId,
+            setupConfigSnapshot: nextSetupConfig,
             markets,
             reader,
-            dexAgg: chain_config[chain].dexAgg,
+            dexAgg,
             global_milestone: milestones['global'] ?? null
         };
     } catch (error) {

@@ -6,7 +6,7 @@ This directory has three validation layers:
    - Routine safety net. Fast, deterministic, no live chain required.
    - Validates transport policy, setup wiring, reader normalization, fee policy, conversion math, and query-budget expectations.
 2. `npm run test:all`
-   - Same as `test:transport` plus env-dependent integration suites (`basic`, `arb-basic`, `leverage`, `optimizer`, `zap`). Integration describes skip gracefully with a human-readable reason when `DEPLOYER_PRIVATE_KEY` / `TEST_RPC` aren't set.
+   - Same as `test:transport` plus env-dependent integration suites (`basic`, `arb-basic`, `leverage`, `optimizer`, `zap`). Integration describes skip gracefully with a human-readable reason when deployer keys / `TEST_RPC` aren't set.
 3. `npm run test:fork`
    - Real integration against an Anvil-compatible fork. Validates the SDK against live chain state, real writes, and real post-write refreshes.
 
@@ -31,27 +31,30 @@ Run:
 ```bash
 npm run test:transport
 npm run test:fork
+npm run test:dist-smoke
 npm run build
 ```
 
-WGW candidate: treating `test:transport` as sufficient for publish confidence. It proves policy logic, not live fork correctness.
+WGW candidate: treating `test:transport` as sufficient for publish confidence. It proves policy logic, not live fork correctness. Treating `npm run build` alone as package proof is also insufficient; package consumers load `dist`, so run `test:dist-smoke` after the fork gate to prove the built artifact exposes the expected public surface and package-boundary invariants.
 
 ## Test Suites
 
 ### `npm run test:transport`
 
-Runs:
+Runs every deterministic test file listed in `package.json` under
+`scripts.test:transport`. `tests/source-invariants.test.ts` enforces that this
+script stays in sync as deterministic suites are added.
 
-- `tests/contract-gas-buffer.test.ts`
-- `tests/retry-fallback.test.ts`
-- `tests/rpc-ranking.test.ts`
-- `tests/protocol-reader.test.ts`
-- `tests/setup-race.test.ts`
-- `tests/query-budget.test.ts`
-- `tests/conversion.test.ts`
-- `tests/feePolicy.test.ts`
-- `tests/market-refresh.test.ts`
-- `tests/dex-aggregators.test.ts`
+Current coverage includes:
+
+- transport/RPC policy: gas buffer, retry fallback, ranking, RPC config shape
+- setup and reader wiring: setup race, query budget, protocol reader, detached context
+- formatting and math: conversion, fee policy, leverage math, public format helpers
+- external request boundaries: API URL validation, fetch timeout/abort behavior, Merkl/Kyber response guards
+- market/account state: market boot/refresh/indexing, snapshots, Merkl, API degradation
+- execution planning: deposits, collateral removal, leverage planning/execution, zapper calldata
+- optimizer surfaces: optimizer reader and lending optimizer deterministic bindings
+- package/source guards: DEX aggregators, calldata compatibility, source invariants
 
 What it proves:
 
@@ -62,9 +65,10 @@ What it proves:
 - `setupChain` read-provider vs signer wiring and cross-invocation race guard
 - `ProtocolReader` normalization for public and connected loads; selector-support probe caches across instances
 - query-budget expectations for boot and targeted refresh paths
+- external fetch wrapper timeout cleanup, caller abort propagation, and HTTPS-only API URL validation
 - fee-policy routing and Decimal↔bigint conversion correctness
 - `Market.getSnapshots` concurrent dispatch and `applyState` partial-refresh preservation
-- DEX aggregator fee-aware slippage expansion (KyberSwap expands inside quoteAction; Kuru keeps raw)
+- DEX aggregator fee-aware slippage expansion (KyberSwap expands inside quoteAction when fee BPS is active)
 
 What it does not prove:
 
@@ -87,12 +91,19 @@ Env-dependent suites (`basic`, `arb-basic`, `leverage`, `optimizer`, `zap`) skip
 Runs:
 
 - `tests/fork-integration.ts`
+- `tests/basic.test.ts`
+- `tests/arb-basic.test.ts`
+- `tests/optimizer.test.ts`
+- `tests/leverage.test.ts`
+- `tests/zap.test.ts`
 
 What it proves:
 
 - public account-only `setupChain` can rehydrate signer-created state
 - `getMarketStates([market])` matches live cache after a real write
 - `refreshActiveUserMarkets()` only refreshes the markets that actually became active
+- legacy fork flows still work against deployed Monad market state
+- lending optimizer deployment/reader/rebalance behavior still works when its checked-in artifacts match the go-forward contract shape
 
 What it depends on:
 
@@ -104,13 +115,15 @@ What it depends on:
   - `anvil_setBalance`
   - `anvil_impersonateAccount`
 
-If `TEST_RPC` is not set, the suite skips and prints an explicit warning.
+If the required env for a fork-backed suite is not set, that suite skips and prints an explicit warning. `optimizer.test.ts` also skips when its checked-in `OptimizerReader` fixture is stale relative to the go-forward reader shape.
 
 ## Environment
 
-### Required for `test:fork`
+### Required for full `test:fork`
 
 - `TEST_RPC`
+- `DEPLOYER_PRIVATE_KEY`
+- `ARB_DEPLOYER_PRIVATE_KEY`
 
 ### Optional for `test:fork`
 
@@ -119,11 +132,12 @@ If `TEST_RPC` is not set, the suite skips and prints an explicit warning.
 - `TEST_API_URL`
   - defaults to `https://api.curvance.com`
 
-### Not required for the new fork harness
+### Not required for `fork-integration.ts`
 
 - `DEPLOYER_PRIVATE_KEY`
+- `ARB_DEPLOYER_PRIVATE_KEY`
 
-Some older tests still use `DEPLOYER_PRIVATE_KEY`, but the new `fork-integration.ts` flow does not.
+The other `test:fork` suites still use deployer keys because they deploy or mutate fork state. The newer `fork-integration.ts` flow does not.
 
 ## Why `TEST_RPC` Is Usually `127.0.0.1:8545`
 
@@ -158,6 +172,8 @@ Set env and run:
 ```bash
 export TEST_RPC=http://127.0.0.1:8545
 export TEST_CHAIN=monad-mainnet
+export DEPLOYER_PRIVATE_KEY=0x...
+export ARB_DEPLOYER_PRIVATE_KEY=0x...
 npm run test:fork
 ```
 
@@ -174,6 +190,8 @@ Set env and run:
 ```powershell
 $env:TEST_RPC="http://127.0.0.1:8545"
 $env:TEST_CHAIN="monad-mainnet"
+$env:DEPLOYER_PRIVATE_KEY="0x..."
+$env:ARB_DEPLOYER_PRIVATE_KEY="0x..."
 npm.cmd run test:fork
 ```
 
@@ -191,27 +209,17 @@ Once Anvil is running, the SDK test uses `TEST_RPC` and talks to the local fork.
 
 ## Current Test Inventory
 
-### New harness-backed / release-gate direction
+`package.json` is the source of truth for active test inventory:
 
-- `retry-fallback.test.ts`
-- `rpc-ranking.test.ts`
-- `protocol-reader.test.ts`
-- `setup-race.test.ts`
-- `query-budget.test.ts`
-- `fork-integration.ts`
+- `test:transport` runs deterministic unit and source-invariant coverage,
+  including conversion, reader, DEX, market, zapper, leverage, optimizer, and
+  snapshot suites.
+- `test:fork` runs env-backed fork/integration coverage: `fork-integration`,
+  `basic`, `arb-basic`, `optimizer`, `leverage`, and `zap`.
 
-### Older feature/integration coverage
-
-- `basic.test.ts`
-- `leverage.test.ts`
-- `zap.test.ts`
-- `optimizer.test.ts`
-- `conversion.test.ts`
-- `arb-basic.test.ts`
-- `position-health-preview.ts`
-- `position-health-anvil.ts`
-
-These older tests are still useful, but they are not yet organized as the new harness-based publish gate.
+Legacy Anvil/manual files such as `position-health-preview.ts` and
+`position-health-anvil.ts` are not part of the default release gate unless
+called directly.
 
 ## Practical Release Gate
 
@@ -220,6 +228,7 @@ For SDK changes that affect chain interaction, use this minimum gate:
 ```bash
 npm run test:transport
 npm run test:fork
+npm run test:dist-smoke
 npm run build
 ```
 
