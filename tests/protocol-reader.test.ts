@@ -320,6 +320,63 @@ test("same-chain readers with different providers keep static cache isolated", a
     assert.equal(callsB, 1);
 });
 
+test("same-chain readers with the same provider share static cache by deployment key", async () => {
+    const provider = { label: "shared-provider" } as any;
+    let callsA = 0;
+    let callsB = 0;
+
+    const readerA = new ProtocolReader(MARKET as any, provider, "monad-mainnet");
+    readerA.contract = {
+        getStaticMarketData: async () => {
+            callsA += 1;
+            return [createRawStaticMarket(MARKET, TOKEN)];
+        },
+    } as any;
+
+    const readerB = new ProtocolReader(MARKET as any, provider, "monad-mainnet");
+    readerB.contract = {
+        getStaticMarketData: async () => {
+            callsB += 1;
+            throw new Error("reader B should reuse reader A's static cache");
+        },
+    } as any;
+
+    const first = await readerA.getStaticMarketData();
+    const second = await readerB.getStaticMarketData();
+
+    assert.equal(readerA.batchKey, readerB.batchKey);
+    assert.equal(first[0]?.address, MARKET);
+    assert.deepEqual(second, first);
+    assert.equal(callsA, 1);
+    assert.equal(callsB, 0);
+});
+
+test("getStaticMarketData evicts failed cache promises before retry", async () => {
+    const provider = { label: "flaky-provider" } as any;
+    const reader = new ProtocolReader(MARKET as any, provider, "monad-mainnet");
+    let calls = 0;
+
+    reader.contract = {
+        getStaticMarketData: async () => {
+            calls += 1;
+            if (calls === 1) {
+                throw new Error("transient static market failure");
+            }
+
+            return [createRawStaticMarket(MARKET_B, TOKEN_B)];
+        },
+    } as any;
+
+    await assert.rejects(
+        () => reader.getStaticMarketData(),
+        /transient static market failure/,
+    );
+    const retry = await reader.getStaticMarketData();
+
+    assert.equal(calls, 2);
+    assert.equal(retry[0]?.address, MARKET_B);
+});
+
 test("getStaticMarketData forceRefresh bypasses the short-lived cache", async () => {
     const reader = createReader();
     let calls = 0;

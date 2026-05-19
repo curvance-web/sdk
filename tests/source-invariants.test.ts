@@ -11,6 +11,22 @@ function readRepoFile(relativePath: string): string {
     return readFileSync(path.join(repoRoot, relativePath), "utf8");
 }
 
+function listFiles(relativeDir: string): string[] {
+    const absoluteDir = path.join(repoRoot, relativeDir);
+    const files: string[] = [];
+
+    for (const entry of readdirSync(absoluteDir, { withFileTypes: true })) {
+        const relativePath = path.join(relativeDir, entry.name).replace(/\\/g, "/");
+        if (entry.isDirectory()) {
+            files.push(...listFiles(relativePath));
+        } else {
+            files.push(relativePath);
+        }
+    }
+
+    return files;
+}
+
 function extractBlock(source: string, needle: string): string {
     const start = source.indexOf(needle);
     assert.notEqual(start, -1, `Could not find source block: ${needle}`);
@@ -77,6 +93,11 @@ test("package lifecycle rebuilds dist before pack and publish", () => {
     assert.equal(packageJson.scripts.prepublishOnly, "npm run build");
     assert.doesNotMatch(distSmokeSource, /--ignore-scripts/);
     assert.match(distSmokeSource, /require\(packageRoot\)/);
+    assert.doesNotMatch(
+        distSmokeSource,
+        /require\(["']\.\.\/dist\/classes\//,
+        "dist smoke should exercise the packed package root instead of local dist class modules",
+    );
     assert.match(distSmokeSource, /dist\/chains\/services\.js/);
     assert.match(distSmokeSource, /dist\/chains\/services\.d\.ts/);
 });
@@ -112,7 +133,19 @@ test("chain config, RPC config, and contract manifests stay aligned", () => {
     assert.deepEqual(configuredChains, rpcChains);
     assert.deepEqual(configuredChains, contractChains);
 
+    const chainIds = new Map<number, string>();
     for (const [chain, config] of Object.entries(chain_config)) {
+        assert.ok(
+            Number.isSafeInteger(config.chainId) && config.chainId > 0,
+            `${chain} chainId must be a positive safe integer`,
+        );
+        const duplicateChain = chainIds.get(config.chainId);
+        assert.equal(
+            duplicateChain,
+            undefined,
+            `${chain} chainId duplicates ${duplicateChain}`,
+        );
+        chainIds.set(config.chainId, chain);
         assert.ok(config.environment, `${chain} must declare an environment`);
         assert.ok(config.services?.curvanceApi, `${chain} must declare Curvance API service aliases`);
         assert.ok(
@@ -152,6 +185,22 @@ test("chain config, RPC config, and contract manifests stay aligned", () => {
             `${chain} suppressedNativeYieldSymbols must be non-empty strings`,
         );
         assert.ok(
+            Array.isArray(config.excluded_zap_symbols),
+            `${chain} excluded_zap_symbols must be explicit`,
+        );
+        assert.ok(
+            config.excluded_zap_symbols.every((symbol) => (
+                typeof symbol === "string" && symbol.trim().length > 0
+            )),
+            `${chain} excluded_zap_symbols must be non-empty strings`,
+        );
+        const normalizedExcludedZapSymbols = config.excluded_zap_symbols.map((symbol) => symbol.toLowerCase());
+        assert.equal(
+            new Set(normalizedExcludedZapSymbols).size,
+            normalizedExcludedZapSymbols.length,
+            `${chain} excluded_zap_symbols must not contain case-insensitive duplicates`,
+        );
+        assert.ok(
             config.services.dexAggregators,
             `${chain} must explicitly declare DEX aggregator service config`,
         );
@@ -173,6 +222,37 @@ test("chain config, RPC config, and contract manifests stay aligned", () => {
         assert.ok((chains as any)[chain].ProtocolReader, `${chain} contracts must include ProtocolReader`);
         assert.ok((chains as any)[chain].OracleManager, `${chain} contracts must include OracleManager`);
     }
+});
+
+test("Curvance API reward aliases are unambiguous across configured chains", () => {
+    const aliasOwners = new Map<string, string>();
+    const collisions: string[] = [];
+
+    for (const [chain, config] of Object.entries(chain_config)) {
+        const aliases = [
+            chain,
+            config.services.curvanceApi.rewardsSlug,
+            ...config.services.curvanceApi.rewardChainAliases,
+        ];
+        const normalizedAliases = Array.from(
+            new Set(aliases.map((alias) => alias.trim().toLowerCase().replace(/[\s_]+/g, "-"))),
+        );
+
+        for (const alias of normalizedAliases) {
+            const owner = aliasOwners.get(alias);
+            if (owner != null && owner !== chain) {
+                collisions.push(`${alias}:${owner}/${chain}`);
+            } else {
+                aliasOwners.set(alias, chain);
+            }
+        }
+    }
+
+    assert.deepEqual(
+        collisions,
+        [],
+        "Curvance API reward aliases must uniquely identify one configured chain",
+    );
 });
 
 test("external service aliases stay in chain config", () => {
@@ -286,15 +366,66 @@ test("default fee receiver is setup-resolved instead of hardcoded in production 
     assert.match(kyberSource, /new KyberSwap\(context\.checkerDao \?\? this\.dao,/);
 });
 
+test("runtime source keeps deployment addresses in chain config and manifests", () => {
+    const runtimeFiles = [
+        ...listFiles("src/classes").filter((file) => file.endsWith(".ts")),
+        ...listFiles("src/integrations").filter((file) => file.endsWith(".ts")),
+        ...listFiles("src/format").filter((file) => file.endsWith(".ts")),
+        "src/setup.ts",
+        "src/feePolicy.ts",
+        "src/helpers.ts",
+        "src/validation.ts",
+    ];
+    const allowedLiterals = new Map<string, Set<string>>([
+        [
+            "src/helpers.ts",
+            new Set([
+                "0x0000000000000000000000000000000000000000",
+                "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+            ]),
+        ],
+        [
+            "src/setup.ts",
+            new Set([
+                "0x0000000000000000000000000000000000000001",
+                "0x0000000000000000000000000000000000000002",
+            ]),
+        ],
+    ]);
+    const unexpected: string[] = [];
+
+    for (const file of runtimeFiles) {
+        const source = readRepoFile(file);
+        const allowedForFile = allowedLiterals.get(file) ?? new Set<string>();
+        for (const match of source.matchAll(/0x[a-fA-F0-9]{40}/g)) {
+            const literal = match[0];
+            if (!allowedForFile.has(literal)) {
+                unexpected.push(`${file}:${literal}`);
+            }
+        }
+    }
+
+    assert.deepEqual(
+        unexpected,
+        [],
+        "runtime source should resolve chain-specific addresses from config/manifests instead of inline literals",
+    );
+});
+
 test("Kyber current-router calldata validation fails closed in source", () => {
     const source = readRepoFile("src/classes/DexAggregators/KyberSwap.ts");
     const validator = extractBlock(source, "function validateSwapCalldata");
 
     assert.match(source, /this\.apiBase = validateApiUrl\(api\)\.replace\(\/\\\/\+\$\/,\s*""\);/);
     assert.match(source, /this\.api = `\$\{this\.apiBase\}\/\$\{this\.chain\}`;/);
+    assert.match(source, /if \(amount <= 0n\) \{[\s\S]*KyberSwap quote amount must be positive/);
+    assert.match(source, /const validatedWallet = validateAddress\(wallet, 'KyberSwap wallet'\);/);
+    assert.match(source, /const validatedTokenIn = validateAddress\(tokenIn, 'KyberSwap tokenIn'\);/);
+    assert.match(source, /const validatedTokenOut = validateAddress\(tokenOut, 'KyberSwap tokenOut'\);/);
+    assert.match(source, /const validatedFeeReceiver = feeReceiver == undefined[\s\S]*?validateAddress\(feeReceiver, 'KyberSwap feeReceiver'\);/);
     assert.match(
         source,
-        /validateSwapCalldata\(build_data\.data\.data,\s*\{[\s\S]*tokenIn,[\s\S]*tokenOut,[\s\S]*amount,[\s\S]*recipient: wallet,[\s\S]*minReturnAmount: min_out,[\s\S]*feeBps: feeBps \?\? 0n,[\s\S]*feeReceiver,[\s\S]*\}\);/,
+        /validateSwapCalldata\(build_data\.data\.data,\s*\{[\s\S]*tokenIn: validatedTokenIn,[\s\S]*tokenOut: validatedTokenOut,[\s\S]*amount,[\s\S]*recipient: validatedWallet,[\s\S]*minReturnAmount: min_out,[\s\S]*feeBps: feeBps \?\? 0n,[\s\S]*feeReceiver: validatedFeeReceiver,[\s\S]*\}\);/,
     );
     assert.doesNotMatch(source, /console\.warn/);
     assert.match(validator, /validateEqualAddress\(desc\.srcToken,\s*expected\.tokenIn,\s*'srcToken'\);/);
@@ -309,19 +440,34 @@ test("Kyber current-router calldata validation fails closed in source", () => {
     assert.match(validator, /throw new Error\(`KyberSwap calldata could not be decoded for fee validation:/);
 });
 
-test("Merkl campaign lookups stay protocol and chain scoped", () => {
+test("Merkl reward and campaign lookups stay path-safe, protocol-scoped, and chain-scoped", () => {
     const source = readRepoFile("src/integrations/merkl.ts");
     const marketSource = readRepoFile("src/classes/Market.ts");
+    const rewardsStart = source.indexOf("export async function fetchMerklUserRewards");
+    const rewardsEnd = source.indexOf("type FetchCampaignsParams", rewardsStart);
     const start = source.indexOf("export async function fetchMerklCampaignsBySymbol");
     const end = source.indexOf("type FetchOpportunitiesParams", start);
+    assert.notEqual(rewardsStart, -1, "fetchMerklUserRewards must exist");
+    assert.notEqual(rewardsEnd, -1, "FetchCampaignsParams must follow fetchMerklUserRewards");
     assert.notEqual(start, -1, "fetchMerklCampaignsBySymbol must exist");
     assert.notEqual(end, -1, "FetchOpportunitiesParams must follow fetchMerklCampaignsBySymbol");
+    const rewardsBody = source.slice(rewardsStart, rewardsEnd);
     const body = source.slice(start, end);
 
+    assert.match(source, /function validateOptionalChainId\(chainId: number \| undefined, context: string\)/);
+    assert.match(source, /Number\.isSafeInteger\(chainId\) \|\| chainId <= 0/);
+    assert.match(rewardsBody, /const validatedWallet = validateAddress\(wallet, 'Merkl rewards wallet'\);/);
+    assert.match(rewardsBody, /const validatedChainId = validateOptionalChainId\(chainId, 'Merkl rewards chainId'\);/);
+    assert.match(rewardsBody, /`\$\{MERKL_API_BASE_URL\}\/users\/\$\{validatedWallet\}\/rewards`/);
+    assert.match(rewardsBody, /url\.searchParams\.set\('chainId', String\(validatedChainId\)\);/);
+    assert.doesNotMatch(rewardsBody, /\/users\/\$\{wallet\}\/rewards/);
+    assert.match(body, /const validatedChainId = validateOptionalChainId\(chainId, 'Merkl campaigns chainId'\);/);
     assert.match(body, /url\.searchParams\.set\('mainProtocolId', PROTOCOL_ID\);/);
     assert.match(body, /url\.searchParams\.set\('tokenSymbol', tokenSymbol\);/);
-    assert.match(body, /url\.searchParams\.set\('chainId', String\(chainId\)\);/);
-    assert.match(body, /campaigns\.filter\(\(campaign\) => campaignMatchesChain\(campaign, chainId\)\)/);
+    assert.match(body, /url\.searchParams\.set\('chainId', String\(validatedChainId\)\);/);
+    assert.match(body, /campaigns\.filter\(\(campaign\) => campaignMatchesChain\(campaign, validatedChainId\)\)/);
+    assert.match(source, /const validatedChainId = validateOptionalChainId\(chainId, 'Merkl opportunities chainId'\);/);
+    assert.match(source, /filterMerklOpportunitiesByChain\([\s\S]*?validatedChainId,/);
     assert.match(marketSource, /const chainId = resolvedSetup\.chainId;/);
     assert.match(marketSource, /resolvedSetup\.environment === "production-mainnet"/);
     assert.doesNotMatch(
@@ -373,6 +519,9 @@ test("CToken DEX execution paths stay behind the market-bound adapter getter", (
     assert.match(source, /private get boundDexAgg\(\): IDexAgg \| null \{ return this\.market\.dexAgg \?\? null; \}/);
     assert.match(source, /DEX aggregator is not bound for token/);
     assert.match(source, /private get currentChainAssets\(\) \{ return this\.setup\.assets; \}/);
+    assert.match(source, /private isZapSymbolExcluded/);
+    assert.match(source, /excluded_zap_symbols/);
+    assert.doesNotMatch(source, /EXCLUDED_ZAP_SYMBOLS/);
     assert.match(source, /const chainSettings = this\.currentChainAssets;/);
     assert.match(source, /\? this\.currentChainAssets\.wrapped_native/);
     assert.doesNotMatch(
@@ -465,6 +614,31 @@ test("MultiDex route advertisement uses an executable child router", () => {
     assert.match(
         source,
         /this\.aggregators\.find\(\(agg\) => agg\.router\.toLowerCase\(\) !== EMPTY_ADDRESS\.toLowerCase\(\)\) \?\? this\.primary/,
+    );
+});
+
+test("MultiDex quote request validation runs before child fan-out", () => {
+    const source = readRepoFile("src/classes/DexAggregators/MultiDexAgg.ts");
+    const validator = extractBlock(source, "function validateQuoteRequest");
+
+    assert.match(validator, /if \(amount <= 0n\)/);
+    assert.match(validator, /MultiDexAgg quote amount must be positive/);
+    assert.match(validator, /validateSlippageBps\(slippage, "MultiDexAgg quote"\)/);
+    assert.match(validator, /validateAddress\(wallet, "MultiDexAgg wallet"\)/);
+    assert.match(validator, /validateAddress\(tokenIn, "MultiDexAgg tokenIn"\)/);
+    assert.match(validator, /validateAddress\(tokenOut, "MultiDexAgg tokenOut"\)/);
+    assert.match(validator, /validateAddress\(feeReceiver, "MultiDexAgg feeReceiver"\)/);
+    assert.match(
+        source,
+        /async quoteAction\(wallet:[\s\S]*?const request = validateQuoteRequest\(wallet, tokenIn, tokenOut, amount, slippage, feeReceiver\);[\s\S]*?this\.primary\.quoteAction\(request\.wallet, request\.tokenIn, request\.tokenOut, request\.amount, request\.slippage, feeBps, request\.feeReceiver\)[\s\S]*?this\._bestQuoteAction\(request\.wallet, request\.tokenIn, request\.tokenOut, request\.amount, request\.slippage, feeBps, request\.feeReceiver\)/,
+    );
+    assert.match(
+        source,
+        /async quoteMin\(wallet:[\s\S]*?const request = validateQuoteRequest\(wallet, tokenIn, tokenOut, amount, slippage, feeReceiver\);[\s\S]*?this\.primary\.quoteMin\(request\.wallet, request\.tokenIn, request\.tokenOut, request\.amount, request\.slippage, feeBps, request\.feeReceiver\)[\s\S]*?this\._bestQuoteByValue\(\s*request\.wallet,\s*request\.tokenIn,\s*request\.tokenOut,\s*request\.amount,\s*request\.slippage,/,
+    );
+    assert.match(
+        source,
+        /async quote\(wallet:[\s\S]*?const request = validateQuoteRequest\(wallet, tokenIn, tokenOut, amount, slippage, feeReceiver\);[\s\S]*?this\.primary\.quote\(request\.wallet, request\.tokenIn, request\.tokenOut, request\.amount, request\.slippage, feeBps, request\.feeReceiver\)[\s\S]*?this\._bestQuoteByValue\(\s*request\.wallet,\s*request\.tokenIn,\s*request\.tokenOut,\s*request\.amount,\s*request\.slippage,/,
     );
 });
 
@@ -671,4 +845,17 @@ test("market refresh token rows fail closed on duplicate addresses before applyi
         "refresh token validation must not collapse duplicate rows before checking for missing token data",
     );
     assert.match(applyState, /this\.validateStateRows\(dynamicData, userData\);/);
+});
+
+test("dist smoke keeps extracted package available for lazy internal requires", () => {
+    const source = readRepoFile("tests/dist-smoke.cjs");
+    const withPackedPackage = extractBlock(source, "function withPackedPackage");
+
+    assert.match(withPackedPackage, /process\.once\("exit"/);
+    assert.match(withPackedPackage, /return run\(/);
+    assert.doesNotMatch(
+        withPackedPackage,
+        /finally\s*\{\s*rmSync\(packDir/,
+        "dist smoke must not delete the extracted package before lazy requires in packed modules execute",
+    );
 });

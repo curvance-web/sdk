@@ -34,5 +34,13 @@ export const mainnet: ChainConfig = {
     ],
     vaults: [
         { name: "sAUSD", contract: "0xD793c04B87386A6bb84ee61D98e0065FdE7fdA5E" as address, underlying: "0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a" as address }
-    ]
+    ],
+    excluded_zap_symbols: [
+        'eBTC',
+        'vUSD',
+        'ezETH',
+        'YZM',
+        'wsrUSD',
+        'sAUSD',
+    ],
 };

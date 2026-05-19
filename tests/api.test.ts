@@ -119,6 +119,14 @@ test("Api.getRewards filters malformed reward rows from successful responses", a
                 {
                     market,
                     type: "supply",
+                    rate: 6,
+                    description: "malformed chain reward",
+                    image: "stars-rewards",
+                    chain_network: 143,
+                },
+                {
+                    market,
+                    type: "supply",
                     rate: 4,
                     description: "reward",
                     image: "stars-rewards",
@@ -182,6 +190,49 @@ test("Api.getRewards filters milestones by requested chain metadata", async () =
     assert.equal(rewards.milestones[monadMarket.toLowerCase()]?.chain_network, "Monad Mainnet");
     assert.equal(rewards.milestones.global?.chain_network, "monad");
     assert.equal(rewards.milestones[wrongChainMarket.toLowerCase()], undefined);
+});
+
+test("Api.getRewards filters incentives by explicit chain metadata without dropping legacy rows", async () => {
+    const market = "0x00000000000000000000000000000000000000AB";
+    const normalizedMarket = market.toLowerCase();
+    globalThis.fetch = (async () => ({
+        ok: true,
+        json: async () => ({
+            milestones: [],
+            incentives: [
+                {
+                    market,
+                    type: "supply",
+                    rate: 1,
+                    description: "legacy no-chain reward",
+                    image: "stars-rewards",
+                },
+                {
+                    market,
+                    type: "supply",
+                    rate: 2,
+                    description: "monad reward",
+                    image: "stars-rewards",
+                    chain_network: "Monad Mainnet",
+                },
+                {
+                    market,
+                    type: "supply",
+                    rate: 3,
+                    description: "ethereum reward",
+                    image: "stars-rewards",
+                    chain_network: "Ethereum",
+                },
+            ],
+        }),
+    })) as unknown as typeof fetch;
+
+    const rewards = await Api.getRewards(createApiConfig());
+
+    assert.deepEqual(
+        rewards.incentives[normalizedMarket]?.map((incentive) => incentive.description),
+        ["legacy no-chain reward", "monad reward"],
+    );
 });
 
 test("Api.getRewards accepts Arbitrum Sepolia milestone aliases", async () => {

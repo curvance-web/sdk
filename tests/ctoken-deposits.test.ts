@@ -37,6 +37,7 @@ const ORACLE_MANAGER = '0x0000000000000000000000000000000000000abc';
 const AMBIENT_ORACLE_MANAGER = '0x0000000000000000000000000000000000000bad';
 const DEX_ROUTER = '0x0000000000000000000000000000000000000def';
 const ZAP_ASSET = '0x00000000000000000000000000000000000000f1';
+const EXCLUDED_ASSET = '0x00000000000000000000000000000000000000f2';
 
 interface MockCache {
     totalSupply: bigint;
@@ -146,6 +147,88 @@ function createBorrowableCToken(cacheOverrides: Partial<MockCache> = {}): Borrow
     return token;
 }
 
+function createRouteCapabilityToken({
+    chain,
+    assetAddress = EXCLUDED_ASSET,
+    assetSymbol,
+    assetName = assetSymbol,
+    excludedZapSymbols = [],
+    dexTokens,
+}: {
+    chain: string;
+    assetAddress?: string;
+    assetSymbol: string;
+    assetName?: string;
+    excludedZapSymbols?: readonly string[];
+    dexTokens?: any[];
+}) {
+    const token = createCToken({
+        asset: {
+            address: assetAddress,
+            decimals: 18n,
+            symbol: assetSymbol,
+            name: assetName,
+        } as any,
+    });
+    (token as any).address = ADDR;
+    (token as any).provider = {
+        getBalance: async () => 0n,
+    };
+    (token as any).market = {
+        signer: null,
+        account: '0x0000000000000000000000000000000000000aaa',
+        plugins: {
+            simplePositionManager: '0x0000000000000000000000000000000000000b01',
+        },
+        dexAgg: {
+            router: DEX_ROUTER,
+            getAvailableTokens: async () => dexTokens ?? [{
+                interface: {
+                    address: ZAP_ASSET,
+                    decimals: 18n,
+                    symbol: 'USDC',
+                    name: 'USD Coin',
+                },
+                type: 'simple',
+                quote: async () => ({
+                    minOut_raw: 1n,
+                    output_raw: 2n,
+                    minOut: Decimal(1),
+                    output: Decimal(2),
+                }),
+            }],
+        },
+        setup: {
+            chain,
+            contracts: {
+                OracleManager: ORACLE_MANAGER,
+                zappers: {
+                    simpleZapper: DEX_ROUTER,
+                },
+            },
+            assets: {
+                native_symbol: chain === 'arb-sepolia' ? 'ETH' : 'MON',
+                native_name: chain === 'arb-sepolia' ? 'Ether' : 'Monad',
+                wrapped_native: '0x0000000000000000000000000000000000000eee',
+                native_vaults: [],
+                vaults: [],
+                excluded_zap_symbols: excludedZapSymbols,
+            },
+        },
+    };
+    (token as any).isWrappedNative = false;
+    (token as any).isNativeVault = false;
+    (token as any).isVault = false;
+    (token as any).getAsset = () => ({
+        address: assetAddress,
+        decimals: 18n,
+        symbol: assetSymbol,
+        name: assetName,
+    });
+    token.refreshRouteCapabilities();
+    return token;
+}
+
 test('getDepositTokens does not expose a duplicate simple native route for native-vault tokens', async () => {
     const token = createCToken({
         asset: {
@@ -219,6 +302,129 @@ test('getDepositTokens does not expose a duplicate simple native route for nativ
             type: 'simple',
         },
     ]);
+});
+
+test('zap symbol exclusions are chain-scoped through setup assets instead of global symbols', async () => {
+    const monadToken = createRouteCapabilityToken({
+        chain: 'monad-mainnet',
+        assetSymbol: 'sAUSD',
+        assetName: 'Staked AUSD',
+        excludedZapSymbols: ['sausd'],
+    });
+    const nextChainToken = createRouteCapabilityToken({
+        chain: 'arb-sepolia',
+        assetSymbol: 'sAUSD',
+        assetName: 'Staked AUSD',
+    });
+
+    assert.deepEqual(monadToken.zapTypes, []);
+    assert.deepEqual(monadToken.leverageTypes, []);
+    assert.equal(monadToken.canZap, false);
+    assert.equal(monadToken.canLeverage, false);
+    assert.deepEqual((await monadToken.getDepositTokens()).map((option) => option.type), ['none']);
+
+    assert.deepEqual(nextChainToken.zapTypes, ['simple']);
+    assert.deepEqual(nextChainToken.leverageTypes, ['simple']);
+    assert.equal(nextChainToken.canZap, true);
+    assert.equal(nextChainToken.canLeverage, true);
+    assert.deepEqual(
+        (await nextChainToken.getDepositTokens()).map((option) => ({
+            symbol: option.interface.symbol,
+            type: option.type,
+            quoteable: typeof option.quote === 'function',
+        })),
+        [
+            { symbol: 'sAUSD', type: 'none', quoteable: false },
+            { symbol: 'USDC', type: 'simple', quoteable: true },
+            { symbol: 'ETH', type: 'simple', quoteable: false },
+        ],
+    );
+});
+
+test('getDepositTokens filters excluded DEX input symbols through setup assets', async () => {
+    const token = createRouteCapabilityToken({
+        chain: 'monad-mainnet',
+        assetAddress: ADDR,
+        assetSymbol: 'USDC',
+        assetName: 'USD Coin',
+        excludedZapSymbols: ['sAUSD'],
+        dexTokens: [{
+            interface: {
+                address: EXCLUDED_ASSET,
+                decimals: 18n,
+                symbol: 'sAUSD',
+                name: 'Staked AUSD',
+            },
+            type: 'simple',
+            quote: async () => ({
+                minOut_raw: 1n,
+                output_raw: 2n,
+                minOut: Decimal(1),
+                output: Decimal(2),
+            }),
+        }, {
+            interface: {
+                address: ZAP_ASSET,
+                decimals: 18n,
+                symbol: 'WMON',
+                name: 'Wrapped Monad',
+            },
+            type: 'simple',
+            quote: async () => ({
+                minOut_raw: 3n,
+                output_raw: 4n,
+                minOut: Decimal(3),
+                output: Decimal(4),
+            }),
+        }],
+    });
+
+    assert.deepEqual(
+        (await token.getDepositTokens()).map((option) => ({
+            symbol: option.interface.symbol,
+            type: option.type,
+            quoteable: typeof option.quote === 'function',
+        })),
+        [
+            { symbol: 'USDC', type: 'none', quoteable: false },
+            { symbol: 'WMON', type: 'simple', quoteable: true },
+            { symbol: 'MON', type: 'simple', quoteable: false },
+        ],
+    );
+});
+
+test('getDepositTokens applies search filtering to synthetic native simple routes', async () => {
+    const token = createRouteCapabilityToken({
+        chain: 'monad-mainnet',
+        assetAddress: EXCLUDED_ASSET,
+        assetSymbol: 'USDC',
+        assetName: 'USD Coin',
+    });
+
+    assert.deepEqual(
+        (await token.getDepositTokens('usd')).map((option) => ({
+            symbol: option.interface.symbol,
+            type: option.type,
+            address: option.interface.address.toLowerCase(),
+        })),
+        [
+            { symbol: 'USDC', type: 'none', address: EXCLUDED_ASSET.toLowerCase() },
+            { symbol: 'USDC', type: 'simple', address: ZAP_ASSET.toLowerCase() },
+        ],
+        'nonmatching synthetic native route should not leak into token search results',
+    );
+
+    assert.deepEqual(
+        (await token.getDepositTokens('mon')).map((option) => ({
+            symbol: option.interface.symbol,
+            type: option.type,
+            address: option.interface.address.toLowerCase(),
+        })),
+        [
+            { symbol: 'MON', type: 'simple', address: NATIVE_ADDRESS.toLowerCase() },
+        ],
+        'matching synthetic native route should remain searchable',
+    );
 });
 
 describe('getDeposits — Issue 3 fix (renamed from getTvl, valued from totalAssets)', () => {

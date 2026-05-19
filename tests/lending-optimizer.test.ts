@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import Decimal from "decimal.js";
 import { Interface } from "ethers";
-import { LendingOptimizer, PositionManager } from "../src";
+import { LendingOptimizer, OptimizerReader, PositionManager } from "../src";
 import type { address } from "../src/types";
 
 const OPTIMIZER = "0x00000000000000000000000000000000000000a1" as address;
@@ -18,6 +18,7 @@ const optimizerInterface = new Interface([
     "function deposit(uint256 assets,address receiver)",
     "function withdraw(uint256 assets,address receiver,address owner)",
     "function redeem(uint256 shares,address receiver,address owner)",
+    "function rebalance((address cToken,int256 assetsOrBps)[] actions,(address cToken,uint256 minBps,uint256 maxBps)[] bounds)",
 ]);
 
 const positionManagerInterface = new Interface([
@@ -87,6 +88,124 @@ test("LendingOptimizer.withdraw and redeem preserve explicit/default account rou
     assert.equal(redeem[0], 123_456_789n);
     assert.equal(redeem[1].toLowerCase(), SIGNER.toLowerCase());
     assert.equal(redeem[2].toLowerCase(), SIGNER.toLowerCase());
+});
+
+test("OptimizerReader user shareBalance can execute an exact LendingOptimizer max redeem", async () => {
+    const { optimizer, sent } = createLendingOptimizer();
+    const reader = Object.create(OptimizerReader.prototype) as OptimizerReader;
+    (reader as any).contract = {
+        getOptimizerUserData: async (optimizers: string[], account: string) => {
+            assert.deepEqual(optimizers, [OPTIMIZER]);
+            assert.equal(account, SIGNER);
+            return [{
+                _address: OPTIMIZER,
+                shareBalance: 987_654_321n,
+                redeemable: 123_456_789n,
+            }];
+        },
+    };
+
+    const [userData] = await reader.getOptimizerUserData([OPTIMIZER], SIGNER);
+    await optimizer.redeem(userData!.shareBalance);
+
+    assert.equal(userData!.address, OPTIMIZER);
+    assert.equal(userData!.redeemable, 123_456_789n);
+    assert.equal(sent.length, 1);
+
+    const redeem = optimizerInterface.decodeFunctionData("redeem(uint256,address,address)", sent[0]!.data);
+    assert.equal(redeem[0], 987_654_321n);
+    assert.equal(redeem[1].toLowerCase(), SIGNER.toLowerCase());
+    assert.equal(redeem[2].toLowerCase(), SIGNER.toLowerCase());
+});
+
+test("LendingOptimizer.rebalance submits exact optimizer-reader action and bound arrays", async () => {
+    const { optimizer, sent } = createLendingOptimizer();
+
+    const tx = await optimizer.rebalance({
+        actions: [
+            { cToken: BORROWABLE, assetsOrBps: 1250n },
+            { cToken: CTOKEN, assetsOrBps: -750n },
+        ],
+        bounds: [
+            { cToken: BORROWABLE, minBps: 3000n, maxBps: 4500n },
+            { cToken: CTOKEN, minBps: 5500n, maxBps: 7000n },
+        ],
+    });
+
+    assert.deepEqual(tx, { hash: "0x1" });
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.to, OPTIMIZER);
+
+    const decoded = optimizerInterface.decodeFunctionData("rebalance", sent[0]!.data);
+    assert.deepEqual(
+        decoded[0].map((action: { cToken: string; assetsOrBps: bigint }) => ({
+            cToken: action.cToken.toLowerCase(),
+            assetsOrBps: action.assetsOrBps,
+        })),
+        [
+            { cToken: BORROWABLE.toLowerCase(), assetsOrBps: 1250n },
+            { cToken: CTOKEN.toLowerCase(), assetsOrBps: -750n },
+        ],
+    );
+    assert.deepEqual(
+        decoded[1].map((bound: { cToken: string; minBps: bigint; maxBps: bigint }) => ({
+            cToken: bound.cToken.toLowerCase(),
+            minBps: bound.minBps,
+            maxBps: bound.maxBps,
+        })),
+        [
+            { cToken: BORROWABLE.toLowerCase(), minBps: 3000n, maxBps: 4500n },
+            { cToken: CTOKEN.toLowerCase(), minBps: 5500n, maxBps: 7000n },
+        ],
+    );
+});
+
+test("OptimizerReader optimalRebalance output can be executed by LendingOptimizer.rebalance", async () => {
+    const { optimizer, sent } = createLendingOptimizer();
+    const reader = Object.create(OptimizerReader.prototype) as OptimizerReader;
+    (reader as any).contract = {
+        optimalRebalance: async (optimizerAddress: string, slippageBps: bigint) => {
+            assert.equal(optimizerAddress, OPTIMIZER);
+            assert.equal(slippageBps, 25n);
+            return {
+                actions: [
+                    { cToken: BORROWABLE, assets: 2500n },
+                    { cToken: CTOKEN, assetsOrBps: -1500n },
+                ],
+                bounds: [
+                    { cToken: BORROWABLE, minBps: 2500n, maxBps: 5000n },
+                    { cToken: CTOKEN, minBps: 5000n, maxBps: 7500n },
+                ],
+            };
+        },
+    };
+
+    const plan = await reader.optimalRebalance(OPTIMIZER, 25n);
+    await optimizer.rebalance(plan);
+
+    assert.equal(sent.length, 1);
+    const decoded = optimizerInterface.decodeFunctionData("rebalance", sent[0]!.data);
+    assert.deepEqual(
+        decoded[0].map((action: { cToken: string; assetsOrBps: bigint }) => ({
+            cToken: action.cToken.toLowerCase(),
+            assetsOrBps: action.assetsOrBps,
+        })),
+        [
+            { cToken: BORROWABLE.toLowerCase(), assetsOrBps: 2500n },
+            { cToken: CTOKEN.toLowerCase(), assetsOrBps: -1500n },
+        ],
+    );
+    assert.deepEqual(
+        decoded[1].map((bound: { cToken: string; minBps: bigint; maxBps: bigint }) => ({
+            cToken: bound.cToken.toLowerCase(),
+            minBps: bound.minBps,
+            maxBps: bound.maxBps,
+        })),
+        [
+            { cToken: BORROWABLE.toLowerCase(), minBps: 2500n, maxBps: 5000n },
+            { cToken: CTOKEN.toLowerCase(), minBps: 5000n, maxBps: 7500n },
+        ],
+    );
 });
 
 test("PositionManager calldata helpers encode exact action structs", () => {

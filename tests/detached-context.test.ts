@@ -101,6 +101,42 @@ test("NativeToken keeps an explicit detached read provider even when setup conte
     assert.equal(token.provider, explicitReadProvider);
 });
 
+test("supporting readers keep explicit read providers when setup context exists", () => {
+    const defaultReadProvider = { id: "default" } as any;
+    const explicitReadProvider = { id: "explicit" } as any;
+
+    setSetupConfig(ORACLE_A, defaultReadProvider);
+    const protocolReader = new ProtocolReader(READER as any, explicitReadProvider, "monad-mainnet");
+    const oracleManager = new OracleManager(ORACLE_A as any, explicitReadProvider);
+    const optimizerReader = new OptimizerReader(OPTIMIZER as any, explicitReadProvider);
+
+    assert.equal(protocolReader.provider, explicitReadProvider);
+    assert.equal(oracleManager.provider, explicitReadProvider);
+    assert.equal(optimizerReader.provider, explicitReadProvider);
+    assert.notEqual(protocolReader.provider, defaultReadProvider);
+    assert.ok(protocolReader.batchKey != null);
+});
+
+test("supporting readers capture the default read provider at construction time", () => {
+    const oldReadProvider = { id: "old-setup" } as any;
+    const newReadProvider = { id: "new-setup" } as any;
+
+    setSetupConfig(ORACLE_A, oldReadProvider);
+    const protocolReader = new ProtocolReader(READER as any, undefined, "monad-mainnet");
+    const oracleManager = new OracleManager(ORACLE_A as any);
+    const optimizerReader = new OptimizerReader(OPTIMIZER as any);
+
+    setSetupConfig(ORACLE_B, newReadProvider);
+    const currentProtocolReader = new ProtocolReader(READER as any, undefined, "arb-sepolia");
+
+    assert.equal(protocolReader.provider, oldReadProvider);
+    assert.equal(oracleManager.provider, oldReadProvider);
+    assert.equal(optimizerReader.provider, oldReadProvider);
+    assert.equal(currentProtocolReader.provider, newReadProvider);
+    assert.notEqual(protocolReader.provider, currentProtocolReader.provider);
+    assert.notEqual(protocolReader.batchKey, currentProtocolReader.batchKey);
+});
+
 test("ERC20 explicit detached read providers do not inherit the global setup signer", async () => {
     const defaultReadProvider = { id: "default" } as any;
     const explicitReadProvider = { id: "explicit" } as any;

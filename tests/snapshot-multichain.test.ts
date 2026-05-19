@@ -252,6 +252,76 @@ test("mixed snapshots distinguish same-address markets by per-market chain prove
     );
 });
 
+test("takePortfolioSnapshot refresh distinguishes same-address markets by reader deployment", async () => {
+    const calls: string[] = [];
+    const applied: string[] = [];
+
+    const monadMarket = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Shared Address Market",
+        chain: "monad-mainnet",
+        reader: {
+            batchKey: "monad-mainnet:shared-address-reader",
+            getAllDynamicState: async (account: string) => {
+                calls.push(`monad:${account}`);
+                return {
+                    dynamicMarket: [createRefreshDynamicMarket(MARKET_A, monadMarket.tokens[0]!.address)],
+                    userData: {
+                        markets: [createRefreshUserMarket(MARKET_A, monadMarket.tokens[0]!.address)],
+                    },
+                };
+            },
+        },
+        applyState: (dynamic, user) => applied.push(`monad:${dynamic.address}:${user.address}`),
+    });
+    const arbMarket = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Shared Address Market",
+        chain: "arb-sepolia",
+        reader: {
+            batchKey: "arb-sepolia:shared-address-reader",
+            getAllDynamicState: async (account: string) => {
+                calls.push(`arb:${account}`);
+                return {
+                    dynamicMarket: [createRefreshDynamicMarket(MARKET_A, arbMarket.tokens[0]!.address)],
+                    userData: {
+                        markets: [createRefreshUserMarket(MARKET_A, arbMarket.tokens[0]!.address)],
+                    },
+                };
+            },
+        },
+        applyState: (dynamic, user) => applied.push(`arb:${dynamic.address}:${user.address}`),
+    });
+
+    const snapshot = await takePortfolioSnapshot(OTHER_ACCOUNT as any, {
+        markets: [monadMarket, arbMarket],
+        refresh: true,
+        allowMixedChains: true,
+    });
+
+    assert.deepEqual(calls, [
+        `monad:${OTHER_ACCOUNT}`,
+        `arb:${OTHER_ACCOUNT}`,
+    ]);
+    assert.deepEqual(applied, [
+        `monad:${MARKET_A}:${MARKET_A}`,
+        `arb:${MARKET_A}:${MARKET_A}`,
+    ]);
+    assert.equal(monadMarket.account, OTHER_ACCOUNT);
+    assert.equal(arbMarket.account, OTHER_ACCOUNT);
+    assert.deepEqual(
+        snapshot.markets.map((market) => ({
+            address: market.marketAddress,
+            chain: market.chain,
+            chainId: market.chainId,
+        })),
+        [
+            { address: MARKET_A, chain: "monad-mainnet", chainId: 143 },
+            { address: MARKET_A, chain: "arb-sepolia", chainId: 421614 },
+        ],
+    );
+});
+
 test("snapshotMarket reports collateral token amounts as assets and exposes raw shares separately", () => {
     const market = createSnapshotMarket({
         address: MARKET_A,

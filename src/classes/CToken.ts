@@ -15,9 +15,6 @@ import { ERC4626 } from "./ERC4626";
 import FormatConverter from "./FormatConverter";
 import type IDexAgg from "./DexAggregators/IDexAgg";
 
-const EXCLUDED_ZAP_SYMBOLS = new Set([
-    'eBTC', 'vUSD', 'ezETH', 'YZM', 'wsrUSD', 'sAUSD',
-]);
 const EXECUTION_DEBT_BUFFER_TIME = 100n;
 
 function ceilDiv(numerator: bigint, denominator: bigint): bigint {
@@ -336,7 +333,7 @@ export class CToken extends Calldata<ICToken> {
         this.zapTypes = [];
         this.leverageTypes = [];
 
-        if(EXCLUDED_ZAP_SYMBOLS.has(this.asset.symbol)) {
+        if(this.isZapSymbolExcluded(this.asset.symbol)) {
             return;
         }
 
@@ -399,6 +396,15 @@ export class CToken extends Calldata<ICToken> {
     private get setup() { return this.market.setup; }
     private get currentChain() { return this.setup.chain; }
     private get currentChainAssets() { return this.setup.assets; }
+    private isZapSymbolExcluded(symbol: string | undefined | null) {
+        if (symbol == null) {
+            return false;
+        }
+
+        const excludedSymbols = (this.setup.assets as { excluded_zap_symbols?: ReadonlyArray<string> } | undefined)
+            ?.excluded_zap_symbols ?? [];
+        return excludedSymbols.some((excluded) => excluded.toLowerCase() === symbol.toLowerCase());
+    }
     private get boundDexAgg(): IDexAgg | null { return this.market.dexAgg ?? null; }
     private get currentDexAgg() {
         const dexAgg = this.boundDexAgg;
@@ -1558,7 +1564,7 @@ export class CToken extends Calldata<ICToken> {
             }
         }
 
-        tokens = tokens.filter(token => token.type === 'none' || !EXCLUDED_ZAP_SYMBOLS.has(token.interface.symbol ?? ''));
+        tokens = tokens.filter(token => token.type === 'none' || !this.isZapSymbolExcluded(token.interface.symbol));
 
         if(search) {
             const lowerSearch = search.toLowerCase();

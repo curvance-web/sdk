@@ -530,6 +530,75 @@ test("fetchMerklUserRewards filters malformed successful rows before returning t
     assert.equal(rows[0]?.rewards[0]?.breakdowns?.length, 1);
 });
 
+test("fetchMerklUserRewards validates wallet path input before fetch", async (t) => {
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+
+    globalThis.fetch = (async () => {
+        fetchCalls += 1;
+        return {
+            ok: true,
+            json: async () => [],
+        } as Response;
+    }) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    await assert.rejects(
+        () => fetchMerklUserRewards({
+            wallet: "not-a-wallet?chainId=1",
+            chainId: 143,
+        }),
+        /Invalid address from Merkl rewards wallet/,
+    );
+    assert.equal(fetchCalls, 0);
+});
+
+test("Merkl fetch helpers validate optional chainId before fetch", async (t) => {
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+
+    globalThis.fetch = (async () => {
+        fetchCalls += 1;
+        return {
+            ok: true,
+            json: async () => [],
+        } as Response;
+    }) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    for (const chainId of [0, -1, 1.5, Number.NaN]) {
+        await assert.rejects(
+            () => fetchMerklUserRewards({
+                wallet: "0x00000000000000000000000000000000000000aa",
+                chainId,
+            }),
+            /Invalid chainId from Merkl rewards chainId/,
+        );
+        await assert.rejects(
+            () => fetchMerklCampaignsBySymbol({
+                tokenSymbol: "USDC",
+                chainId,
+            }),
+            /Invalid chainId from Merkl campaigns chainId/,
+        );
+        await assert.rejects(
+            () => fetchMerklOpportunities({
+                action: "LEND",
+                chainId,
+            }),
+            /Invalid chainId from Merkl opportunities chainId/,
+        );
+    }
+
+    assert.equal(fetchCalls, 0);
+});
+
 test("fetchMerklUserRewards drops mixed-chain reward groups from successful responses", async (t) => {
     const originalFetch = globalThis.fetch;
 

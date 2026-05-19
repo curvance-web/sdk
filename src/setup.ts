@@ -92,6 +92,7 @@ function cloneChainAssets(config: ChainAssetConfig): ChainAssetConfig {
         wrapped_native: config.wrapped_native,
         native_vaults: config.native_vaults.map((vault) => ({ ...vault })),
         vaults: config.vaults.map((vault) => ({ ...vault })),
+        excluded_zap_symbols: [...config.excluded_zap_symbols],
     };
 }
 

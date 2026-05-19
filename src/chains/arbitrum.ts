@@ -25,5 +25,6 @@ export const testnet: ChainConfig = {
     native_name: 'Ether',
     wrapped_native: '0x980B62Da83eFf3D4576C647993b0c1D7faf17c73' as address,
     native_vaults: [],
-    vaults: []
+    vaults: [],
+    excluded_zap_symbols: [],
 }

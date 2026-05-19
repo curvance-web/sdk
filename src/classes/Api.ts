@@ -8,7 +8,8 @@ export type IncentiveResponse = {
     type: string,
     rate: number,
     description: string,
-    image: string
+    image: string,
+    chain_network?: string,
 };
 
 export type MilestoneResponse = {
@@ -87,7 +88,8 @@ function isIncentiveResponse(value: unknown): value is IncentiveResponse {
         isNonEmptyString(row.type) &&
         isNonNegativeFiniteNumber(row.rate) &&
         isNonEmptyString(row.description) &&
-        isNonEmptyString(row.image)
+        isNonEmptyString(row.image) &&
+        (row.chain_network == undefined || isNonEmptyString(row.chain_network))
     );
 }
 
@@ -236,6 +238,13 @@ export class Api {
         }
 
         for(const incentive of rewards.incentives.filter(isIncentiveResponse)) {
+            if (
+                incentive.chain_network != undefined &&
+                !milestoneChainNetworks.has(normalizeChainNetwork(incentive.chain_network))
+            ) {
+                continue;
+            }
+
             const market = normalizeMarketKey(incentive.market);
             if(!(market in incentives)) {
                 incentives[market] = [];

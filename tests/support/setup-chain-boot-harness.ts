@@ -33,7 +33,7 @@ export const MONAD_MAINNET_BOOT_FIXTURE = {
 } as const;
 
 export const BOOT_DAO_ADDRESS =
-    "0x0000000000000000000000000000000000000dA0" as address;
+    "0x0000000000000000000000000000000000000da0" as address;
 
 export type BootMarketData = Awaited<ReturnType<ProtocolReader["getAllMarketData"]>>;
 export type BootReaderContext = {
@@ -53,7 +53,7 @@ export interface SetupChainBootHarnessOptions {
         incentives: Incentives;
     }>);
     merkl?: false | ((params: MerklOpportunityParams) => MaybePromise<MerklOpportunity[]>);
-    daoAddress?: address;
+    daoAddress?: address | (() => MaybePromise<address>);
     fetch?: (url: string) => MaybePromise<any>;
     captureWarnings?: boolean;
     failOnFetch?: boolean;
@@ -116,6 +116,10 @@ export function installSetupChainBootHarness(
     }) as unknown as typeof ProtocolReader.prototype.getAllMarketData;
 
     ProtocolReader.prototype.getDaoAddress = (async function() {
+        if (typeof options.daoAddress === "function") {
+            return await options.daoAddress();
+        }
+
         return options.daoAddress ?? BOOT_DAO_ADDRESS;
     }) as unknown as typeof ProtocolReader.prototype.getDaoAddress;
 

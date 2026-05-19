@@ -282,6 +282,144 @@ test("reloadUserMarkets batches addresses and applies responses by address", asy
     assert.equal(marketB.account, ACCOUNT);
 });
 
+test("reloadUserMarkets keeps same-address markets separated by reader deployment", async () => {
+    const calls: string[] = [];
+    const applied: string[] = [];
+    const monadReader = {
+        batchKey: "monad-mainnet:shared-reader",
+        getMarketStates: async (addresses: string[], account: string) => {
+            calls.push(`monad:${addresses.join(",")}:${account}`);
+            return {
+                dynamicMarkets: [
+                    { address: MARKET_A, tokens: [{ address: TOKEN_A as any }] },
+                ],
+                userMarkets: [
+                    { address: MARKET_A, tokens: [{ address: TOKEN_A as any }] },
+                ],
+            };
+        },
+    } as any;
+    const arbReader = {
+        batchKey: "arb-sepolia:shared-reader",
+        getMarketStates: async (addresses: string[], account: string) => {
+            calls.push(`arb:${addresses.join(",")}:${account}`);
+            return {
+                dynamicMarkets: [
+                    { address: MARKET_A, tokens: [{ address: TOKEN_B as any }] },
+                ],
+                userMarkets: [
+                    { address: MARKET_A, tokens: [{ address: TOKEN_B as any }] },
+                ],
+            };
+        },
+    } as any;
+    const monadMarket = createRefreshHelperMarket(MARKET_A, TOKEN_A, monadReader);
+    const arbMarket = createRefreshHelperMarket(MARKET_A, TOKEN_B, arbReader);
+    monadMarket.applyState = ((
+        dynamic: { tokens: Array<{ address: string }> },
+        user: { tokens: Array<{ address: string }> },
+    ) => {
+        applied.push(`monad:${dynamic.tokens[0]?.address}:${user.tokens[0]?.address}`);
+    }) as any;
+    arbMarket.applyState = ((
+        dynamic: { tokens: Array<{ address: string }> },
+        user: { tokens: Array<{ address: string }> },
+    ) => {
+        applied.push(`arb:${dynamic.tokens[0]?.address}:${user.tokens[0]?.address}`);
+    }) as any;
+
+    const refreshed = await Market.reloadUserMarkets([monadMarket, arbMarket], OTHER_ACCOUNT as any);
+
+    assert.deepEqual(refreshed, [monadMarket, arbMarket]);
+    assert.deepEqual(calls, [
+        `monad:${MARKET_A}:${OTHER_ACCOUNT}`,
+        `arb:${MARKET_A}:${OTHER_ACCOUNT}`,
+    ]);
+    assert.deepEqual(applied, [
+        `monad:${TOKEN_A}:${TOKEN_A}`,
+        `arb:${TOKEN_B}:${TOKEN_B}`,
+    ]);
+    assert.equal(monadMarket.account, OTHER_ACCOUNT);
+    assert.equal(arbMarket.account, OTHER_ACCOUNT);
+});
+
+test("reloadUserMarketSummaries keeps same-address markets separated by reader deployment", async () => {
+    const calls: string[] = [];
+    const applied: string[] = [];
+    const monadReader = {
+        batchKey: "monad-mainnet:shared-summary-reader",
+        getMarketSummaries: async (addresses: string[], account: string) => {
+            calls.push(`monad:${addresses.join(",")}:${account}`);
+            return [{ address: MARKET_A, collateral: 1n }];
+        },
+    } as any;
+    const arbReader = {
+        batchKey: "arb-sepolia:shared-summary-reader",
+        getMarketSummaries: async (addresses: string[], account: string) => {
+            calls.push(`arb:${addresses.join(",")}:${account}`);
+            return [{ address: MARKET_A, collateral: 2n }];
+        },
+    } as any;
+    const monadMarket = createRefreshHelperMarket(MARKET_A, TOKEN_A, monadReader);
+    const arbMarket = createRefreshHelperMarket(MARKET_A, TOKEN_B, arbReader);
+    monadMarket.applyUserSummary = ((user: { address: string; collateral: bigint }) => {
+        applied.push(`monad:${user.address}:${user.collateral}`);
+    }) as any;
+    arbMarket.applyUserSummary = ((user: { address: string; collateral: bigint }) => {
+        applied.push(`arb:${user.address}:${user.collateral}`);
+    }) as any;
+
+    const refreshed = await Market.reloadUserMarketSummaries([monadMarket, arbMarket], OTHER_ACCOUNT as any);
+
+    assert.deepEqual(refreshed, [monadMarket, arbMarket]);
+    assert.deepEqual(calls, [
+        `monad:${MARKET_A}:${OTHER_ACCOUNT}`,
+        `arb:${MARKET_A}:${OTHER_ACCOUNT}`,
+    ]);
+    assert.deepEqual(applied, [
+        `monad:${MARKET_A}:1`,
+        `arb:${MARKET_A}:2`,
+    ]);
+    assert.equal(monadMarket.account, OTHER_ACCOUNT);
+    assert.equal(arbMarket.account, OTHER_ACCOUNT);
+});
+
+test("multiHoldExpiresAt accepts distinct reader objects from the same deployment", async () => {
+    const account = ACCOUNT as any;
+    const calls: Array<{ addresses: string[]; account: string }> = [];
+    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+    const reader = {
+        address: "0x0000000000000000000000000000000000000c01",
+        batchKey: "monad-mainnet:cooldown-reader",
+        marketMultiCooldown: async (addresses: string[], nextAccount: string) => {
+            calls.push({ addresses, account: nextAccount });
+            return [1200n, nowSeconds + 60n];
+        },
+    } as any;
+    const sameDeploymentReader = {
+        address: "0x0000000000000000000000000000000000000c02",
+        batchKey: "monad-mainnet:cooldown-reader",
+    } as any;
+    const marketA = createRefreshHelperMarket(MARKET_A, TOKEN_A, reader);
+    const marketB = createRefreshHelperMarket(MARKET_B, TOKEN_B, sameDeploymentReader);
+
+    marketA.account = account;
+    marketB.account = account;
+    marketA.setup = { chain: "monad-mainnet" } as any;
+    marketB.setup = { chain: "monad-mainnet" } as any;
+    marketA.cache.static.cooldownLength = 1200n;
+    marketB.cache.static.cooldownLength = 1200n;
+
+    const expirations = await marketA.multiHoldExpiresAt([marketA, marketB]);
+
+    assert.deepEqual(calls, [{
+        addresses: [MARKET_A, MARKET_B],
+        account,
+    }]);
+    assert.equal(expirations[MARKET_A], null);
+    assert.equal(expirations[MARKET_B]?.getTime(), Number((nowSeconds + 60n) * 1000n));
+});
+
 test("reloadUserMarkets rejects duplicate market rows before applying state", async () => {
     const applied: string[] = [];
     const reader = {

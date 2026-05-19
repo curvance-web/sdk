@@ -17,6 +17,7 @@ function createSetupAssets(wrappedNative: address = chain_config["monad-mainnet"
         wrapped_native: wrappedNative,
         native_vaults: [],
         vaults: [],
+        excluded_zap_symbols: [],
     };
 }
 
@@ -124,6 +125,12 @@ test("simple same-token zap expectedShares uses buffered convertToShares", async
     }]);
     const args = calldataCalls[0]?.args as any[];
     assert.equal(calldataCalls[0]?.method, "swapAndDeposit");
+    assert.equal(args[2].inputToken, TOKEN);
+    assert.equal(args[2].inputAmount, 10_000n);
+    assert.equal(args[2].outputToken, TOKEN);
+    assert.equal(args[2].target, "0x0000000000000000000000000000000000000000");
+    assert.equal(args[2].slippage, 0n);
+    assert.equal(args[2].call, "0x");
     assert.equal(args[3], 9_998n);
 });
 
@@ -301,6 +308,7 @@ test("CToken native deposit tokens use setup snapshot metadata after chain confi
                 wrapped_native: TOKEN,
                 native_vaults: [],
                 vaults: [],
+                excluded_zap_symbols: [],
             },
         },
     };

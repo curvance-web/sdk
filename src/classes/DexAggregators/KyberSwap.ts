@@ -415,11 +415,20 @@ export class KyberSwap implements IDexAgg {
 
     async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
         validateSlippageBps(slippage, 'KyberSwap quote');
-        validateCheckerFeePolicy(this.dao, feeBps, feeReceiver);
+        if (amount <= 0n) {
+            throw new Error(`KyberSwap quote amount must be positive, got ${amount}`);
+        }
+        const validatedWallet = validateAddress(wallet, 'KyberSwap wallet');
+        const validatedTokenIn = validateAddress(tokenIn, 'KyberSwap tokenIn');
+        const validatedTokenOut = validateAddress(tokenOut, 'KyberSwap tokenOut');
+        const validatedFeeReceiver = feeReceiver == undefined
+            ? undefined
+            : validateAddress(feeReceiver, 'KyberSwap feeReceiver');
+        validateCheckerFeePolicy(this.dao, feeBps, validatedFeeReceiver);
 
         const params = new URLSearchParams({
-            tokenIn,
-            tokenOut,
+            tokenIn: validatedTokenIn,
+            tokenOut: validatedTokenOut,
             amountIn: amount.toString(),
         });
 
@@ -431,7 +440,7 @@ export class KyberSwap implements IDexAgg {
             params.set('feeAmount', feeBps.toString());
             params.set('chargeFeeBy', 'currency_in');
             params.set('isInBps', 'true');
-            params.set('feeReceiver', feeReceiver);
+            params.set('feeReceiver', validatedFeeReceiver!);
         }
 
         const quote_response = await fetchWithTimeout(`${this.api}/api/v1/routes?${params.toString()}`, {
@@ -459,9 +468,9 @@ export class KyberSwap implements IDexAgg {
             },
             body: JSON.stringify({
                 routeSummary: quote.data.routeSummary,
-                origin: wallet,
-                sender: wallet,
-                recipient: wallet,
+                origin: validatedWallet,
+                sender: validatedWallet,
+                recipient: validatedWallet,
                 slippageTolerance: Number(slippage),
                 referral: this.dao
             })
@@ -490,13 +499,13 @@ export class KyberSwap implements IDexAgg {
         // Validate that the API actually embedded the fee params we requested.
         // Without this, a misconfigured API response silently reverts on-chain.
         validateSwapCalldata(build_data.data.data, {
-            tokenIn,
-            tokenOut,
+            tokenIn: validatedTokenIn,
+            tokenOut: validatedTokenOut,
             amount,
-            recipient: wallet,
+            recipient: validatedWallet,
             minReturnAmount: min_out,
             feeBps: feeBps ?? 0n,
-            feeReceiver,
+            feeReceiver: validatedFeeReceiver,
         });
 
         return {

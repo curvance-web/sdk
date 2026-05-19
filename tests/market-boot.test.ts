@@ -126,6 +126,7 @@ function createSetup(overrides: Record<string, any> = {}) {
             wrapped_native: chainConfig.wrapped_native,
             native_vaults: chainConfig.native_vaults.map((vault) => ({ ...vault })),
             vaults: chainConfig.vaults.map((vault) => ({ ...vault })),
+            excluded_zap_symbols: [...chainConfig.excluded_zap_symbols],
         },
         services: chainConfig.services,
         readProvider: {} as any,

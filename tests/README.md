@@ -50,6 +50,7 @@ Current coverage includes:
 - transport/RPC policy: gas buffer, retry fallback, ranking, RPC config shape
 - setup and reader wiring: setup race, query budget, protocol reader, detached context
 - formatting and math: conversion, fee policy, leverage math, public format helpers
+- external request boundaries: API URL validation, fetch timeout/abort behavior, Merkl/Kyber response guards
 - market/account state: market boot/refresh/indexing, snapshots, Merkl, API degradation
 - execution planning: deposits, collateral removal, leverage planning/execution, zapper calldata
 - optimizer surfaces: optimizer reader and lending optimizer deterministic bindings
@@ -64,6 +65,7 @@ What it proves:
 - `setupChain` read-provider vs signer wiring and cross-invocation race guard
 - `ProtocolReader` normalization for public and connected loads; selector-support probe caches across instances
 - query-budget expectations for boot and targeted refresh paths
+- external fetch wrapper timeout cleanup, caller abort propagation, and HTTPS-only API URL validation
 - fee-policy routing and Decimal↔bigint conversion correctness
 - `Market.getSnapshots` concurrent dispatch and `applyState` partial-refresh preservation
 - DEX aggregator fee-aware slippage expansion (KyberSwap expands inside quoteAction when fee BPS is active)

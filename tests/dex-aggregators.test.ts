@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import Decimal from "decimal.js";
 import { AbiCoder } from "ethers";
-import "../src/setup";
+import * as setupModule from "../src/setup";
 import { KyberSwap } from "../src/classes/DexAggregators/KyberSwap";
 import { MultiDexAgg } from "../src/classes/DexAggregators/MultiDexAgg";
 import { UnsupportedDexAgg } from "../src/classes/DexAggregators/UnsupportedDexAgg";
@@ -115,6 +115,21 @@ function createDecimalsProvider(decimalsByAddress: Map<string, bigint>) {
         async resolveName(name: string) {
             return name;
         },
+    };
+}
+
+function createKyberContextMarket(symbol: string, assetAddress: address) {
+    return {
+        tokens: [{
+            name: `Token ${symbol}`,
+            symbol,
+            getAsset: () => ({
+                address: assetAddress,
+                name: `Token ${symbol}`,
+                symbol,
+                decimals: 18n,
+            }),
+        }],
     };
 }
 
@@ -394,6 +409,54 @@ test("MultiDexAgg rejects invalid routing config before quote fan-out", () => {
     );
 });
 
+test("MultiDexAgg validates quote request inputs before child fan-out", async () => {
+    let quoteCalls = 0;
+    const child = {
+        dao: FEE_RECEIVER,
+        router: TOKEN_IN,
+        getAvailableTokens: async () => [],
+        quoteAction: async () => {
+            quoteCalls += 1;
+            throw new Error("quoteAction should not run for invalid request inputs");
+        },
+        quoteMin: async () => {
+            quoteCalls += 1;
+            throw new Error("quoteMin should not run for invalid request inputs");
+        },
+        quote: async () => {
+            quoteCalls += 1;
+            throw new Error("quote should not run for invalid request inputs");
+        },
+    } as any;
+    const multi = new MultiDexAgg([child]);
+
+    await assert.rejects(
+        () => multi.quote("not-a-wallet", TOKEN_IN, TOKEN_OUT, 1_000n, 50n),
+        /Invalid address from MultiDexAgg wallet/,
+    );
+    await assert.rejects(
+        () => multi.quoteMin(WALLET, "not-a-token", TOKEN_OUT, 1_000n, 50n),
+        /Invalid address from MultiDexAgg tokenIn/,
+    );
+    await assert.rejects(
+        () => multi.quoteAction(WALLET, TOKEN_IN, "not-a-token", 1_000n, 50n),
+        /Invalid address from MultiDexAgg tokenOut/,
+    );
+    await assert.rejects(
+        () => multi.quote(WALLET, TOKEN_IN, TOKEN_OUT, 0n, 50n),
+        /MultiDexAgg quote amount must be positive, got 0/,
+    );
+    await assert.rejects(
+        () => multi.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 10_000n),
+        /Slippage out of range \(0-9999 BPS\) in MultiDexAgg quote: 10000/,
+    );
+    await assert.rejects(
+        () => multi.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, "not-a-receiver" as any),
+        /Invalid address from MultiDexAgg feeReceiver/,
+    );
+    assert.equal(quoteCalls, 0);
+});
+
 test("KyberSwap.quoteAction rejects effective swap slippage at the contract ceiling before quote", async () => {
     const kyber = new KyberSwap(FEE_RECEIVER);
     (kyber as any).quote = async () => {
@@ -568,6 +631,62 @@ test("KyberSwap.quote rejects checker-incompatible missing or custom fee policy 
         await assert.rejects(
             () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, TOKEN_IN),
             /feeReceiver=0x0000000000000000000000000000000000000001/,
+        );
+        assert.equal(fetchCalls, 0);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("KyberSwap.quote validates request addresses before fetch", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+        fetchCalls += 1;
+        throw new Error("Kyber request should not be sent for invalid address inputs");
+    }) as typeof fetch;
+
+    try {
+        await assert.rejects(
+            () => kyber.quote("not-a-wallet", TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+            /Invalid address from KyberSwap wallet/,
+        );
+        await assert.rejects(
+            () => kyber.quote(WALLET, "not-a-token", TOKEN_OUT, 1_000n, 50n, 4n, FEE_RECEIVER),
+            /Invalid address from KyberSwap tokenIn/,
+        );
+        await assert.rejects(
+            () => kyber.quote(WALLET, TOKEN_IN, "not-a-token", 1_000n, 50n, 4n, FEE_RECEIVER),
+            /Invalid address from KyberSwap tokenOut/,
+        );
+        await assert.rejects(
+            () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 1_000n, 50n, 4n, "not-a-receiver" as any),
+            /Invalid address from KyberSwap feeReceiver/,
+        );
+        assert.equal(fetchCalls, 0);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("KyberSwap.quote rejects non-positive request amounts before fetch", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+        fetchCalls += 1;
+        throw new Error("Kyber request should not be sent for invalid quote amounts");
+    }) as typeof fetch;
+
+    try {
+        await assert.rejects(
+            () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, 0n, 50n, 4n, FEE_RECEIVER),
+            /KyberSwap quote amount must be positive, got 0/,
+        );
+        await assert.rejects(
+            () => kyber.quote(WALLET, TOKEN_IN, TOKEN_OUT, -1n, 50n, 4n, FEE_RECEIVER),
+            /KyberSwap quote amount must be positive, got -1/,
         );
         assert.equal(fetchCalls, 0);
     } finally {
@@ -847,6 +966,84 @@ test("KyberSwap.withContext binds the checker DAO without mutating the original"
     assert.equal(bound.dao, checkerDao);
 });
 
+test("KyberSwap.getAvailableTokens uses bound context before mutable globals", async (t) => {
+    const originalAllMarkets = setupModule.all_markets;
+    const originalSetupConfig = (setupModule as any).setup_config;
+    const feeContexts: any[] = [];
+    let quoteArgs: QuoteArgs | null = null;
+
+    (setupModule as any).all_markets = [createKyberContextMarket("GLOBAL", TOKEN_OUT)];
+    (setupModule as any).setup_config = {
+        feePolicy: {
+            getFeeBps: () => 99n,
+            feeReceiver: ZERO_ADDRESS,
+            chain: "monad-mainnet",
+        },
+    };
+
+    t.after(() => {
+        (setupModule as any).all_markets = originalAllMarkets;
+        (setupModule as any).setup_config = originalSetupConfig;
+    });
+
+    const bound = new KyberSwap(FEE_RECEIVER).withContext({
+        markets: [createKyberContextMarket("CTX", TOKEN_IN)],
+        feePolicy: {
+            getFeeBps: (context: any) => {
+                feeContexts.push(context);
+                return 4n;
+            },
+            feeReceiver: FEE_RECEIVER,
+            chain: "monad-mainnet",
+        },
+        checkerDao: FEE_RECEIVER,
+    } as any);
+    (bound as any).quote = async (...args: QuoteArgs) => {
+        quoteArgs = args;
+        return {
+            to: TOKEN_OUT,
+            calldata: "0x" as bytes,
+            min_out: 1n,
+            out: 2n,
+        };
+    };
+
+    const provider = createDecimalsProvider(new Map([
+        [TOKEN_IN.toLowerCase(), 18n],
+        [TOKEN_OUT.toLowerCase(), 18n],
+    ]));
+    const tokens = await bound.getAvailableTokens(provider as any, null, WALLET);
+
+    assert.deepEqual(
+        tokens.map((token) => ({
+            symbol: token.interface.symbol,
+            address: token.interface.address.toLowerCase(),
+            quoteable: typeof token.quote === "function",
+        })),
+        [{
+            symbol: "CTX",
+            address: TOKEN_IN.toLowerCase(),
+            quoteable: true,
+        }],
+    );
+
+    await tokens[0]!.quote!(TOKEN_IN, TOKEN_OUT, Decimal(1), Decimal("0.01"));
+
+    assert.deepEqual(quoteArgs, [
+        WALLET,
+        TOKEN_IN,
+        TOKEN_OUT,
+        1_000_000_000_000_000_000n,
+        100n,
+        4n,
+        FEE_RECEIVER,
+    ]);
+    assert.equal(feeContexts.length, 1);
+    assert.equal(feeContexts[0].inputToken, TOKEN_IN);
+    assert.equal(feeContexts[0].outputToken, TOKEN_OUT);
+    assert.equal(feeContexts[0].inputAmount, 1_000_000_000_000_000_000n);
+});
+
 test("MultiDexAgg exposes the first executable child router for route advertisement", () => {
     const unsupported = {
         dao: ZERO_ADDRESS,
@@ -1032,12 +1229,32 @@ test("MultiDexAgg.quote picks the route with the highest guaranteed output", asy
 test("MultiDexAgg.quoteAction picks the route with the highest guaranteed output", async () => {
     const conservativeAction = { aggregator: "conservative" } as any;
     const optimisticAction = { aggregator: "optimistic" } as any;
+    const quoteActionCalls: Array<{
+        label: string;
+        wallet: string;
+        tokenIn: string;
+        tokenOut: string;
+        amount: bigint;
+        slippage: bigint;
+        feeBps: bigint | undefined;
+        feeReceiver: string | undefined;
+    }> = [];
 
     const conservative = {
         dao: FEE_RECEIVER,
         router: TOKEN_IN,
         getAvailableTokens: async () => [],
-        quoteAction: async () => ({
+        quoteAction: async (
+            wallet: string,
+            tokenIn: string,
+            tokenOut: string,
+            amount: bigint,
+            slippage: bigint,
+            feeBps?: bigint,
+            feeReceiver?: address,
+        ) => {
+            quoteActionCalls.push({ label: "conservative", wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver });
+            return {
             action: conservativeAction,
             quote: {
                 to: TOKEN_IN,
@@ -1045,7 +1262,8 @@ test("MultiDexAgg.quoteAction picks the route with the highest guaranteed output
                 min_out: 80n,
                 out: 90n,
             },
-        }),
+        };
+        },
         quoteMin: async () => 80n,
         quote: async () => ({
             to: TOKEN_IN,
@@ -1059,7 +1277,17 @@ test("MultiDexAgg.quoteAction picks the route with the highest guaranteed output
         dao: FEE_RECEIVER,
         router: TOKEN_OUT,
         getAvailableTokens: async () => [],
-        quoteAction: async () => ({
+        quoteAction: async (
+            wallet: string,
+            tokenIn: string,
+            tokenOut: string,
+            amount: bigint,
+            slippage: bigint,
+            feeBps?: bigint,
+            feeReceiver?: address,
+        ) => {
+            quoteActionCalls.push({ label: "optimistic", wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver });
+            return {
             action: optimisticAction,
             quote: {
                 to: TOKEN_OUT,
@@ -1067,7 +1295,8 @@ test("MultiDexAgg.quoteAction picks the route with the highest guaranteed output
                 min_out: 50n,
                 out: 100n,
             },
-        }),
+        };
+        },
         quoteMin: async () => 50n,
         quote: async () => ({
             to: TOKEN_OUT,
@@ -1084,11 +1313,43 @@ test("MultiDexAgg.quoteAction picks the route with the highest guaranteed output
         TOKEN_OUT,
         1_000n,
         50n,
+        4n,
+        FEE_RECEIVER,
     );
 
     assert.equal(action, conservativeAction);
     assert.equal(quote.min_out, 80n);
     assert.equal(quote.out, 90n);
+    assert.deepEqual(
+        quoteActionCalls
+            .map((call) => ({
+                ...call,
+                feeReceiver: call.feeReceiver?.toLowerCase(),
+            }))
+            .sort((a, b) => a.label.localeCompare(b.label)),
+        [
+            {
+                label: "conservative",
+                wallet: WALLET,
+                tokenIn: TOKEN_IN,
+                tokenOut: TOKEN_OUT,
+                amount: 1_000n,
+                slippage: 50n,
+                feeBps: 4n,
+                feeReceiver: FEE_RECEIVER.toLowerCase(),
+            },
+            {
+                label: "optimistic",
+                wallet: WALLET,
+                tokenIn: TOKEN_IN,
+                tokenOut: TOKEN_OUT,
+                amount: 1_000n,
+                slippage: 50n,
+                feeBps: 4n,
+                feeReceiver: FEE_RECEIVER.toLowerCase(),
+            },
+        ],
+    );
 });
 
 test("MultiDexAgg clears quote timeout timers when quotes resolve first", async () => {

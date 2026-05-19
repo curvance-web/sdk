@@ -19,6 +19,17 @@ Chain identifiers use Alchemy-style prefixes:
 | Monad Mainnet | `monad-mainnet` | Production mainnet; setup/read, rewards, Kyber-backed simple zaps/leverage where configured |
 | Arbitrum Sepolia | `arb-sepolia` | Testnet read/setup surface; DEX routes fail closed through `UnsupportedDexAgg` |
 
+Adding a production chain is an explicit SDK release task. A chain is not
+supported just because a wallet or app can switch to it. The SDK needs:
+
+- a `chain_config` entry and `chain_rpc_config` entry with matching `chainId`
+- a contract manifest under `src/contracts`
+- Curvance API service aliases or an explicit disabled state
+- DEX service config, fee/checker policy, or `UnsupportedDexAgg`
+- native/wrapped-native and vault metadata in chain config
+- route-matrix tests for advertised zap/leverage support
+- fork or live-read proof once deployments exist
+
 ## ❯ Quick Start
 
 ```ts
@@ -829,14 +840,15 @@ LEVERAGE.LEVERAGE_UP_VAULT_DRIFT_BPS  // 30n
 | [ethers v6](https://www.npmjs.com/package/ethers) | Typed contract interactions, providers, and signer handling |
 | [decimal.js](https://www.npmjs.com/package/decimal.js) | Arbitrary-precision math for all token amounts, prices, and rates |
 
-## ❯ Pre-Publish Checklist
+## ❯ SDK Pre-Publish Checklist
 
-Run before every `npm publish`:
+Run before every SDK `npm publish`:
 
-1. **Typecheck and deterministic transport gate green.**
+1. **Typecheck, build, and deterministic transport gate green.**
 
    ```bash
    node node_modules/typescript/bin/tsc --noEmit
+   npm run build
    npm run test:transport
    ```
 
@@ -844,9 +856,10 @@ Run before every `npm publish`:
    locks the structural invariants of `chain_rpc_config` (no known-bad RPCs,
    no duplicate fallbacks, policy fields within sane ranges).
 
-2. **Fork gate green or explicitly skipped with reason.** `npm run test:fork`
-   must pass when fork env is available. If it skips, record which env/artifact
-   blocker caused the skip before treating the release as covered.
+2. **Fork gate green, or explicitly classified as pending.** `npm run test:fork`
+   is the live fork/write gate. If it skips because `TEST_RPC`, deployer keys,
+   or a generated fixture are missing, the SDK can be called
+   deterministic/package covered, but not fork-covered.
 
 3. **Package artifact smoke green.**
 
@@ -858,6 +871,8 @@ Run before every `npm publish`:
    `prepack` and `prepublishOnly` rebuild `dist`, and `test:dist-smoke`
    imports the packed package root. Package consumers load the artifact, so
    source-green or build-green alone is not package-boundary proof.
+   The dry-run package should contain `README.md`, `package.json`, and `dist/**`;
+   source files and tests should not be published.
 
 4. **Workspace hygiene clean.**
 
@@ -870,8 +885,22 @@ Run before every `npm publish`:
    dirty-tree tests can pass while a clean package checkout cannot import an
    untracked source file.
 
-5. **Live RPC probe against both app origins for RPC-adjacent changes.** In the
-   app repo:
+### SDK gate interpretation
+
+- `test:transport`, `test:all`, `test:dist-smoke`, `npm pack --dry-run --json`,
+  and `git diff --check` green means the SDK is deterministic/package covered.
+- `test:fork` must execute against a local Anvil-compatible fork before calling
+  the SDK fork-covered. A command that exits 0 after skip messages is not live
+  fork proof.
+- App build, app Cypress/Vitest, and app RPC-origin probes are downstream
+  adoption checks. Run them after publishing or linking the packed SDK into the
+  app repo; they are not part of the SDK-only publish gate.
+
+### Post-Publish App Rollout Checks
+
+After publishing or linking a packed SDK artifact into the app repo:
+
+1. **For RPC-adjacent SDK changes, run the app-origin RPC probe.**
 
    ```bash
    cd path/to/curvance-app
@@ -893,12 +922,12 @@ Run before every `npm publish`:
    Deeper-cascade fallbacks (`fallbacks[1]+`) MAY have looser limits if
    documented inline with a comment in `chain_rpc_config`.
 
-6. **Do not add the probe to CI.** The probe fires ~500 requests per run
+2. **Do not add the probe to CI.** The probe fires ~500 requests per run
    across 5-10 public RPCs from a single IP. Running it on every PR would
    trip per-IP rate limits and eventually provoke origin bans from the
    free RPCs we depend on. That recreates the exact failure mode
    (monadinfra 403'ing `staging.curvance.com`) that motivated this probe.
 
-7. **Republish workflow.** Version bump -> `npm publish` -> in app repo,
+3. **App rollout workflow.** Version bump -> `npm publish` -> in app repo,
    bump `curvance` in `package.json` to the new version -> `yarn install`
    -> commit `yarn.lock` -> deploy.

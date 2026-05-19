@@ -23,6 +23,7 @@ export type ChainAssetConfig = {
     wrapped_native: address;
     native_vaults: { name: string; contract: address }[];
     vaults: { name: string; contract: address; underlying: address }[];
+    excluded_zap_symbols: string[];
 };
 
 export type ChainEnvironment = "production-mainnet" | "testnet" | "local";
