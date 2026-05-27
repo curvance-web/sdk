@@ -96,6 +96,7 @@ Runs:
 - `tests/optimizer.test.ts`
 - `tests/leverage.test.ts`
 - `tests/zap.test.ts`
+- `tests/dual-fork-switch.test.ts`
 
 What it proves:
 
@@ -104,6 +105,7 @@ What it proves:
 - `refreshActiveUserMarkets()` only refreshes the markets that actually became active
 - legacy fork flows still work against deployed Monad market state
 - lending optimizer deployment/reader/rebalance behavior still works when its checked-in artifacts match the go-forward contract shape
+- SDK-level chain switching works across simultaneous Monad and Arbitrum Sepolia forks in one process
 
 What it depends on:
 
@@ -117,6 +119,8 @@ What it depends on:
 
 If the required env for a fork-backed suite is not set, that suite skips and prints an explicit warning. `optimizer.test.ts` also skips when its checked-in `OptimizerReader` fixture is stale relative to the go-forward reader shape.
 
+`dual-fork-switch.test.ts` starts its own Monad and Arbitrum Sepolia Anvil forks and intentionally ignores `TEST_RPC`, `TEST_CHAIN`, and `ARB_DEPLOYER_PRIVATE_KEY`. It requires `ALCHEMY_API_KEY` for both upstream fork URLs and uses `DEPLOYER_PRIVATE_KEY` as the signer on both forks.
+
 ## Environment
 
 ### Required for full `test:fork`
@@ -124,6 +128,7 @@ If the required env for a fork-backed suite is not set, that suite skips and pri
 - `TEST_RPC`
 - `DEPLOYER_PRIVATE_KEY`
 - `ARB_DEPLOYER_PRIVATE_KEY`
+- `ALCHEMY_API_KEY` for `dual-fork-switch.test.ts`
 
 ### Optional for `test:fork`
 

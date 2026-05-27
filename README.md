@@ -709,13 +709,19 @@ await optimizerReader.getOptimizerAPY(optimizerAddress)
 // Returns: weighted-average optimizer APY in WAD
 
 await optimizerReader.getOptimizerMarketData(optimizerAddresses)
-// Returns: { totalAssets, sharePrice, performanceFee, apy, markets[] }
+// Returns: { totalAssets, sharePrice, performanceFee, apy, markets: [{ address, allocatedAssets, liquidity, allocationCap, allocationCapUtilizationBps }] }
 
 await optimizerReader.getOptimizerUserData(optimizerAddresses, account)
 // Returns: user balance and redeemable amounts
 
 await optimizerReader.optimalRebalance(optimizerAddress, 100n)
 // Returns: { actions: { cToken, assetsOrBps }[], bounds: { cToken, minBps, maxBps }[] }
+
+await optimizerReader.optimalRebalanceAt(optimizerAddress, 100n, timestamp)
+// Returns the rebalance plan projected at a specific timestamp
+
+await optimizerReader.isBad(optimizerAddress)
+// Returns bad cToken markets for the optimizer
 
 const asset = new ERC20(provider, assetAddress, undefined, undefined, signer)
 const vault = new LendingOptimizer(optimizerAddress, asset, provider, signer)

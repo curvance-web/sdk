@@ -54,6 +54,7 @@ test("test:transport includes every deterministic test file", () => {
     const manualOrEnvBackedTests = new Set([
         "arb-basic.test.ts",
         "basic.test.ts",
+        "dual-fork-switch.test.ts",
         "leverage.test.ts",
         "optimizer.test.ts",
         "zap.test.ts",
@@ -77,6 +78,7 @@ test("test:fork includes every env-backed fork test file", () => {
         "optimizer.test.ts",
         "leverage.test.ts",
         "zap.test.ts",
+        "dual-fork-switch.test.ts",
     ];
 
     const missing = expectedForkTests
