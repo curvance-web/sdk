@@ -33,6 +33,7 @@ export interface ILendingOptimizer {
     convertToShares(assets: bigint): Promise<bigint>;
     convertToAssets(shares: bigint): Promise<bigint>;
     maxDeposit(receiver: address): Promise<bigint>;
+    maxRedeem(owner: address): Promise<bigint>;
     maxWithdraw(owner: address): Promise<bigint>;
     mintPaused(): Promise<bigint>;
     "deposit(uint256,address)"(assets: bigint, receiver: address): Promise<TransactionResponse>;
@@ -152,6 +153,10 @@ export class LendingOptimizer extends Calldata<ILendingOptimizer> {
 
     async maxDeposit(receiver: address): Promise<bigint> {
         return this.contract.maxDeposit(receiver);
+    }
+
+    async maxRedeem(owner: address): Promise<bigint> {
+        return this.contract.maxRedeem(owner);
     }
 
     async maxWithdraw(owner: address): Promise<bigint> {
@@ -413,6 +418,27 @@ export class LendingOptimizer extends Calldata<ILendingOptimizer> {
             [shares, receiver, owner],
         ) as bytes;
         return this.executeCallData(calldata);
+    }
+
+    /**
+     * Redeem the owner's currently redeemable share amount. This is the
+     * optimizer "Max" path for callers that do not need to prefetch shares.
+     */
+    async redeemAll(
+        receiver: address | null = null,
+        owner: address | null = null,
+    ): Promise<TransactionResponse> {
+        const signer = requireSigner(this.signer);
+        const from = signer.address as address;
+        receiver ??= from;
+        owner ??= from;
+
+        const shares = await this.maxRedeem(owner);
+        if (shares === 0n) {
+            throw new Error("LendingOptimizer.redeemAll: no shares are currently redeemable");
+        }
+
+        return this.redeem(shares, receiver, owner);
     }
 
     async rebalance(

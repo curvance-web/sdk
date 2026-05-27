@@ -26,8 +26,6 @@ const FEE_BPS = 1000;
 const DEPOSIT_AMOUNT = 10_000n * 10n ** 6n; // 10,000 USDC (6 decimals)
 const BPS = 10_000n;
 const WAD = 10n ** 18n;
-const TOTAL_ASSETS_TOLERANCE = DEPOSIT_AMOUNT / 1000n; // 0.1%
-const REDEEMABLE_TOLERANCE = DEPOSIT_AMOUNT / 1_000_000n; // 0.0001%
 
 type AbiComponent = {
     name?: string;
@@ -97,6 +95,29 @@ function decimalToRaw(amount: Decimal, decimals: bigint): bigint {
     );
 }
 
+function rawToDecimal(amount: bigint, decimals: bigint): Decimal {
+    return new Decimal(amount.toString()).div(Decimal(10).pow(Number(decimals)));
+}
+
+async function cappedDepositAmount(
+    sdkOptimizer: LendingOptimizer,
+    account: address,
+    desired: Decimal,
+    decimals: bigint,
+    minimumRaw: bigint,
+): Promise<Decimal> {
+    const desiredRaw = decimalToRaw(desired, decimals);
+    const maxDepositRaw = await sdkOptimizer.maxDeposit(account);
+    const depositRaw = maxDepositRaw < desiredRaw ? maxDepositRaw / 2n : desiredRaw;
+
+    assert(
+        depositRaw > minimumRaw,
+        `optimizer maxDeposit ${maxDepositRaw} is too small for fork write coverage`,
+    );
+
+    return rawToDecimal(depositRaw, decimals);
+}
+
 async function waitForTx(txLike: unknown) {
     if (txLike && typeof (txLike as { wait?: () => Promise<unknown> }).wait === 'function') {
         await (txLike as { wait: () => Promise<unknown> }).wait();
@@ -114,6 +135,7 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
     let readerContract: any;
     let optimizer: any;
     let optimizerAddress: address;
+    let seededDepositAmount: bigint;
 
     function formatError(error: unknown): string {
         return error instanceof Error ? error.message : String(error);
@@ -194,8 +216,12 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
 
         await (await optimizer.initializeDeposits(APPROVED_CTOKENS[0]!)).wait();
 
-        // Deposit 10,000 USDC
-        await (await optimizer['deposit(uint256,address)'](DEPOSIT_AMOUNT, account)).wait();
+        const maxInitialDeposit: bigint = await optimizer.maxDeposit(account);
+        seededDepositAmount = maxInitialDeposit < DEPOSIT_AMOUNT
+            ? maxInitialDeposit / 2n
+            : DEPOSIT_AMOUNT;
+        assert(seededDepositAmount > 0n, 'optimizer maxDeposit should allow the setup seed deposit');
+        await (await optimizer['deposit(uint256,address)'](seededDepositAmount, account)).wait();
     });
 
     after(async () => {
@@ -218,8 +244,8 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
         assert.strictEqual(entry.totalAssets, directTotalAssets, 'reader totalAssets should match optimizer');
         assertApproxBigInt(
             entry.totalAssets,
-            DEPOSIT_AMOUNT,
-            TOTAL_ASSETS_TOLERANCE,
+            seededDepositAmount,
+            seededDepositAmount / 1000n + 1n,
             'totalAssets should stay near seeded deposit',
         );
         assert.deepStrictEqual(
@@ -305,18 +331,24 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
         assert.strictEqual(entry.redeemable, directRedeemable, 'reader redeemable should match convertToAssets');
         assertApproxBigInt(
             entry.redeemable,
-            DEPOSIT_AMOUNT,
-            REDEEMABLE_TOLERANCE,
+            seededDepositAmount,
+            seededDepositAmount / 1_000_000n + 1n,
             'redeemable should stay near seeded deposit before rebalance',
         );
     });
 
     test('SDK direct deposit and withdraw execute on the forked optimizer', async () => {
         const { asset, sdkOptimizer } = createSdkOptimizer();
-        const depositAmount = Decimal(25);
         const withdrawAmount = Decimal("0.000001");
         const decimals = asset.decimals ?? await asset.fetchDecimals();
         const withdrawRaw = decimalToRaw(withdrawAmount, decimals);
+        const depositAmount = await cappedDepositAmount(
+            sdkOptimizer,
+            account,
+            Decimal(25),
+            decimals,
+            withdrawRaw,
+        );
 
         const assetBefore = await asset.balanceOf(account);
         const sharesBefore = await sdkOptimizer.balanceOf(account);
@@ -347,7 +379,14 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
 
     test('SDK direct deposit and exact-share redeem execute on the forked optimizer', async () => {
         const { asset, sdkOptimizer } = createSdkOptimizer();
-        const depositAmount = Decimal(15);
+        const decimals = asset.decimals ?? await asset.fetchDecimals();
+        const depositAmount = await cappedDepositAmount(
+            sdkOptimizer,
+            account,
+            Decimal(15),
+            decimals,
+            0n,
+        );
 
         const assetBefore = await asset.balanceOf(account);
         const sharesBefore = await sdkOptimizer.balanceOf(account);
@@ -415,7 +454,7 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
 
         assert(sharesBefore > 0n, 'test account should have optimizer shares to redeem');
 
-        const redeemTx = await sdkOptimizer.redeem(sharesBefore, account, account);
+        const redeemTx = await sdkOptimizer.redeemAll(account, account);
         assert.strictEqual(redeemTx.to?.toLowerCase(), optimizerAddress.toLowerCase());
         await redeemTx.wait();
 
