@@ -1,7 +1,9 @@
 import { address, bytes, curvance_read_provider, Percentage } from "../../types";
 import { ZapToken } from "../CToken";
 import { Swap } from "../Zapper";
-import IDexAgg, { Quote, QuoteArgs } from "./IDexAgg";
+import IDexAgg, { DexAggContext, Quote, QuoteArgs } from "./IDexAgg";
+import { EMPTY_ADDRESS } from "../../helpers";
+import { validateAddress, validateSlippageBps } from "../../validation";
 
 export interface MultiDexAggConfig {
     /** Percentage deviation from median that marks a quote as an outlier (default: 20 = 20%) */
@@ -22,6 +24,51 @@ interface QuoteActionResult {
 }
 
 type QuoteValueSelector = (quote: Quote) => bigint;
+type ValidatedQuoteRequest = {
+    wallet: address;
+    tokenIn: address;
+    tokenOut: address;
+    amount: bigint;
+    slippage: bigint;
+    feeReceiver: address | undefined;
+};
+
+function assertNonnegativeInteger(value: number, label: string): void {
+    if (!Number.isInteger(value) || value < 0) {
+        throw new Error(`MultiDexAgg ${label} must be a non-negative integer.`);
+    }
+}
+
+function assertPositiveInteger(value: number, label: string): void {
+    if (!Number.isInteger(value) || value <= 0) {
+        throw new Error(`MultiDexAgg ${label} must be a positive integer.`);
+    }
+}
+
+function validateQuoteRequest(
+    wallet: string,
+    tokenIn: string,
+    tokenOut: string,
+    amount: bigint,
+    slippage: bigint,
+    feeReceiver?: address,
+): ValidatedQuoteRequest {
+    if (amount <= 0n) {
+        throw new Error(`MultiDexAgg quote amount must be positive, got ${amount}`);
+    }
+    validateSlippageBps(slippage, "MultiDexAgg quote");
+
+    return {
+        wallet: validateAddress(wallet, "MultiDexAgg wallet"),
+        tokenIn: validateAddress(tokenIn, "MultiDexAgg tokenIn"),
+        tokenOut: validateAddress(tokenOut, "MultiDexAgg tokenOut"),
+        amount,
+        slippage,
+        feeReceiver: feeReceiver == undefined
+            ? undefined
+            : validateAddress(feeReceiver, "MultiDexAgg feeReceiver"),
+    };
+}
 
 /**
  * Multi-aggregator wrapper that implements IDexAgg.
@@ -35,33 +82,50 @@ type QuoteValueSelector = (quote: Quote) => bigint;
  *   new MultiDexAgg([new KyberSwap()])
  *
  *   // Multi:
- *   new MultiDexAgg([new KyberSwap(), new Kuru()])
+ *   new MultiDexAgg([new KyberSwap(), anotherAggregator])
  */
 export class MultiDexAgg implements IDexAgg {
     private aggregators: IDexAgg[];
     private primary: IDexAgg;
     private config: Required<MultiDexAggConfig>;
 
-    /** Exposed from primary aggregator for backwards compatibility (Zapper.ts reads this) */
-    get dao(): address { return this.primary.dao; }
-    get router(): address { return this.primary.router; }
+    /** Exposed for backwards compatibility with route-advertisement checks. */
+    get dao(): address { return this.executablePrimary.dao; }
+    get router(): address { return this.executablePrimary.router; }
+
+    private get executablePrimary(): IDexAgg {
+        return this.aggregators.find((agg) => agg.router.toLowerCase() !== EMPTY_ADDRESS.toLowerCase()) ?? this.primary;
+    }
 
     constructor(aggregators: IDexAgg[], config: MultiDexAggConfig = {}) {
         if (aggregators.length === 0) {
             throw new Error("MultiDexAgg requires at least one aggregator");
         }
 
+        const outlierThresholdPercent = config.outlierThresholdPercent ?? 20;
+        const quoteTimeoutMs = config.quoteTimeoutMs ?? 15_000;
+        assertNonnegativeInteger(outlierThresholdPercent, "outlierThresholdPercent");
+        assertPositiveInteger(quoteTimeoutMs, "quoteTimeoutMs");
+
         this.aggregators = aggregators;
         this.primary = aggregators[0]!;
         this.config = {
-            outlierThresholdPercent: config.outlierThresholdPercent ?? 20,
-            quoteTimeoutMs: config.quoteTimeoutMs ?? 15_000,
+            outlierThresholdPercent,
+            quoteTimeoutMs,
         };
+    }
+
+    withContext(context: DexAggContext): MultiDexAgg {
+        return new MultiDexAgg(
+            this.aggregators.map((agg) => agg.withContext?.(context) ?? agg),
+            this.config,
+        );
     }
 
     /**
      * Returns available tokens from all aggregators, deduplicated by address.
-     * Primary aggregator's tokens take precedence on conflicts.
+     * Primary aggregator's tokens take precedence unless a later duplicate is
+     * the first quoteable option for that address.
      */
     async getAvailableTokens(
         provider: curvance_read_provider,
@@ -76,16 +140,19 @@ export class MultiDexAgg implements IDexAgg {
             this.aggregators.map(agg => agg.getAvailableTokens(provider, query, account))
         );
 
-        const seen = new Set<string>();
+        const seen = new Map<string, number>();
         const tokens: ZapToken[] = [];
 
         for (const result of results) {
             if (result.status !== 'fulfilled') continue;
             for (const token of result.value) {
                 const addr = token.interface.address.toLowerCase();
-                if (!seen.has(addr)) {
-                    seen.add(addr);
+                const existingIndex = seen.get(addr);
+                if (existingIndex == undefined) {
+                    seen.set(addr, tokens.length);
                     tokens.push(token);
+                } else if (tokens[existingIndex]?.quote == undefined && token.quote != undefined) {
+                    tokens[existingIndex] = token;
                 }
             }
         }
@@ -98,11 +165,12 @@ export class MultiDexAgg implements IDexAgg {
      * Each aggregator is called exactly once.
      */
     async quoteAction(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address): Promise<{ action: Swap; quote: Quote }> {
+        const request = validateQuoteRequest(wallet, tokenIn, tokenOut, amount, slippage, feeReceiver);
         if (this.aggregators.length === 1) {
-            return this.primary.quoteAction(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
+            return this.primary.quoteAction(request.wallet, request.tokenIn, request.tokenOut, request.amount, request.slippage, feeBps, request.feeReceiver);
         }
 
-        const best = await this._bestQuoteAction(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
+        const best = await this._bestQuoteAction(request.wallet, request.tokenIn, request.tokenOut, request.amount, request.slippage, feeBps, request.feeReceiver);
         return { action: best.action, quote: best.quote };
     }
 
@@ -110,19 +178,20 @@ export class MultiDexAgg implements IDexAgg {
      * Returns the minimum output from the best quote.
      */
     async quoteMin(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address): Promise<bigint> {
+        const request = validateQuoteRequest(wallet, tokenIn, tokenOut, amount, slippage, feeReceiver);
         if (this.aggregators.length === 1) {
-            return this.primary.quoteMin(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
+            return this.primary.quoteMin(request.wallet, request.tokenIn, request.tokenOut, request.amount, request.slippage, feeBps, request.feeReceiver);
         }
 
         const best = await this._bestQuoteByValue(
-            wallet,
-            tokenIn,
-            tokenOut,
-            amount,
-            slippage,
+            request.wallet,
+            request.tokenIn,
+            request.tokenOut,
+            request.amount,
+            request.slippage,
             (quote) => quote.min_out,
             feeBps,
-            feeReceiver,
+            request.feeReceiver,
         );
         return best.quote.min_out;
     }
@@ -131,19 +200,20 @@ export class MultiDexAgg implements IDexAgg {
      * Returns the best quote across all aggregators.
      */
     async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address): Promise<Quote> {
+        const request = validateQuoteRequest(wallet, tokenIn, tokenOut, amount, slippage, feeReceiver);
         if (this.aggregators.length === 1) {
-            return this.primary.quote(wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver);
+            return this.primary.quote(request.wallet, request.tokenIn, request.tokenOut, request.amount, request.slippage, feeBps, request.feeReceiver);
         }
 
         const best = await this._bestQuoteByValue(
-            wallet,
-            tokenIn,
-            tokenOut,
-            amount,
-            slippage,
-            (quote) => quote.out,
+            request.wallet,
+            request.tokenIn,
+            request.tokenOut,
+            request.amount,
+            request.slippage,
+            (quote) => quote.min_out,
             feeBps,
-            feeReceiver,
+            request.feeReceiver,
         );
         return best.quote;
     }

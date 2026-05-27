@@ -282,6 +282,227 @@ test("reloadUserMarkets batches addresses and applies responses by address", asy
     assert.equal(marketB.account, ACCOUNT);
 });
 
+test("reloadUserMarkets keeps same-address markets separated by reader deployment", async () => {
+    const calls: string[] = [];
+    const applied: string[] = [];
+    const monadReader = {
+        batchKey: "monad-mainnet:shared-reader",
+        getMarketStates: async (addresses: string[], account: string) => {
+            calls.push(`monad:${addresses.join(",")}:${account}`);
+            return {
+                dynamicMarkets: [
+                    { address: MARKET_A, tokens: [{ address: TOKEN_A as any }] },
+                ],
+                userMarkets: [
+                    { address: MARKET_A, tokens: [{ address: TOKEN_A as any }] },
+                ],
+            };
+        },
+    } as any;
+    const arbReader = {
+        batchKey: "arb-sepolia:shared-reader",
+        getMarketStates: async (addresses: string[], account: string) => {
+            calls.push(`arb:${addresses.join(",")}:${account}`);
+            return {
+                dynamicMarkets: [
+                    { address: MARKET_A, tokens: [{ address: TOKEN_B as any }] },
+                ],
+                userMarkets: [
+                    { address: MARKET_A, tokens: [{ address: TOKEN_B as any }] },
+                ],
+            };
+        },
+    } as any;
+    const monadMarket = createRefreshHelperMarket(MARKET_A, TOKEN_A, monadReader);
+    const arbMarket = createRefreshHelperMarket(MARKET_A, TOKEN_B, arbReader);
+    monadMarket.applyState = ((
+        dynamic: { tokens: Array<{ address: string }> },
+        user: { tokens: Array<{ address: string }> },
+    ) => {
+        applied.push(`monad:${dynamic.tokens[0]?.address}:${user.tokens[0]?.address}`);
+    }) as any;
+    arbMarket.applyState = ((
+        dynamic: { tokens: Array<{ address: string }> },
+        user: { tokens: Array<{ address: string }> },
+    ) => {
+        applied.push(`arb:${dynamic.tokens[0]?.address}:${user.tokens[0]?.address}`);
+    }) as any;
+
+    const refreshed = await Market.reloadUserMarkets([monadMarket, arbMarket], OTHER_ACCOUNT as any);
+
+    assert.deepEqual(refreshed, [monadMarket, arbMarket]);
+    assert.deepEqual(calls, [
+        `monad:${MARKET_A}:${OTHER_ACCOUNT}`,
+        `arb:${MARKET_A}:${OTHER_ACCOUNT}`,
+    ]);
+    assert.deepEqual(applied, [
+        `monad:${TOKEN_A}:${TOKEN_A}`,
+        `arb:${TOKEN_B}:${TOKEN_B}`,
+    ]);
+    assert.equal(monadMarket.account, OTHER_ACCOUNT);
+    assert.equal(arbMarket.account, OTHER_ACCOUNT);
+});
+
+test("reloadUserMarketSummaries keeps same-address markets separated by reader deployment", async () => {
+    const calls: string[] = [];
+    const applied: string[] = [];
+    const monadReader = {
+        batchKey: "monad-mainnet:shared-summary-reader",
+        getMarketSummaries: async (addresses: string[], account: string) => {
+            calls.push(`monad:${addresses.join(",")}:${account}`);
+            return [{ address: MARKET_A, collateral: 1n }];
+        },
+    } as any;
+    const arbReader = {
+        batchKey: "arb-sepolia:shared-summary-reader",
+        getMarketSummaries: async (addresses: string[], account: string) => {
+            calls.push(`arb:${addresses.join(",")}:${account}`);
+            return [{ address: MARKET_A, collateral: 2n }];
+        },
+    } as any;
+    const monadMarket = createRefreshHelperMarket(MARKET_A, TOKEN_A, monadReader);
+    const arbMarket = createRefreshHelperMarket(MARKET_A, TOKEN_B, arbReader);
+    monadMarket.applyUserSummary = ((user: { address: string; collateral: bigint }) => {
+        applied.push(`monad:${user.address}:${user.collateral}`);
+    }) as any;
+    arbMarket.applyUserSummary = ((user: { address: string; collateral: bigint }) => {
+        applied.push(`arb:${user.address}:${user.collateral}`);
+    }) as any;
+
+    const refreshed = await Market.reloadUserMarketSummaries([monadMarket, arbMarket], OTHER_ACCOUNT as any);
+
+    assert.deepEqual(refreshed, [monadMarket, arbMarket]);
+    assert.deepEqual(calls, [
+        `monad:${MARKET_A}:${OTHER_ACCOUNT}`,
+        `arb:${MARKET_A}:${OTHER_ACCOUNT}`,
+    ]);
+    assert.deepEqual(applied, [
+        `monad:${MARKET_A}:1`,
+        `arb:${MARKET_A}:2`,
+    ]);
+    assert.equal(monadMarket.account, OTHER_ACCOUNT);
+    assert.equal(arbMarket.account, OTHER_ACCOUNT);
+});
+
+test("multiHoldExpiresAt accepts distinct reader objects from the same deployment", async () => {
+    const account = ACCOUNT as any;
+    const calls: Array<{ addresses: string[]; account: string }> = [];
+    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+    const reader = {
+        address: "0x0000000000000000000000000000000000000c01",
+        batchKey: "monad-mainnet:cooldown-reader",
+        marketMultiCooldown: async (addresses: string[], nextAccount: string) => {
+            calls.push({ addresses, account: nextAccount });
+            return [1200n, nowSeconds + 60n];
+        },
+    } as any;
+    const sameDeploymentReader = {
+        address: "0x0000000000000000000000000000000000000c02",
+        batchKey: "monad-mainnet:cooldown-reader",
+    } as any;
+    const marketA = createRefreshHelperMarket(MARKET_A, TOKEN_A, reader);
+    const marketB = createRefreshHelperMarket(MARKET_B, TOKEN_B, sameDeploymentReader);
+
+    marketA.account = account;
+    marketB.account = account;
+    marketA.setup = { chain: "monad-mainnet" } as any;
+    marketB.setup = { chain: "monad-mainnet" } as any;
+    marketA.cache.static.cooldownLength = 1200n;
+    marketB.cache.static.cooldownLength = 1200n;
+
+    const expirations = await marketA.multiHoldExpiresAt([marketA, marketB]);
+
+    assert.deepEqual(calls, [{
+        addresses: [MARKET_A, MARKET_B],
+        account,
+    }]);
+    assert.equal(expirations[MARKET_A], null);
+    assert.equal(expirations[MARKET_B]?.getTime(), Number((nowSeconds + 60n) * 1000n));
+});
+
+test("reloadUserMarkets rejects duplicate market rows before applying state", async () => {
+    const applied: string[] = [];
+    const reader = {
+        getMarketStates: async () => ({
+            dynamicMarkets: [
+                { address: MARKET_A, tokens: [] },
+                { address: MARKET_B, tokens: [] },
+                { address: MARKET_A, tokens: [] },
+            ],
+            userMarkets: [
+                { address: MARKET_A, tokens: [] },
+                { address: MARKET_B, tokens: [] },
+            ],
+        }),
+    } as any;
+    const marketA = Object.create(Market.prototype) as Market;
+    marketA.address = MARKET_A as any;
+    marketA.reader = reader;
+    marketA.tokens = [] as any;
+    marketA.applyState = (() => applied.push(MARKET_A)) as any;
+    const marketB = Object.create(Market.prototype) as Market;
+    marketB.address = MARKET_B as any;
+    marketB.reader = reader;
+    marketB.tokens = [] as any;
+    marketB.applyState = (() => applied.push(MARKET_B)) as any;
+
+    await assert.rejects(
+        () => Market.reloadUserMarkets([marketA, marketB], ACCOUNT as any),
+        /Duplicate dynamic market data for .* during refresh/i,
+    );
+    assert.deepEqual(applied, []);
+    assert.equal(marketA.account, undefined);
+    assert.equal(marketB.account, undefined);
+});
+
+test("reloadUserMarketSummaries rejects duplicate summary rows before applying state", async () => {
+    const applied: string[] = [];
+    const reader = {
+        getMarketSummaries: async () => [
+            { address: MARKET_A },
+            { address: MARKET_B },
+            { address: MARKET_A },
+        ],
+    } as any;
+    const marketA = Object.create(Market.prototype) as Market;
+    marketA.address = MARKET_A as any;
+    marketA.reader = reader;
+    marketA.applyUserSummary = (() => applied.push(MARKET_A)) as any;
+    const marketB = Object.create(Market.prototype) as Market;
+    marketB.address = MARKET_B as any;
+    marketB.reader = reader;
+    marketB.applyUserSummary = (() => applied.push(MARKET_B)) as any;
+
+    await assert.rejects(
+        () => Market.reloadUserMarketSummaries([marketA, marketB], ACCOUNT as any),
+        /Duplicate user summary market data for .* during refresh/i,
+    );
+    assert.deepEqual(applied, []);
+    assert.equal(marketA.account, undefined);
+    assert.equal(marketB.account, undefined);
+});
+
+test("reloadMarketData matches dynamic rows by normalized market address", async () => {
+    const market = Object.create(Market.prototype) as Market;
+    const upperMarket = MARKET_A.toUpperCase() as any;
+    const applied: string[] = [];
+
+    market.address = MARKET_A as any;
+    market.reader = {
+        getDynamicMarketData: async () => [
+            { address: MARKET_B, tokens: [] },
+            { address: upperMarket, tokens: [] },
+        ],
+    } as any;
+    market.applyState = ((dynamic: { address: string }) => {
+        applied.push(dynamic.address);
+    }) as any;
+
+    await market.reloadMarketData();
+
+    assert.deepEqual(applied, [upperMarket]);
+});
+
 test("cached market health and credit getters fail closed on oracle error state", () => {
     const { market } = createUserRefreshMarket();
 
@@ -468,6 +689,28 @@ test("reloadUserData rejects signer-backed refreshes for a different account bef
     assert.equal(market.account, ACCOUNT);
 });
 
+test("reloadUserSummary rejects signer-backed refreshes for a different account before RPC", async () => {
+    const { market } = createUserRefreshMarket();
+    let readerCalled = false;
+
+    market.signer = { address: ACCOUNT } as any;
+    market.account = ACCOUNT as any;
+    market.reader = {
+        getMarketSummaries: async () => {
+            readerCalled = true;
+            throw new Error("reader should not be called for signer/account mismatch");
+        },
+    } as any;
+
+    await assert.rejects(
+        () => market.reloadUserSummary(OTHER_ACCOUNT as any),
+        /Cannot refresh signer-backed market/i,
+    );
+    assert.equal(readerCalled, false);
+    assert.equal(market.account, ACCOUNT);
+    assert.equal(market.userDataScope, "full");
+});
+
 test("reloadUserMarkets does not bind refreshed account when grouped state application fails", async () => {
     const reader = {
         getMarketStates: async () => ({
@@ -630,6 +873,38 @@ test("reloadUserMarketSummaries commits no partial state when a later grouped ma
     assert.equal(marketA.cache.user.collateral, 0n);
 });
 
+test("reloadUserMarketSummaries commits no partial state when a later reader group fails", async () => {
+    const readerA = {
+        getMarketSummaries: async () => ([{
+            address: MARKET_A,
+            collateral: 99n,
+            maxDebt: 2n,
+            debt: 3n,
+            positionHealth: 4n,
+            cooldown: 5n,
+            errorCodeHit: false,
+            priceStale: false,
+        }]),
+    };
+    const readerB = {
+        getMarketSummaries: async () => {
+            throw new Error("second reader group failed");
+        },
+    };
+    const marketA = createRefreshHelperMarket(MARKET_A, TOKEN_A, readerA);
+    const marketB = createRefreshHelperMarket(MARKET_B, TOKEN_B, readerB);
+
+    await assert.rejects(
+        () => Market.reloadUserMarketSummaries([marketA, marketB], ACCOUNT as any),
+        /second reader group failed/i,
+    );
+
+    assert.equal(marketA.account, null);
+    assert.equal(marketB.account, null);
+    assert.equal(marketA.cache.user.collateral, 0n);
+    assert.equal(marketA.userDataScope, "full");
+});
+
 test("reloadUserMarkets rejects signer-backed grouped refreshes for a different account before RPC", async () => {
     let readerCalled = false;
     const reader = {
@@ -687,6 +962,55 @@ test("reloadUserMarkets keeps same-chain readers with different providers separa
 
     assert.notEqual(readerA.batchKey, readerB.batchKey);
     assert.deepEqual(calls, ["A", "B"]);
+});
+
+test("reloadUserMarketSummaries keeps same-chain readers with different providers separate", async () => {
+    const calls: string[] = [];
+
+    const readerA = new ProtocolReader(MARKET_A as any, { label: "provider-a" } as any, "monad-mainnet");
+    readerA.getMarketSummaries = (async (addresses: string[], account: string) => {
+        calls.push(`A:${addresses.join(",")}:${account}`);
+        return [{
+            address: MARKET_A,
+            collateral: 1n,
+            maxDebt: 2n,
+            debt: 3n,
+            positionHealth: 4n,
+            cooldown: 5n,
+            errorCodeHit: false,
+            priceStale: false,
+        }];
+    }) as any;
+
+    const readerB = new ProtocolReader(MARKET_A as any, { label: "provider-b" } as any, "monad-mainnet");
+    readerB.getMarketSummaries = (async (addresses: string[], account: string) => {
+        calls.push(`B:${addresses.join(",")}:${account}`);
+        return [{
+            address: MARKET_B,
+            collateral: 6n,
+            maxDebt: 7n,
+            debt: 8n,
+            positionHealth: 9n,
+            cooldown: 10n,
+            errorCodeHit: false,
+            priceStale: false,
+        }];
+    }) as any;
+
+    const marketA = createRefreshHelperMarket(MARKET_A, TOKEN_A, readerA);
+    const marketB = createRefreshHelperMarket(MARKET_B, TOKEN_B, readerB);
+
+    await Market.reloadUserMarketSummaries([marketA, marketB], ACCOUNT as any);
+
+    assert.notEqual(readerA.batchKey, readerB.batchKey);
+    assert.deepEqual(calls, [
+        `A:${MARKET_A}:${ACCOUNT}`,
+        `B:${MARKET_B}:${ACCOUNT}`,
+    ]);
+    assert.equal(marketA.account, ACCOUNT);
+    assert.equal(marketB.account, ACCOUNT);
+    assert.equal(marketA.userDataScope, "summary");
+    assert.equal(marketB.userDataScope, "summary");
 });
 
 test("applyState fails closed when dynamic or user data omits a token", () => {
@@ -758,6 +1082,85 @@ test("applyState fails closed when dynamic or user data omits a token", () => {
             },
         ),
         /Token row count mismatch.*user=1/i,
+    );
+
+    assert.equal((market.tokens[0] as any).cache.exchangeRate, 100n, "TOKEN_A cache must not be partially mutated");
+    assert.equal((market.tokens[0] as any).cache.userCollateral, 5n, "TOKEN_A user cache must not be partially mutated");
+    assert.equal((market.tokens[1] as any).cache.exchangeRate, 200n, "TOKEN_B cache must not be partially mutated");
+    assert.equal((market.tokens[1] as any).cache.userCollateral, 7n, "TOKEN_B user cache must not be partially mutated");
+});
+
+test("applyState fails closed when refresh token rows duplicate one token and omit another", () => {
+    const market = Object.create(Market.prototype) as Market;
+    market.address = MARKET_A as any;
+    market.cache = {
+        static: {} as any,
+        dynamic: { address: MARKET_A as any, tokens: [] },
+        user: {
+            address: MARKET_A as any,
+            collateral: 0n,
+            maxDebt: 0n,
+            debt: 0n,
+            positionHealth: 0n,
+            cooldown: 0n,
+            errorCodeHit: false,
+            priceStale: false,
+            tokens: [],
+        },
+        deploy: {} as any,
+    };
+    market.tokens = [
+        { address: TOKEN_A, cache: { exchangeRate: 100n, userCollateral: 5n } },
+        { address: TOKEN_B, cache: { exchangeRate: 200n, userCollateral: 7n } },
+    ] as any;
+
+    const validDynamic = {
+        address: MARKET_A as any,
+        tokens: [
+            { address: TOKEN_A as any, exchangeRate: 999n } as any,
+            { address: TOKEN_B as any, exchangeRate: 888n } as any,
+        ],
+    };
+    const validUser = {
+        address: MARKET_A as any,
+        collateral: 0n,
+        maxDebt: 0n,
+        debt: 0n,
+        positionHealth: 0n,
+        cooldown: 0n,
+        errorCodeHit: false,
+        priceStale: false,
+        tokens: [
+            { address: TOKEN_A as any, userCollateral: 50n } as any,
+            { address: TOKEN_B as any, userCollateral: 70n } as any,
+        ],
+    };
+
+    assert.throws(
+        () => market.applyState(
+            {
+                address: MARKET_A as any,
+                tokens: [
+                    { address: TOKEN_A as any, exchangeRate: 999n } as any,
+                    { address: TOKEN_A as any, exchangeRate: 888n } as any,
+                ],
+            },
+            validUser,
+        ),
+        /Duplicate dynamic token data for .* in market .* during refresh/i,
+    );
+    assert.throws(
+        () => market.applyState(
+            validDynamic,
+            {
+                ...validUser,
+                tokens: [
+                    { address: TOKEN_A as any, userCollateral: 50n } as any,
+                    { address: TOKEN_A as any, userCollateral: 70n } as any,
+                ],
+            },
+        ),
+        /Duplicate user token data for .* in market .* during refresh/i,
     );
 
     assert.equal((market.tokens[0] as any).cache.exchangeRate, 100n, "TOKEN_A cache must not be partially mutated");

@@ -280,6 +280,57 @@ test("query budget: refreshActiveUserMarkets batches same deployment across read
     ]);
 });
 
+test("query budget: refreshActiveUserMarketSummaries batches same deployment across reader instances", async () => {
+    const calls: Array<{ source: string; addresses: string[]; account: string }> = [];
+    const applied: string[] = [];
+    const sharedBatchKey = "monad-mainnet:0xsummary-reader";
+
+    const readerA = {
+        batchKey: sharedBatchKey,
+        getMarketSummaries: async (addresses: string[], account: string) => {
+            calls.push({ source: "A", addresses, account });
+            return addresses.map((address) => ({
+                address,
+                collateral: 1n,
+                maxDebt: 2n,
+                debt: 3n,
+                positionHealth: 4n,
+                cooldown: 5n,
+                errorCodeHit: false,
+                priceStale: false,
+            }));
+        },
+    } as any;
+
+    const readerB = {
+        batchKey: sharedBatchKey,
+        getMarketSummaries: async () => {
+            calls.push({ source: "B", addresses: [], account: ACCOUNT });
+            throw new Error("same deployment summary refresh should batch through the first reader instance");
+        },
+    } as any;
+
+    const first = createMarket(MARKET_A, readerA, { userDebt: 1n });
+    first.applyUserSummary = ((user: { address: string }) => {
+        applied.push(user.address);
+    }) as any;
+
+    const second = createMarket(MARKET_C, readerB, { userDebt: 2n });
+    second.applyUserSummary = ((user: { address: string }) => {
+        applied.push(user.address);
+    }) as any;
+
+    const refreshed = await refreshActiveUserMarketSummaries(ACCOUNT as any, [first, second]);
+
+    assert.deepEqual(refreshed, [first, second]);
+    assert.deepEqual(calls, [{
+        source: "A",
+        addresses: [MARKET_A, MARKET_C],
+        account: ACCOUNT,
+    }]);
+    assert.deepEqual(applied, [MARKET_A, MARKET_C]);
+});
+
 test("query budget: refreshActiveUserMarketSummaries refreshes all requested markets", async () => {
     const calls: Array<{ addresses: string[]; account: string }> = [];
     const applied: string[] = [];

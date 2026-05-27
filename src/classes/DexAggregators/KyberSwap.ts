@@ -1,12 +1,13 @@
 import { address, bytes, curvance_read_provider } from "../../types";
 import { ZapToken } from "../CToken";
-import IDexAgg from "./IDexAgg";
+import IDexAgg, { DexAggContext } from "./IDexAgg";
 import { Swap } from "../Zapper";
 import { all_markets, setup_config } from "../../setup";
-import { EMPTY_ADDRESS, toContractSwapSlippage } from "../../helpers";
-import { safeBigInt, fetchWithTimeout, validateAddress, validateRouterAddress, validateSlippageBps } from "../../validation";
+import { BPS, EMPTY_ADDRESS, toContractSwapSlippage } from "../../helpers";
+import { safeBigInt, fetchWithTimeout, validateAddress, validateApiUrl, validateRouterAddress, validateSlippageBps } from "../../validation";
 import { AbiCoder } from "ethers";
 import { buildLocalSimpleZapTokens } from "./helpers";
+import { MONAD_KYBER_SWAP_SERVICE } from "../../chains/services";
 
 // ── Calldata validation ─────────────────────────────────────────────
 // The KyberSwap API returns an opaque calldata blob. We trust the API to
@@ -78,8 +79,8 @@ function getCurrencyInFeeAmountBounds(
     const maxFeeBps = feeBps + SOURCE_AMOUNT_FEE_TOLERANCE_BPS;
 
     return {
-        min: amount * minFeeBps / 10000n,
-        max: (amount * maxFeeBps + 9999n) / 10000n,
+        min: amount * minFeeBps / BPS,
+        max: (amount * maxFeeBps + (BPS - 1n)) / BPS,
     };
 }
 
@@ -315,12 +316,15 @@ export class KyberSwap implements IDexAgg {
     router: address;
     chain: string;
     client_id: string = "curvance-sdk";
+    private readonly apiBase: string;
+    private readonly context: DexAggContext | undefined;
 
     constructor(
-        dao: address = "0x0Acb7eF4D8733C719d60e0992B489b629bc55C02",
-        router: address = "0x6131B5fae19EA4f9D964eAc0408E4408b66337b5",
-        chain: string = "monad-mainnet",
-        api: string = "https://aggregator-api.kyberswap.com"
+        dao: address = EMPTY_ADDRESS,
+        router: address = MONAD_KYBER_SWAP_SERVICE.router,
+        chain: string = MONAD_KYBER_SWAP_SERVICE.chainSlug,
+        api: string = MONAD_KYBER_SWAP_SERVICE.apiBase,
+        context?: DexAggContext,
     ) {
         // KyberSwap uses 'monad' instead of 'monad-mainnet' like other providers, so we adjust here
         if(chain == "monad-mainnet") {
@@ -330,7 +334,13 @@ export class KyberSwap implements IDexAgg {
         this.dao = dao;
         this.router = router;
         this.chain = chain;
-        this.api = `${api}/${this.chain}`;
+        this.apiBase = validateApiUrl(api).replace(/\/+$/, "");
+        this.api = `${this.apiBase}/${this.chain}`;
+        this.context = context;
+    }
+
+    withContext(context: DexAggContext): KyberSwap {
+        return new KyberSwap(context.checkerDao ?? this.dao, this.router, this.chain, this.apiBase, context);
     }
 
     async getAvailableTokens(
@@ -343,15 +353,17 @@ export class KyberSwap implements IDexAgg {
         void page;
         void pageSize;
 
+        const markets = this.context?.markets ?? all_markets;
+        const feePolicy = this.context?.feePolicy ?? setup_config?.feePolicy;
+
         return buildLocalSimpleZapTokens(
-            all_markets,
+            markets,
             provider,
             query,
             account,
             (wallet, tokenIn, tokenOut, amount, formattedSlippage, feeBps, feeReceiver) =>
                 this.quote(wallet, tokenIn, tokenOut, amount, formattedSlippage, feeBps, feeReceiver),
             (tokenIn, tokenOut, amount) => {
-                const feePolicy = setup_config?.feePolicy;
                 if (feePolicy == null) {
                     return { feeBps: 0n };
                 }
@@ -403,11 +415,20 @@ export class KyberSwap implements IDexAgg {
 
     async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
         validateSlippageBps(slippage, 'KyberSwap quote');
-        validateCheckerFeePolicy(this.dao, feeBps, feeReceiver);
+        if (amount <= 0n) {
+            throw new Error(`KyberSwap quote amount must be positive, got ${amount}`);
+        }
+        const validatedWallet = validateAddress(wallet, 'KyberSwap wallet');
+        const validatedTokenIn = validateAddress(tokenIn, 'KyberSwap tokenIn');
+        const validatedTokenOut = validateAddress(tokenOut, 'KyberSwap tokenOut');
+        const validatedFeeReceiver = feeReceiver == undefined
+            ? undefined
+            : validateAddress(feeReceiver, 'KyberSwap feeReceiver');
+        validateCheckerFeePolicy(this.dao, feeBps, validatedFeeReceiver);
 
         const params = new URLSearchParams({
-            tokenIn,
-            tokenOut,
+            tokenIn: validatedTokenIn,
+            tokenOut: validatedTokenOut,
             amountIn: amount.toString(),
         });
 
@@ -419,7 +440,7 @@ export class KyberSwap implements IDexAgg {
             params.set('feeAmount', feeBps.toString());
             params.set('chargeFeeBy', 'currency_in');
             params.set('isInBps', 'true');
-            params.set('feeReceiver', feeReceiver);
+            params.set('feeReceiver', validatedFeeReceiver!);
         }
 
         const quote_response = await fetchWithTimeout(`${this.api}/api/v1/routes?${params.toString()}`, {
@@ -447,9 +468,9 @@ export class KyberSwap implements IDexAgg {
             },
             body: JSON.stringify({
                 routeSummary: quote.data.routeSummary,
-                origin: wallet,
-                sender: wallet,
-                recipient: wallet,
+                origin: validatedWallet,
+                sender: validatedWallet,
+                recipient: validatedWallet,
                 slippageTolerance: Number(slippage),
                 referral: this.dao
             })
@@ -465,22 +486,26 @@ export class KyberSwap implements IDexAgg {
         const build_data = await build_response.json() as KyperSwapBuildResponse;
 
         const amountOut = safeBigInt(build_data.data.amountOut, 'KyberSwap amountOut');
-        const min_out = amountOut * (10000n - slippage) / 10000n;
+        const transactionValue = safeBigInt(build_data.data.transactionValue, 'KyberSwap transactionValue');
+        if (transactionValue !== 0n) {
+            throw new Error(`KyberSwap quote transactionValue=${transactionValue}, expected 0`);
+        }
+        const min_out = amountOut * (BPS - slippage) / BPS;
 
         // Case-insensitive router comparison via validateRouterAddress — also
-        // enforces address format/checksum. Matches Kuru's router gate.
+        // enforces address format/checksum.
         const validatedRouter = validateRouterAddress(build_data.data.routerAddress, this.router, 'KyberSwap');
 
         // Validate that the API actually embedded the fee params we requested.
         // Without this, a misconfigured API response silently reverts on-chain.
         validateSwapCalldata(build_data.data.data, {
-            tokenIn,
-            tokenOut,
+            tokenIn: validatedTokenIn,
+            tokenOut: validatedTokenOut,
             amount,
-            recipient: wallet,
+            recipient: validatedWallet,
             minReturnAmount: min_out,
             feeBps: feeBps ?? 0n,
-            feeReceiver,
+            feeReceiver: validatedFeeReceiver,
         });
 
         return {

@@ -74,7 +74,7 @@ export function createSimpleZapQuote(
 }
 
 export function buildLocalSimpleZapTokens(
-    markets: MarketSource[],
+    markets: readonly MarketSource[],
     provider: curvance_read_provider,
     query: string | null,
     account: address | null,
@@ -91,7 +91,6 @@ export function buildLocalSimpleZapTokens(
             if (seen.has(assetKey)) {
                 continue;
             }
-            seen.add(assetKey);
 
             if (query) {
                 const lowerQuery = query.toLowerCase();
@@ -102,6 +101,7 @@ export function buildLocalSimpleZapTokens(
                     continue;
                 }
             }
+            seen.add(assetKey);
 
             zapTokens.push({
                 interface: asset,

@@ -143,30 +143,36 @@ function createSimpleExecutionHarness({
         },
     };
 
+    const quoteDexAgg = {
+        async quoteAction(
+            managerAddress: string,
+            inputToken: string,
+            outputToken: string,
+            inputAmount: bigint,
+            slippage: bigint,
+            feeBps: bigint,
+            feeReceiver?: string,
+        ) {
+            quoteCalls.push({
+                manager: managerAddress,
+                inputToken,
+                outputToken,
+                inputAmount,
+                slippage,
+                feeBps,
+                feeReceiver,
+            });
+            return {
+                action: { route: 'simple', inputAmount },
+                quote: { min_out: 1_000n },
+            };
+        },
+    };
+    (market as any).dexAgg = quoteDexAgg;
     const chainConfig = {
         dexAgg: {
-            async quoteAction(
-                managerAddress: string,
-                inputToken: string,
-                outputToken: string,
-                inputAmount: bigint,
-                slippage: bigint,
-                feeBps: bigint,
-                feeReceiver?: string,
-            ) {
-                quoteCalls.push({
-                    manager: managerAddress,
-                    inputToken,
-                    outputToken,
-                    inputAmount,
-                    slippage,
-                    feeBps,
-                    feeReceiver,
-                });
-                return {
-                    action: { route: 'simple', inputAmount },
-                    quote: { min_out: 1_000n },
-                };
+            async quoteAction() {
+                throw new Error('chain singleton DEX aggregator should not be used');
             },
         },
     };
@@ -267,7 +273,7 @@ describe('CToken simple leverage execution', () => {
         assert.deepEqual(events, ['wait', 'reload']);
     });
 
-    test('oracleRoute refreshes an explicit receiver account after execution', async () => {
+    test('oracleRoute keeps signer-backed cache bound to signer after third-party writes', async () => {
         const token = Object.create(CToken.prototype) as CToken;
         const reloads: Array<{ account: string; allowSignerMismatch: boolean | undefined }> = [];
         const events: string[] = [];
@@ -291,9 +297,58 @@ describe('CToken simple leverage execution', () => {
 
         assert.deepEqual(events, ['wait', 'reload']);
         assert.deepEqual(reloads, [{
-            account: RECEIVER,
-            allowSignerMismatch: true,
+            account: ACCOUNT,
+            allowSignerMismatch: undefined,
         }]);
+    });
+
+    test('_getLeverageSnapshot does not partially mutate market user cache', async () => {
+        const token = Object.create(CToken.prototype) as CToken;
+        const borrow = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
+        const marketUser = {
+            collateral: 10n * WAD,
+            debt: 4n * WAD,
+        };
+
+        (token as any).address = COLLATERAL;
+        (token as any).cache = {
+            symbol: 'cCOLL',
+            assetPrice: WAD,
+            sharePrice: WAD,
+        };
+        (token as any).getAccountOrThrow = () => ACCOUNT;
+        (token as any).market = {
+            cache: {
+                user: marketUser,
+            },
+            reader: {
+                getLeverageSnapshot: async () => ({
+                    collateralUsd: 200n * WAD,
+                    debtUsd: 80n * WAD,
+                    collateralAssetPrice: 2n * WAD,
+                    sharePrice: 3n * WAD,
+                    debtAssetPrice: 4n * WAD,
+                    debtTokenBalance: 40n * WAD,
+                    oracleError: false,
+                }),
+            },
+        };
+        (borrow as any).address = DEBT;
+        (borrow as any).cache = {
+            symbol: 'dDEBT',
+            assetPrice: WAD,
+        };
+
+        const snapshot = await (token as any)._getLeverageSnapshot(borrow);
+
+        assert.equal(snapshot.collateralUsd, 200n * WAD);
+        assert.equal((token as any).cache.assetPrice, 2n * WAD);
+        assert.equal((token as any).cache.sharePrice, 3n * WAD);
+        assert.equal((borrow as any).cache.assetPrice, 4n * WAD);
+        assert.deepEqual(marketUser, {
+            collateral: 10n * WAD,
+            debt: 4n * WAD,
+        });
     });
 
     test('leverageDown fails closed for unsupported position manager types before quoting', async () => {
@@ -354,6 +409,32 @@ describe('CToken simple leverage execution', () => {
             success: false,
             error: 'Simple leverage requires distinct collateral and borrow assets.',
         });
+        assert.deepEqual(quoteCalls, []);
+        assert.deepEqual(depositCalls, []);
+    });
+
+    test('depositAndLeverage rejects zero-sized deposits before approvals or quoting', async () => {
+        const { token, borrow, quoteCalls, depositCalls } = createSimpleExecutionHarness();
+        let approvalChecked = false;
+        (token as any)._checkTokenApproval = async () => {
+            approvalChecked = true;
+            throw new Error('approval should not be checked for zero deposit-and-leverage');
+        };
+
+        const result = await token.depositAndLeverage(
+            Decimal(0),
+            borrow,
+            Decimal('1.60'),
+            'simple',
+            Decimal(0.01),
+            true,
+        );
+
+        assert.deepEqual(result, {
+            success: false,
+            error: 'Deposit amount must be greater than zero.',
+        });
+        assert.equal(approvalChecked, false);
         assert.deepEqual(quoteCalls, []);
         assert.deepEqual(depositCalls, []);
     });
@@ -572,6 +653,16 @@ describe('CToken simple leverage execution', () => {
         );
     });
 
+    test('leverageUp uses the market-bound DEX aggregator instead of the chain singleton', async () => {
+        const { token, borrow, quoteCalls, leverageCalls } = createSimpleExecutionHarness();
+
+        const tx = await token.leverageUp(borrow, Decimal(2), 'simple', Decimal(0.01));
+
+        assert.deepEqual(tx, { hash: '0xleverage' });
+        assert.deepEqual(quoteCalls.map((call) => call.inputToken), [DEBT]);
+        assert.equal(leverageCalls.length, 1);
+    });
+
     test('direct leverageUp does not require cToken delegate approval to the position manager', async () => {
         const { token, borrow } = createSimpleExecutionHarness();
 
@@ -661,6 +752,16 @@ describe('CToken simple leverage execution', () => {
                 amplifyContractSlippage(110n, Decimal('0.6'), 37n),
             ),
         );
+    });
+
+    test('depositAndLeverage uses the market-bound DEX aggregator instead of the chain singleton', async () => {
+        const { token, borrow, quoteCalls, depositCalls } = createSimpleExecutionHarness();
+
+        const tx = await token.depositAndLeverage(Decimal(10), borrow, Decimal('1.60'), 'simple', Decimal(0.01));
+
+        assert.deepEqual(tx, { hash: '0xdeposit' });
+        assert.deepEqual(quoteCalls.map((call) => call.inputToken), [DEBT]);
+        assert.equal(depositCalls.length, 1);
     });
 
     test('direct depositAndLeverage does not require cToken delegate approval to the position manager', async () => {
@@ -808,6 +909,22 @@ describe('CToken simple leverage execution', () => {
         );
 
         assert.deepEqual(tx, { hash: '0xdeleverage' });
+        assert.equal(deleverageCalls.length, 1);
+    });
+
+    test('leverageDown uses the market-bound DEX aggregator instead of the chain singleton', async () => {
+        const { token, borrow, quoteCalls, deleverageCalls } = createSimpleExecutionHarness();
+
+        const tx = await token.leverageDown(
+            borrow,
+            Decimal('1.6666666667'),
+            Decimal('1.5'),
+            'simple',
+            Decimal(0.01),
+        );
+
+        assert.deepEqual(tx, { hash: '0xdeleverage' });
+        assert.deepEqual(quoteCalls.map((call) => call.inputToken), [COLLATERAL]);
         assert.equal(deleverageCalls.length, 1);
     });
 

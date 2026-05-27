@@ -5,6 +5,18 @@ import { createChainFallbackProviders, createChainPrimaryProvider, getChainRpcCo
 
 export const testnet: ChainConfig = {
     chainId: 421614,
+    environment: "testnet",
+    services: {
+        curvanceApi: {
+            rewardsSlug: "arb-sepolia",
+            rewardChainAliases: ["arbitrum-sepolia"],
+            nativeYieldSlug: null,
+            suppressedNativeYieldSymbols: [],
+        },
+        dexAggregators: {
+            kyberSwap: null,
+        },
+    },
     dexAgg: new UnsupportedDexAgg("arb-sepolia"),
     rpc: getChainRpcConfig("arb-sepolia"),
     provider: createChainPrimaryProvider("arb-sepolia"),
@@ -13,5 +25,6 @@ export const testnet: ChainConfig = {
     native_name: 'Ether',
     wrapped_native: '0x980B62Da83eFf3D4576C647993b0c1D7faf17c73' as address,
     native_vaults: [],
-    vaults: []
+    vaults: [],
+    excluded_zap_symbols: [],
 }

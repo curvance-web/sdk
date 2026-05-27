@@ -7,6 +7,7 @@ import { MarketToken } from "./Market";
 import { BorrowableCToken } from "./BorrowableCToken";
 import { CToken } from "./CToken";
 import FormatConverter from "./FormatConverter";
+import { validateAddress } from "../validation";
 
 export const AdaptorTypes = {
     CHAINLINK: 4146809896196834135992027840844413263297648946195754575888528621153937239424n,
@@ -125,6 +126,7 @@ export interface UserData {
 }
 
 export interface IProtocolReader {
+    centralRegistry(): Promise<address>;
     getAllDynamicState(account: address): Promise<any>;
     getMarketSummaries(markets: address[], account: address): Promise<any>;
     getMarketStates(markets: address[], account: address): Promise<any>;
@@ -143,6 +145,14 @@ export interface IProtocolReader {
     getBalancesOf(tokens: address[], account: address): Promise<bigint[]>;
     getLeverageSnapshot(account: address, cToken: address, borrowableCToken: address, bufferTime: bigint): Promise<[bigint, bigint, bigint, bigint, bigint, bigint, boolean]>;
 }
+
+interface ICentralRegistry {
+    daoAddress(): Promise<address>;
+}
+
+const CENTRAL_REGISTRY_ABI = [
+    "function daoAddress() view returns (address)",
+];
 
 const STATIC_MARKET_CACHE_TTL_MS = 60_000;
 
@@ -348,6 +358,49 @@ export class ProtocolReader {
         this.staticMarketCacheKey = this.batchKey;
     }
 
+    private assertTokenBelongsToReader(token: MarketToken | CToken | BorrowableCToken | null | undefined, label: string) {
+        if (token == null) {
+            return;
+        }
+
+        const tokenMarket = (token as MarketToken & { market?: any }).market;
+        const tokenReader = tokenMarket?.reader as ProtocolReader | undefined;
+        if (tokenReader == undefined) {
+            return;
+        }
+
+        if (tokenReader === this) {
+            return;
+        }
+
+        const tokenReaderKey = tokenReader.batchKey;
+        const readerKey = this.batchKey;
+        if (tokenReaderKey != null && tokenReaderKey === readerKey) {
+            return;
+        }
+
+        throw new Error(
+            `ProtocolReader ${this.address} cannot read ${label} token ${token.address} ` +
+            `from market ${tokenMarket.address ?? "unknown"} on ${tokenMarket.setup?.chain ?? "unknown"}.`
+        );
+    }
+
+    async getDaoAddress(): Promise<address> {
+        const centralRegistryAddress = validateAddress(
+            await this.contract.centralRegistry(),
+            `ProtocolReader ${this.address} centralRegistry`,
+        );
+        const centralRegistry = contractSetup<ICentralRegistry>(
+            this.provider,
+            centralRegistryAddress,
+            CENTRAL_REGISTRY_ABI,
+        );
+        return validateAddress(
+            await centralRegistry.daoAddress(),
+            `CentralRegistry ${centralRegistryAddress} daoAddress`,
+        );
+    }
+
     async getAllMarketData(account: address | null = null) {
         if(account == null || account === EMPTY_ADDRESS) {
             const [staticMarket, dynamicMarket] = await Promise.all([
@@ -375,6 +428,7 @@ export class ProtocolReader {
     }
 
     async maxRedemptionOf(account: address, ctoken: CToken, bufferTime: bigint = 0n) {
+        this.assertTokenBelongsToReader(ctoken, "redemption");
         const data = await this.contract.maxRedemptionOf(account, ctoken.address, bufferTime);
         return {
             maxCollateralizedShares: BigInt(data[0]),
@@ -384,6 +438,7 @@ export class ProtocolReader {
     }
 
     async hypotheticalRedemptionOf(account: address, ctoken: CToken, shares: bigint, bufferTime: bigint = 0n) {
+        this.assertTokenBelongsToReader(ctoken, "redemption");
         const data = await this.contract.hypotheticalRedemptionOf(account, ctoken.address, shares, bufferTime);
         return {
             excess: BigInt(data[0]),
@@ -395,6 +450,7 @@ export class ProtocolReader {
     }
 
     async hypotheticalBorrowOf(account: address, ctoken: BorrowableCToken, assets: bigint, bufferTime: bigint = 0n) {
+        this.assertTokenBelongsToReader(ctoken, "borrow");
         const data = await this.contract.hypotheticalBorrowOf(account, ctoken.address, assets, bufferTime);
         const loanSizeError = Boolean(data[3]);
         const oracleError = Boolean(data[4]);
@@ -495,6 +551,8 @@ export class ProtocolReader {
     }
 
     async hypotheticalLeverageOf(account: address, depositCToken: MarketToken, borrowableCToken: MarketToken, deposit_amount: TokenInput) {
+        this.assertTokenBelongsToReader(depositCToken, "deposit");
+        this.assertTokenBelongsToReader(borrowableCToken, "borrow");
         const assets = FormatConverter.decimalToBigInt(deposit_amount, depositCToken.asset.decimals);
         const [
             currentLeverage,
@@ -570,4 +628,3 @@ export class ProtocolReader {
         }
     }
 }
-

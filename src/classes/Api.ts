@@ -1,13 +1,15 @@
 import type { SetupConfigSnapshot } from "../setup";
+import { chain_config } from "../chains";
 import { address } from "../types";
-import { fetchWithTimeout } from "../validation";
+import { fetchWithTimeout, validateApiUrl } from "../validation";
 
 export type IncentiveResponse = {
     market: address,
     type: string,
     rate: number,
     description: string,
-    image: string
+    image: string,
+    chain_network?: string,
 };
 
 export type MilestoneResponse = {
@@ -22,6 +24,9 @@ export type MilestoneResponse = {
 }
 export type Milestones = { [key: string]: MilestoneResponse };
 export type Incentives = { [key: string]: Array<IncentiveResponse> };
+type ApiRequestConfig = Pick<SetupConfigSnapshot, "chain" | "api_url"> & {
+    services?: SetupConfigSnapshot["services"];
+};
 
 function isRewardsResponse(
     value: unknown,
@@ -83,12 +88,38 @@ function isIncentiveResponse(value: unknown): value is IncentiveResponse {
         isNonEmptyString(row.type) &&
         isNonNegativeFiniteNumber(row.rate) &&
         isNonEmptyString(row.description) &&
-        isNonEmptyString(row.image)
+        isNonEmptyString(row.image) &&
+        (row.chain_network == undefined || isNonEmptyString(row.chain_network))
     );
 }
 
 function normalizeMarketKey(market: string): string {
     return market.toLowerCase();
+}
+
+function normalizeChainNetwork(chain: string): string {
+    return chain.trim().toLowerCase().replace(/[\s_]+/g, "-");
+}
+
+function resolveCurvanceApiServices(config: ApiRequestConfig) {
+    const services = config.services?.curvanceApi ?? chain_config[config.chain]?.services.curvanceApi;
+    if (services == null) {
+        throw new Error(`Chain configuration for ${config.chain} is missing Curvance API services.`);
+    }
+    return services;
+}
+
+function acceptedMilestoneChainNetworks(config: ApiRequestConfig): Set<string> {
+    const { chain } = config;
+    const normalized = normalizeChainNetwork(chain);
+    const aliases = new Set([normalized]);
+    const services = resolveCurvanceApiServices(config);
+
+    for (const alias of services.rewardChainAliases) {
+        aliases.add(normalizeChainNetwork(alias));
+    }
+
+    return aliases;
 }
 
 function isNativeYieldRow(value: unknown): value is { symbol: string; apy: number } {
@@ -112,66 +143,73 @@ function resolveDefaultSetupConfig(context: string): SetupConfigSnapshot {
     return config;
 }
 
+function resolveValidatedApiUrl(config: ApiRequestConfig, context: string): string {
+    try {
+        return validateApiUrl(config.api_url);
+    } catch (error) {
+        throw new Error(`${context}: ${(error as Error).message}`);
+    }
+}
+
 export class Api {
     private url: string;
     
     public constructor(config?: SetupConfigSnapshot) {
-        this.url = (config ?? resolveDefaultSetupConfig("Api")).api_url!;
+        this.url = resolveValidatedApiUrl(config ?? resolveDefaultSetupConfig("Api"), "Api");
     }
 
-    static async fetchNativeYields(config?: SetupConfigSnapshot): Promise<{ symbol: string, apy: number }[]> {
+    static async fetchNativeYields(config?: ApiRequestConfig): Promise<{ symbol: string, apy: number }[]> {
         const resolvedConfig = config ?? resolveDefaultSetupConfig("Api.fetchNativeYields");
         const { api_url } = resolvedConfig;
-        let chain: string = resolvedConfig.chain;
+        const nativeYieldSlug = resolveCurvanceApiServices(resolvedConfig).nativeYieldSlug;
+
+        if(nativeYieldSlug == null) {
+            return [];
+        }
 
         if(api_url == null) {
             console.error("You must have an API URL setup to fetch native yields.");
             return [];
         }
 
-        if(chain == 'monad-mainnet') {
-            chain = 'monad';
-        }
+        const validatedApiUrl = resolveValidatedApiUrl(resolvedConfig, "Api.fetchNativeYields");
+        try {
+            const res = await fetchWithTimeout(`${validatedApiUrl}/v1/${nativeYieldSlug}/native_apy`);
+            if (!res.ok) {
+                throw new Error(`Native yields request failed: ${res.status} ${res.statusText}`);
+            }
 
-        if(['monad'].includes(chain)) {
-            try {
-                const res = await fetchWithTimeout(`${api_url}/v1/${chain}/native_apy`);
-                if (!res.ok) {
-                    throw new Error(`Native yields request failed: ${res.status} ${res.statusText}`);
-                }
+            const yields = await res.json() as {
+                "native_apy": {
+                    symbol: string,
+                    apy: number
+                }[]
+            };
 
-                const yields = await res.json() as {
-                    "native_apy": {
-                        symbol: string,
-                        apy: number
-                    }[]
-                };
-    
-                // Add validation
-                if (!yields || !yields.native_apy || !Array.isArray(yields.native_apy)) {
-                    console.error("Invalid API response structure for native yields");
-                    return [];
-                }
-    
-                return yields.native_apy.filter(isNativeYieldRow);
-            } catch (error) {
-                console.error("Error fetching native yields:", error);
+            // Add validation
+            if (!yields || !yields.native_apy || !Array.isArray(yields.native_apy)) {
+                console.error("Invalid API response structure for native yields");
                 return [];
             }
-        } else {
+
+            return yields.native_apy.filter(isNativeYieldRow);
+        } catch (error) {
+            console.error("Error fetching native yields:", error);
             return [];
         }
     }
 
-    static async getRewards(config?: SetupConfigSnapshot) {
-        const { chain, api_url } = config ?? resolveDefaultSetupConfig("Api.getRewards");
+    static async getRewards(config?: ApiRequestConfig) {
+        const resolvedConfig = config ?? resolveDefaultSetupConfig("Api.getRewards");
+        const rewardsSlug = resolveCurvanceApiServices(resolvedConfig).rewardsSlug;
+        const apiUrl = resolveValidatedApiUrl(resolvedConfig, "Api.getRewards");
 
         let milestones: Milestones = {};
         let incentives: Incentives = {};
 
         let rewards;
         try {
-            const response = await fetchWithTimeout(`${api_url}/v1/rewards/active/${chain}`);
+            const response = await fetchWithTimeout(`${apiUrl}/v1/rewards/active/${rewardsSlug}`);
             if (!response.ok) {
                 throw new Error(`Rewards request failed: ${response.status} ${response.statusText}`);
             }
@@ -190,11 +228,23 @@ export class Api {
             };
         }
 
+        const milestoneChainNetworks = acceptedMilestoneChainNetworks(resolvedConfig);
         for(const milestone of rewards.milestones.filter(isMilestoneResponse)) {
+            if (!milestoneChainNetworks.has(normalizeChainNetwork(milestone.chain_network))) {
+                continue;
+            }
+
             milestones[normalizeMarketKey(milestone.market)] = milestone;
         }
 
         for(const incentive of rewards.incentives.filter(isIncentiveResponse)) {
+            if (
+                incentive.chain_network != undefined &&
+                !milestoneChainNetworks.has(normalizeChainNetwork(incentive.chain_network))
+            ) {
+                continue;
+            }
+
             const market = normalizeMarketKey(incentive.market);
             if(!(market in incentives)) {
                 incentives[market] = [];

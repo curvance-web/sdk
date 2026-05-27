@@ -4,6 +4,7 @@ import Decimal from "decimal.js";
 import { Market } from "../src/classes/Market";
 import { ProtocolReader } from "../src/classes/ProtocolReader";
 import { snapshotMarket, takePortfolioSnapshot } from "../src/integrations/snapshot";
+import { chain_config } from "../src/chains";
 
 const ACCOUNT = "0x00000000000000000000000000000000000000aa";
 const OTHER_ACCOUNT = "0x00000000000000000000000000000000000000bb";
@@ -60,11 +61,12 @@ function createSnapshotMarket({
 }) {
     const market = Object.create(Market.prototype) as Market;
     const token = createToken(name, true);
+    const chainId = chain_config[chain as keyof typeof chain_config]?.chainId;
     market.address = address as any;
     market.account = account as any;
     market.signer = signer as any ?? null;
     market.reader = (reader ?? { batchKey: null, getAllDynamicState: async () => ({ dynamicMarket: [], userData: { markets: [] } }) }) as any;
-    market.setup = { chain } as any;
+    market.setup = { chain, chainId } as any;
     market.tokens = [token] as any;
     market.applyState = (applyState ?? (() => undefined)) as any;
 
@@ -109,11 +111,88 @@ test("takePortfolioSnapshot uses explicit markets and infers a single-chain labe
     assert.equal(snapshot.chain, "monad-mainnet");
     assert.equal(snapshot.markets.length, 1);
     assert.equal(snapshot.markets[0]?.marketAddress, MARKET_A);
+    assert.equal(snapshot.markets[0]?.chain, "monad-mainnet");
+    assert.equal(snapshot.markets[0]?.chainId, 143);
     assert.equal(snapshot.totalDepositsUSD, "10");
     assert.equal(snapshot.totalDebtUSD, "2");
 });
 
-test("takePortfolioSnapshot labels mixed explicit market sets as multi", async () => {
+test("snapshotMarket uses market setup chainId after exported chain config moves", (t) => {
+    const market = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Monad Market",
+        chain: "monad-mainnet",
+    });
+    const originalChainId = chain_config["monad-mainnet"].chainId;
+
+    (chain_config["monad-mainnet"] as any).chainId = 999_999;
+    t.after(() => {
+        (chain_config["monad-mainnet"] as any).chainId = originalChainId;
+    });
+
+    const snapshot = snapshotMarket(market);
+
+    assert.equal(snapshot.chain, "monad-mainnet");
+    assert.equal(snapshot.chainId, 143);
+});
+
+test("takePortfolioSnapshot rejects explicit chain labels that contradict market provenance", async () => {
+    const monadMarket = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Monad Market",
+        chain: "monad-mainnet",
+    });
+    const arbMarket = createSnapshotMarket({
+        address: MARKET_B,
+        name: "Arbitrum Market",
+        chain: "arb-sepolia",
+    });
+
+    await assert.rejects(
+        () => takePortfolioSnapshot(ACCOUNT as any, {
+            markets: [monadMarket],
+            chain: "arb-sepolia",
+        }),
+        /chain='arb-sepolia' but market provenance resolves to 'monad-mainnet'/i,
+    );
+
+    await assert.rejects(
+        () => takePortfolioSnapshot(ACCOUNT as any, {
+            markets: [monadMarket, arbMarket],
+            allowMixedChains: true,
+            chain: "monad-mainnet",
+        }),
+        /chain='monad-mainnet' but market provenance resolves to 'multi'/i,
+    );
+
+    const explicitlyMatching = await takePortfolioSnapshot(ACCOUNT as any, {
+        markets: [monadMarket],
+        chain: "monad-mainnet",
+    });
+    assert.equal(explicitlyMatching.chain, "monad-mainnet");
+});
+
+test("takePortfolioSnapshot rejects mixed explicit market sets by default", async () => {
+    const monadMarket = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Monad Market",
+        chain: "monad-mainnet",
+    });
+    const arbMarket = createSnapshotMarket({
+        address: MARKET_B,
+        name: "Arbitrum Market",
+        chain: "arb-sepolia",
+    });
+
+    await assert.rejects(
+        () => takePortfolioSnapshot(ACCOUNT as any, {
+            markets: [monadMarket, arbMarket],
+        }),
+        /received markets from multiple chains/i,
+    );
+});
+
+test("takePortfolioSnapshot labels opted-in mixed market sets as multi with per-market provenance", async () => {
     const monadMarket = createSnapshotMarket({
         address: MARKET_A,
         name: "Monad Market",
@@ -127,10 +206,120 @@ test("takePortfolioSnapshot labels mixed explicit market sets as multi", async (
 
     const snapshot = await takePortfolioSnapshot(ACCOUNT as any, {
         markets: [monadMarket, arbMarket],
+        allowMixedChains: true,
     });
 
     assert.equal(snapshot.chain, "multi");
     assert.equal(snapshot.markets.length, 2);
+    assert.deepEqual(
+        snapshot.markets.map((market) => ({ address: market.marketAddress, chain: market.chain, chainId: market.chainId })),
+        [
+            { address: MARKET_A, chain: "monad-mainnet", chainId: 143 },
+            { address: MARKET_B, chain: "arb-sepolia", chainId: 421614 },
+        ],
+    );
+});
+
+test("mixed snapshots distinguish same-address markets by per-market chain provenance", async () => {
+    const monadMarket = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Shared Address Market",
+        chain: "monad-mainnet",
+    });
+    const arbMarket = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Shared Address Market",
+        chain: "arb-sepolia",
+    });
+
+    const snapshot = await takePortfolioSnapshot(ACCOUNT as any, {
+        markets: [monadMarket, arbMarket],
+        allowMixedChains: true,
+    });
+
+    assert.equal(snapshot.chain, "multi");
+    assert.deepEqual(
+        snapshot.markets.map((market) => ({
+            address: market.marketAddress,
+            name: market.marketName,
+            chain: market.chain,
+            chainId: market.chainId,
+        })),
+        [
+            { address: MARKET_A, name: "Shared Address Market", chain: "monad-mainnet", chainId: 143 },
+            { address: MARKET_A, name: "Shared Address Market", chain: "arb-sepolia", chainId: 421614 },
+        ],
+    );
+});
+
+test("takePortfolioSnapshot refresh distinguishes same-address markets by reader deployment", async () => {
+    const calls: string[] = [];
+    const applied: string[] = [];
+
+    const monadMarket = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Shared Address Market",
+        chain: "monad-mainnet",
+        reader: {
+            batchKey: "monad-mainnet:shared-address-reader",
+            getAllDynamicState: async (account: string) => {
+                calls.push(`monad:${account}`);
+                return {
+                    dynamicMarket: [createRefreshDynamicMarket(MARKET_A, monadMarket.tokens[0]!.address)],
+                    userData: {
+                        markets: [createRefreshUserMarket(MARKET_A, monadMarket.tokens[0]!.address)],
+                    },
+                };
+            },
+        },
+        applyState: (dynamic, user) => applied.push(`monad:${dynamic.address}:${user.address}`),
+    });
+    const arbMarket = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Shared Address Market",
+        chain: "arb-sepolia",
+        reader: {
+            batchKey: "arb-sepolia:shared-address-reader",
+            getAllDynamicState: async (account: string) => {
+                calls.push(`arb:${account}`);
+                return {
+                    dynamicMarket: [createRefreshDynamicMarket(MARKET_A, arbMarket.tokens[0]!.address)],
+                    userData: {
+                        markets: [createRefreshUserMarket(MARKET_A, arbMarket.tokens[0]!.address)],
+                    },
+                };
+            },
+        },
+        applyState: (dynamic, user) => applied.push(`arb:${dynamic.address}:${user.address}`),
+    });
+
+    const snapshot = await takePortfolioSnapshot(OTHER_ACCOUNT as any, {
+        markets: [monadMarket, arbMarket],
+        refresh: true,
+        allowMixedChains: true,
+    });
+
+    assert.deepEqual(calls, [
+        `monad:${OTHER_ACCOUNT}`,
+        `arb:${OTHER_ACCOUNT}`,
+    ]);
+    assert.deepEqual(applied, [
+        `monad:${MARKET_A}:${MARKET_A}`,
+        `arb:${MARKET_A}:${MARKET_A}`,
+    ]);
+    assert.equal(monadMarket.account, OTHER_ACCOUNT);
+    assert.equal(arbMarket.account, OTHER_ACCOUNT);
+    assert.deepEqual(
+        snapshot.markets.map((market) => ({
+            address: market.marketAddress,
+            chain: market.chain,
+            chainId: market.chainId,
+        })),
+        [
+            { address: MARKET_A, chain: "monad-mainnet", chainId: 143 },
+            { address: MARKET_A, chain: "arb-sepolia", chainId: 421614 },
+        ],
+    );
 });
 
 test("snapshotMarket reports collateral token amounts as assets and exposes raw shares separately", () => {
@@ -260,6 +449,7 @@ test("takePortfolioSnapshot refresh groups explicit markets by deployment key", 
     const snapshot = await takePortfolioSnapshot(ACCOUNT as any, {
         markets: [marketA, marketB, marketC],
         refresh: true,
+        allowMixedChains: true,
     });
 
     assert.equal(snapshot.chain, "multi");
@@ -343,6 +533,39 @@ test("takePortfolioSnapshot refresh fails closed when a refreshed market payload
     );
 });
 
+test("takePortfolioSnapshot refresh rejects duplicate market rows before applying state", async () => {
+    const applied: string[] = [];
+    const market = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Duplicate Market",
+        chain: "monad-mainnet",
+        reader: {
+            batchKey: "monad-mainnet:duplicate-reader",
+            getAllDynamicState: async () => ({
+                dynamicMarket: [
+                    createRefreshDynamicMarket(MARKET_A, market.tokens[0]!.address),
+                    createRefreshDynamicMarket(MARKET_A, market.tokens[0]!.address),
+                ],
+                userData: {
+                    markets: [createRefreshUserMarket(MARKET_A, market.tokens[0]!.address)],
+                },
+            }),
+        },
+        applyState: (dynamic, user) => applied.push(`${dynamic.address}:${user.address}`),
+    });
+
+    await assert.rejects(
+        () => takePortfolioSnapshot(OTHER_ACCOUNT as any, {
+            markets: [market],
+            refresh: true,
+        }),
+        /Duplicate dynamic market data for .* during snapshot refresh/i,
+    );
+
+    assert.deepEqual(applied, []);
+    assert.equal(market.account, ACCOUNT);
+});
+
 test("takePortfolioSnapshot refresh commits no partial state when a later grouped market is missing", async () => {
     const applied: string[] = [];
     const reader = {
@@ -371,6 +594,7 @@ test("takePortfolioSnapshot refresh commits no partial state when a later groupe
         () => takePortfolioSnapshot(OTHER_ACCOUNT as any, {
             markets: [marketA, marketB],
             refresh: true,
+            allowMixedChains: true,
         }),
         /Fresh snapshot refresh missing market state/i,
     );
@@ -412,6 +636,7 @@ test("takePortfolioSnapshot refresh commits no partial state when a later reader
         () => takePortfolioSnapshot(OTHER_ACCOUNT as any, {
             markets: [marketA, marketB],
             refresh: true,
+            allowMixedChains: true,
         }),
         /later reader failed/i,
     );
@@ -491,6 +716,52 @@ test("takePortfolioSnapshot rejects full caches bound to a different account unl
         }),
         /cache is bound to 0x00000000000000000000000000000000000000bb/i,
     );
+});
+
+test("takePortfolioSnapshot preflights full-cache accounts before promoting summary markets", async () => {
+    let scope: "summary" | "full" = "summary";
+    let reloads = 0;
+
+    const summaryMarket = createSnapshotMarket({
+        address: MARKET_A,
+        name: "Summary Market",
+        chain: "monad-mainnet",
+        reader: {
+            batchKey: "monad-mainnet:summary-preflight-reader",
+            getMarketStates: async () => {
+                reloads += 1;
+                return {
+                    dynamicMarkets: [createRefreshDynamicMarket(MARKET_A, summaryMarket.tokens[0]!.address)],
+                    userMarkets: [createRefreshUserMarket(MARKET_A, summaryMarket.tokens[0]!.address)],
+                };
+            },
+        },
+        applyState: () => {
+            scope = "full";
+        },
+    });
+    Object.defineProperty(summaryMarket, "userDataScope", {
+        get: () => scope,
+        configurable: true,
+    });
+
+    const wrongAccountMarket = createSnapshotMarket({
+        address: MARKET_B,
+        name: "Wrong Account Market",
+        chain: "monad-mainnet",
+        account: OTHER_ACCOUNT,
+    });
+
+    await assert.rejects(
+        () => takePortfolioSnapshot(ACCOUNT as any, {
+            markets: [summaryMarket, wrongAccountMarket],
+        }),
+        /cache is bound to 0x00000000000000000000000000000000000000bb/i,
+    );
+
+    assert.equal(reloads, 0);
+    assert.equal(scope, "summary");
+    assert.equal(summaryMarket.account, ACCOUNT);
 });
 
 test("takePortfolioSnapshot promotes summary-scoped markets back to full user data", async () => {

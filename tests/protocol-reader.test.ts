@@ -320,6 +320,63 @@ test("same-chain readers with different providers keep static cache isolated", a
     assert.equal(callsB, 1);
 });
 
+test("same-chain readers with the same provider share static cache by deployment key", async () => {
+    const provider = { label: "shared-provider" } as any;
+    let callsA = 0;
+    let callsB = 0;
+
+    const readerA = new ProtocolReader(MARKET as any, provider, "monad-mainnet");
+    readerA.contract = {
+        getStaticMarketData: async () => {
+            callsA += 1;
+            return [createRawStaticMarket(MARKET, TOKEN)];
+        },
+    } as any;
+
+    const readerB = new ProtocolReader(MARKET as any, provider, "monad-mainnet");
+    readerB.contract = {
+        getStaticMarketData: async () => {
+            callsB += 1;
+            throw new Error("reader B should reuse reader A's static cache");
+        },
+    } as any;
+
+    const first = await readerA.getStaticMarketData();
+    const second = await readerB.getStaticMarketData();
+
+    assert.equal(readerA.batchKey, readerB.batchKey);
+    assert.equal(first[0]?.address, MARKET);
+    assert.deepEqual(second, first);
+    assert.equal(callsA, 1);
+    assert.equal(callsB, 0);
+});
+
+test("getStaticMarketData evicts failed cache promises before retry", async () => {
+    const provider = { label: "flaky-provider" } as any;
+    const reader = new ProtocolReader(MARKET as any, provider, "monad-mainnet");
+    let calls = 0;
+
+    reader.contract = {
+        getStaticMarketData: async () => {
+            calls += 1;
+            if (calls === 1) {
+                throw new Error("transient static market failure");
+            }
+
+            return [createRawStaticMarket(MARKET_B, TOKEN_B)];
+        },
+    } as any;
+
+    await assert.rejects(
+        () => reader.getStaticMarketData(),
+        /transient static market failure/,
+    );
+    const retry = await reader.getStaticMarketData();
+
+    assert.equal(calls, 2);
+    assert.equal(retry[0]?.address, MARKET_B);
+});
+
 test("getStaticMarketData forceRefresh bypasses the short-lived cache", async () => {
     const reader = createReader();
     let calls = 0;
@@ -1002,4 +1059,76 @@ test("maxRedemptionOf defaults bufferTime to 0n when not provided", async () => 
     assert.equal(result.maxCollateralizedShares, 555n);
     assert.equal(result.maxUncollateralizedShares, 111n);
     assert.equal(result.errorCodeHit, false);
+});
+
+test("token reader guard allows same un-namespaced reader instance", async () => {
+    const reader = createReader();
+    setReaderKeys(reader, MARKET, null);
+    reader.contract = {
+        maxRedemptionOf: async () => [777n, 222n, false],
+    } as any;
+    const ctoken = {
+        address: TOKEN,
+        market: {
+            address: MARKET,
+            reader,
+            setup: { chain: "monad-mainnet" },
+        },
+    } as any;
+
+    const result = await reader.maxRedemptionOf(ACCOUNT as any, ctoken, 180n);
+
+    assert.equal(result.maxCollateralizedShares, 777n);
+    assert.equal(result.maxUncollateralizedShares, 222n);
+});
+
+test("token reader guard allows distinct reader objects only when their deployment key matches", async () => {
+    const reader = createReader();
+    const tokenReader = createReader();
+    setReaderKeys(reader, MARKET, "monad-mainnet");
+    setReaderKeys(tokenReader, MARKET, "monad-mainnet");
+    reader.contract = {
+        maxRedemptionOf: async () => [333n, 111n, false],
+    } as any;
+    const ctoken = {
+        address: TOKEN,
+        market: {
+            address: MARKET,
+            reader: tokenReader,
+            setup: { chain: "monad-mainnet" },
+        },
+    } as any;
+
+    const result = await reader.maxRedemptionOf(ACCOUNT as any, ctoken, 60n);
+
+    assert.equal(result.maxCollateralizedShares, 333n);
+    assert.equal(result.maxUncollateralizedShares, 111n);
+});
+
+test("token reader guard fails closed for same-address un-namespaced reader clones", async () => {
+    const reader = createReader();
+    const foreignReader = createReader();
+    setReaderKeys(reader, MARKET, null);
+    setReaderKeys(foreignReader, MARKET, null);
+    let contractCalled = false;
+    reader.contract = {
+        maxRedemptionOf: async () => {
+            contractCalled = true;
+            throw new Error("reader guard should run before RPC");
+        },
+    } as any;
+    const ctoken = {
+        address: TOKEN,
+        market: {
+            address: MARKET_B,
+            reader: foreignReader,
+            setup: { chain: "arb-sepolia" },
+        },
+    } as any;
+
+    await assert.rejects(
+        () => reader.maxRedemptionOf(ACCOUNT as any, ctoken, 180n),
+        /ProtocolReader .* cannot read redemption token .* from market .* on arb-sepolia/i,
+    );
+    assert.equal(contractCalled, false);
 });

@@ -115,7 +115,7 @@ export class OptimizerReader {
 
     private shouldFallbackToViewOnlyOptimizerReads(error: any): boolean {
         const message = String(error?.shortMessage ?? error?.reason ?? error?.message ?? error);
-        return /static|state|write|non-view|call exception|execution reverted/i.test(message);
+        return /non-view|static.*write|write.*static|state write/i.test(message);
     }
 
     private async getOptimizerMarketDataViewOnly(optimizer: address): Promise<OptimizerMarketData> {
