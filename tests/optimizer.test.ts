@@ -3,7 +3,8 @@ config({ quiet: true });
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert';
 import { ethers, ContractFactory } from 'ethers';
-import { address, OptimizerReader } from '../src';
+import Decimal from 'decimal.js';
+import { address, ERC20, LendingOptimizer, OptimizerReader } from '../src';
 import { TestFramework } from './utils/TestFramework';
 import { setNativeBalance } from './utils/helper';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -87,6 +88,21 @@ function assertApproxBigInt(actual: bigint, expected: bigint, tolerance: bigint,
     );
 }
 
+function decimalToRaw(amount: Decimal, decimals: bigint): bigint {
+    return BigInt(
+        amount
+            .mul(Decimal(10).pow(Number(decimals)))
+            .floor()
+            .toFixed(0),
+    );
+}
+
+async function waitForTx(txLike: unknown) {
+    if (txLike && typeof (txLike as { wait?: () => Promise<unknown> }).wait === 'function') {
+        await (txLike as { wait: () => Promise<unknown> }).wait();
+    }
+}
+
 const FORK_SKIP = (!process.env.DEPLOYER_PRIVATE_KEY || !process.env.TEST_RPC)
     ? 'Fork env not configured: set DEPLOYER_PRIVATE_KEY and TEST_RPC in .env. See tests/README.md.'
     : optimizerReaderFixtureSkip();
@@ -101,6 +117,24 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
 
     function formatError(error: unknown): string {
         return error instanceof Error ? error.message : String(error);
+    }
+
+    function createSdkOptimizer() {
+        const asset = new ERC20(
+            framework.provider,
+            USDC,
+            undefined,
+            framework.curvance.setupConfigSnapshot.contracts.OracleManager as address,
+            framework.signer,
+        );
+        const sdkOptimizer = new LendingOptimizer(
+            optimizerAddress,
+            asset,
+            framework.provider,
+            framework.signer,
+        );
+
+        return { asset, sdkOptimizer };
     }
 
     before(async () => {
@@ -277,6 +311,68 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
         );
     });
 
+    test('SDK direct deposit and withdraw execute on the forked optimizer', async () => {
+        const { asset, sdkOptimizer } = createSdkOptimizer();
+        const depositAmount = Decimal(25);
+        const withdrawAmount = Decimal("0.000001");
+        const decimals = asset.decimals ?? await asset.fetchDecimals();
+        const withdrawRaw = decimalToRaw(withdrawAmount, decimals);
+
+        const assetBefore = await asset.balanceOf(account);
+        const sharesBefore = await sdkOptimizer.balanceOf(account);
+
+        await waitForTx(await asset.approve(optimizerAddress, depositAmount));
+        const depositTx = await sdkOptimizer.deposit(depositAmount, account);
+        assert.strictEqual(depositTx.to?.toLowerCase(), optimizerAddress.toLowerCase());
+        await depositTx.wait();
+
+        const assetAfterDeposit = await asset.balanceOf(account);
+        const sharesAfterDeposit = await sdkOptimizer.balanceOf(account);
+        assert(assetAfterDeposit < assetBefore, 'USDC balance should decrease after SDK optimizer deposit');
+        assert(sharesAfterDeposit > sharesBefore, 'optimizer shares should increase after SDK optimizer deposit');
+        assert(
+            await sdkOptimizer.maxWithdraw(account) >= withdrawRaw,
+            'SDK optimizer deposit should make the requested withdraw amount available',
+        );
+
+        const withdrawTx = await sdkOptimizer.withdraw(withdrawAmount, account, account);
+        assert.strictEqual(withdrawTx.to?.toLowerCase(), optimizerAddress.toLowerCase());
+        await withdrawTx.wait();
+
+        const assetAfterWithdraw = await asset.balanceOf(account);
+        const sharesAfterWithdraw = await sdkOptimizer.balanceOf(account);
+        assert(assetAfterWithdraw > assetAfterDeposit, 'USDC balance should increase after SDK optimizer withdraw');
+        assert(sharesAfterWithdraw < sharesAfterDeposit, 'optimizer shares should decrease after SDK optimizer withdraw');
+    });
+
+    test('SDK direct deposit and exact-share redeem execute on the forked optimizer', async () => {
+        const { asset, sdkOptimizer } = createSdkOptimizer();
+        const depositAmount = Decimal(15);
+
+        const assetBefore = await asset.balanceOf(account);
+        const sharesBefore = await sdkOptimizer.balanceOf(account);
+
+        await waitForTx(await asset.approve(optimizerAddress, depositAmount));
+        const depositTx = await sdkOptimizer.deposit(depositAmount, account);
+        assert.strictEqual(depositTx.to?.toLowerCase(), optimizerAddress.toLowerCase());
+        await depositTx.wait();
+
+        const assetAfterDeposit = await asset.balanceOf(account);
+        const sharesAfterDeposit = await sdkOptimizer.balanceOf(account);
+        const mintedShares = sharesAfterDeposit - sharesBefore;
+        assert(assetAfterDeposit < assetBefore, 'USDC balance should decrease after SDK optimizer deposit');
+        assert(mintedShares > 0n, 'SDK optimizer deposit should mint shares');
+
+        const redeemTx = await sdkOptimizer.redeem(mintedShares, account, account);
+        assert.strictEqual(redeemTx.to?.toLowerCase(), optimizerAddress.toLowerCase());
+        await redeemTx.wait();
+
+        const assetAfterRedeem = await asset.balanceOf(account);
+        const sharesAfterRedeem = await sdkOptimizer.balanceOf(account);
+        assert(assetAfterRedeem > assetAfterDeposit, 'USDC balance should increase after SDK optimizer redeem');
+        assert.strictEqual(sharesAfterRedeem, sharesBefore, 'redeeming exact minted shares should restore share balance');
+    });
+
     test('optimalRebalance returns actions for all markets', async () => {
         const { actions, bounds } = await reader.optimalRebalance(optimizerAddress);
 
@@ -309,6 +405,27 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
                 `Allocation bound for ${bound.cToken} exceeds 100%: ${bound.maxBps}`,
             );
         }
+    });
+
+    test('SDK full-share redeem clears the depositor optimizer balance', async () => {
+        const { asset, sdkOptimizer } = createSdkOptimizer();
+        const sharesBefore = await sdkOptimizer.balanceOf(account);
+        const assetBefore = await asset.balanceOf(account);
+        const totalAssetsBefore = await sdkOptimizer.totalAssets();
+
+        assert(sharesBefore > 0n, 'test account should have optimizer shares to redeem');
+
+        const redeemTx = await sdkOptimizer.redeem(sharesBefore, account, account);
+        assert.strictEqual(redeemTx.to?.toLowerCase(), optimizerAddress.toLowerCase());
+        await redeemTx.wait();
+
+        const sharesAfter = await sdkOptimizer.balanceOf(account);
+        const assetAfter = await asset.balanceOf(account);
+        const totalAssetsAfter = await sdkOptimizer.totalAssets();
+
+        assert.strictEqual(sharesAfter, 0n, 'full-share redeem should clear account optimizer shares');
+        assert(assetAfter > assetBefore, 'USDC balance should increase after full-share redeem');
+        assert(totalAssetsAfter < totalAssetsBefore, 'optimizer total assets should decrease after full-share redeem');
     });
 
     test('rebalance execution preserves totalAssets', {

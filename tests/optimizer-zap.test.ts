@@ -54,19 +54,7 @@ function decodeOptimizerZap(calldata: bytes) {
     };
 }
 
-async function runLiveOptimizerZap({
-    framework,
-    account,
-    inputTokenAddress,
-    inputSymbol,
-    amount,
-}: {
-    framework: TestFramework;
-    account: address;
-    inputTokenAddress: address;
-    inputSymbol: string;
-    amount: Decimal;
-}) {
+async function createLiveOptimizerContext(framework: TestFramework) {
     const contracts = getContractAddresses("monad-mainnet") as any;
     const optimizerAddress = contracts.Optimizers["cAUSD+"] as address;
     const optimizerZapperAddress = contracts.zappers.optimizerZapper as address;
@@ -81,16 +69,6 @@ async function runLiveOptimizerZap({
         framework.curvance.setupConfigSnapshot.contracts.OracleManager as address,
         framework.signer,
     );
-    const isNative = inputTokenAddress.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
-    const inputToken = isNative
-        ? null
-        : new ERC20(
-            framework.provider,
-            inputTokenAddress,
-            undefined,
-            framework.curvance.setupConfigSnapshot.contracts.OracleManager as address,
-            framework.signer,
-        );
     const optimizer = new LendingOptimizer(
         optimizerAddress,
         asset,
@@ -101,8 +79,62 @@ async function runLiveOptimizerZap({
             dexAgg: framework.curvance.dexAgg,
         },
     );
+
+    return {
+        asset,
+        optimizer,
+        optimizerAddress,
+        optimizerAsset,
+        optimizerZapperAddress,
+    };
+}
+
+async function waitForTx(txLike: unknown) {
+    if (txLike && typeof (txLike as { wait?: () => Promise<unknown> }).wait === "function") {
+        await (txLike as { wait: () => Promise<unknown> }).wait();
+    }
+}
+
+function decimalToRaw(amount: Decimal, decimals: bigint): bigint {
+    return BigInt(
+        amount
+            .mul(Decimal(10).pow(Number(decimals)))
+            .floor()
+            .toFixed(0),
+    );
+}
+
+async function runLiveOptimizerZap({
+    framework,
+    account,
+    inputTokenAddress,
+    inputSymbol,
+    amount,
+}: {
+    framework: TestFramework;
+    account: address;
+    inputTokenAddress: address;
+    inputSymbol: string;
+    amount: Decimal;
+}) {
+    const {
+        optimizer,
+        optimizerAddress,
+        optimizerAsset,
+        optimizerZapperAddress,
+    } = await createLiveOptimizerContext(framework);
+    const isNative = inputTokenAddress.toLowerCase() === NATIVE_ADDRESS.toLowerCase();
+    const inputToken = isNative
+        ? null
+        : new ERC20(
+            framework.provider,
+            inputTokenAddress,
+            undefined,
+            framework.curvance.setupConfigSnapshot.contracts.OracleManager as address,
+            framework.signer,
+        );
     const inputDecimals = inputToken == null ? 18n : inputToken.decimals ?? await inputToken.fetchDecimals();
-    const rawAmount = Decimal(amount).mul(Decimal(10).pow(Number(inputDecimals))).floor().toFixed(0);
+    const rawAmount = decimalToRaw(amount, inputDecimals);
     const zap = {
         type: "optimizer" as const,
         inputToken: inputTokenAddress,
@@ -115,7 +147,7 @@ async function runLiveOptimizerZap({
     const sharesBefore = await optimizer.balanceOf(account);
     const totalAssetsBefore = await optimizer.totalAssets();
     assert(
-        inputBefore >= BigInt(rawAmount),
+        inputBefore >= rawAmount,
         `Test account needs at least ${rawAmount} ${inputSymbol} base units, got ${inputBefore}`,
     );
 
@@ -124,22 +156,19 @@ async function runLiveOptimizerZap({
     assert.equal(decoded.optimizer.toLowerCase(), optimizerAddress.toLowerCase());
     assert.equal(decoded.depositAsWrappedNative, isNative);
     assert.equal(decoded.swap.inputToken.toLowerCase(), inputTokenAddress.toLowerCase());
-    assert.equal(decoded.swap.inputAmount, BigInt(rawAmount));
+    assert.equal(decoded.swap.inputAmount, rawAmount);
     assert.equal(decoded.swap.outputToken.toLowerCase(), optimizerAsset.toLowerCase());
     assert.equal(decoded.swap.target.toLowerCase(), chain_config["monad-mainnet"].services.dexAggregators.kyberSwap!.router.toLowerCase());
     assert.notEqual(decoded.swap.call, "0x");
     assert.equal(decoded.receiver.toLowerCase(), account.toLowerCase());
     assert.equal(built.zapper?.address.toLowerCase(), optimizerZapperAddress.toLowerCase());
     if (isNative) {
-        assert.equal(built.calldata_overrides.value, BigInt(rawAmount));
+        assert.equal(built.calldata_overrides.value, rawAmount);
     } else {
         assert.deepEqual(built.calldata_overrides, {});
     }
 
-    const approval = await optimizer.approveZapAsset(zap, amount);
-    if (approval && typeof approval.wait === "function") {
-        await approval.wait();
-    }
+    await waitForTx(await optimizer.approveZapAsset(zap, amount));
 
     const originalBuilder = optimizer.getZapDepositCalldata.bind(optimizer);
     (optimizer as any).getZapDepositCalldata = async () => built;
@@ -151,7 +180,7 @@ async function runLiveOptimizerZap({
     }
     assert.equal(tx.to?.toLowerCase(), optimizerZapperAddress.toLowerCase());
     if (isNative) {
-        assert.equal(tx.value, BigInt(rawAmount));
+        assert.equal(tx.value, rawAmount);
     }
     await tx.wait();
 
@@ -200,7 +229,7 @@ describe("Optimizer Zapper Monad fork", { skip: FORK_SKIP }, () => {
             account,
             inputTokenAddress: chain_config["monad-mainnet"].wrapped_native,
             inputSymbol: "WMON",
-            amount: new Decimal("10"),
+            amount: new Decimal("1"),
         });
     });
 
@@ -210,7 +239,7 @@ describe("Optimizer Zapper Monad fork", { skip: FORK_SKIP }, () => {
             account,
             inputTokenAddress: NATIVE_ADDRESS,
             inputSymbol: "MON",
-            amount: new Decimal("10"),
+            amount: new Decimal("1"),
         });
     });
 });
