@@ -57,6 +57,7 @@ test("test:transport includes every deterministic test file", () => {
         "dual-fork-switch.test.ts",
         "leverage.test.ts",
         "optimizer.test.ts",
+        "optimizer-zap.test.ts",
         "zap.test.ts",
     ]);
 
@@ -76,6 +77,7 @@ test("test:fork includes every env-backed fork test file", () => {
         "basic.test.ts",
         "arb-basic.test.ts",
         "optimizer.test.ts",
+        "optimizer-zap.test.ts",
         "leverage.test.ts",
         "zap.test.ts",
         "dual-fork-switch.test.ts",
@@ -819,7 +821,7 @@ test("LendingOptimizer default construction prefers an asset-bound provider over
     assert.match(constructorBody, /const assetSigner = provider == null && assetProvider != null/);
     assert.match(constructorBody, /assetProvider \?\? defaultReadProvider/);
     assert.match(constructorBody, /const canInheritDefaultSigner = provider == null && \(assetProvider == null \|\| assetProvider === defaultReadProvider\);/);
-    assert.match(constructorBody, /signer \?\? legacySigner \?\? assetSigner \?\?/);
+    assert.match(constructorBody, /explicitSigner \?\? legacySigner \?\? assetSigner \?\?/);
 });
 
 test("market-level user-cache reads stay behind full-user freshness guards", () => {

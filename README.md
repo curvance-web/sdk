@@ -701,7 +701,8 @@ const marketSnapshot = snapshotMarket(market)
 The `OptimizerReader` reads yield-rebalancing vaults that allocate across markets.
 
 ```ts
-import { ERC20, LendingOptimizer, OptimizerReader } from "curvance"
+import Decimal from "decimal.js"
+import { ERC20, LendingOptimizer, OptimizerReader, setupChain } from "curvance"
 
 const optimizerReader = new OptimizerReader(optimizerReaderAddress, provider)
 
@@ -724,11 +725,23 @@ await optimizerReader.isBad(optimizerAddress)
 // Returns bad cToken markets for the optimizer
 
 const asset = new ERC20(provider, assetAddress, undefined, undefined, signer)
-const vault = new LendingOptimizer(optimizerAddress, asset, provider, signer)
+const setup = await setupChain("monad-mainnet", signer)
+const vault = new LendingOptimizer(optimizerAddress, asset, provider, signer, {
+    setup: setup.setupConfigSnapshot,
+    dexAgg: setup.dexAgg,
+})
 
 await vault.deposit(amount, account)
 await vault.withdraw(amount, account, account)
 await vault.redeem(shares, account, account)
+
+const zap = {
+    type: "optimizer",
+    inputToken: usdcAddress,
+    slippage: new Decimal("0.01"),
+} as const
+await vault.approveZapAsset(zap, amount)
+await vault.deposit(amount, zap, account)
 ```
 
 ## ❯ TypeScript Types

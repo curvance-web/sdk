@@ -14,7 +14,8 @@
   "zappers": {
     "nativeVaultZapper": "0xF562745Ac9bf3466d5eD829819a27Ef0324EF407",
     "vaultZapper": "0x8DA05a1Ad927fFB0A6B0E045b11b94e8d2256366",
-    "simpleZapper": "0x7b01E1D9c403aAAF7d960202Fee913F48C43E53c"
+    "simpleZapper": "0x7b01E1D9c403aAAF7d960202Fee913F48C43E53c",
+    "optimizerZapper": "0x190FD44CCFF0Da43Fd60EB496236C3066011a3cA"
   },
   "VaultAggregator-AUSD-sAUSD": "0x73Af3E1848636D4DE6A61050D5487d6f09A7A1Be",
   "StaticPriceAggregator-loAZND": "0x6eCb16faf9b0c0F7098204e0FE685D2960b4C0Ba",
