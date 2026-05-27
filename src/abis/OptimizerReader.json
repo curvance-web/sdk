@@ -202,7 +202,17 @@
             "internalType": "uint256"
           },
           {
+            "name": "exchangeRateHighWatermark",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
             "name": "performanceFee",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "numApprovedMarkets",
             "type": "uint256",
             "internalType": "uint256"
           },

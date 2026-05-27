@@ -72,7 +72,9 @@ test("getOptimizerAPYBreakdown uses reader market data and weights Merkl rewards
             ],
             totalLiquidity: 150n,
             sharePrice: WAD,
+            exchangeRateHighWatermark: WAD,
             performanceFee: 0n,
+            numApprovedMarkets: 2n,
             apy: 35_000_000_000_000_000n,
         }];
     };
@@ -143,6 +145,7 @@ test("getOptimizerMarketData reads optimizer and cToken contracts directly", asy
         "function totalAssets() view returns (uint256)",
         "function exchangeRate() view returns (uint256)",
         "function exchangeRateUpdated() returns (uint256)",
+        "function exchangeRateHighWatermark() view returns (uint256)",
         "function fee() view returns (uint256)",
         "function getApprovedMarkets() view returns (address[])",
         "function allocationCaps(address cToken) view returns (uint256)",
@@ -157,6 +160,7 @@ test("getOptimizerMarketData reads optimizer and cToken contracts directly", asy
         totalAssets: optimizerIface.getFunction("totalAssets")!.selector,
         exchangeRate: optimizerIface.getFunction("exchangeRate")!.selector,
         exchangeRateUpdated: optimizerIface.getFunction("exchangeRateUpdated")!.selector,
+        exchangeRateHighWatermark: optimizerIface.getFunction("exchangeRateHighWatermark")!.selector,
         fee: optimizerIface.getFunction("fee")!.selector,
         getApprovedMarkets: optimizerIface.getFunction("getApprovedMarkets")!.selector,
         allocationCaps: optimizerIface.getFunction("allocationCaps")!.selector,
@@ -202,6 +206,8 @@ test("getOptimizerMarketData reads optimizer and cToken contracts directly", asy
                         return optimizerIface.encodeFunctionResult("exchangeRate", [456n]);
                     case selectors.exchangeRateUpdated:
                         throw new Error("direct reads must not call exchangeRateUpdated");
+                    case selectors.exchangeRateHighWatermark:
+                        return optimizerIface.encodeFunctionResult("exchangeRateHighWatermark", [789n]);
                     case selectors.fee:
                         return optimizerIface.encodeFunctionResult("fee", [7n]);
                     case selectors.getApprovedMarkets:
@@ -265,7 +271,9 @@ test("getOptimizerMarketData reads optimizer and cToken contracts directly", asy
         ],
         totalLiquidity: 150n,
         sharePrice: 456n,
+        exchangeRateHighWatermark: 789n,
         performanceFee: 7n,
+        numApprovedMarkets: 2n,
         apy: 999n,
     }]);
     assert.deepEqual(sortedCalls, [
@@ -273,6 +281,7 @@ test("getOptimizerMarketData reads optimizer and cToken contracts directly", asy
         `${OPTIMIZER.toLowerCase()}:allocationCaps`,
         `${OPTIMIZER.toLowerCase()}:asset`,
         `${OPTIMIZER.toLowerCase()}:exchangeRate`,
+        `${OPTIMIZER.toLowerCase()}:exchangeRateHighWatermark`,
         `${OPTIMIZER.toLowerCase()}:fee`,
         `${OPTIMIZER.toLowerCase()}:getApprovedMarkets`,
         `${OPTIMIZER.toLowerCase()}:totalAssets`,

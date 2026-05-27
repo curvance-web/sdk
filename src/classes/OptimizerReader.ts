@@ -9,6 +9,7 @@ const OPTIMIZER_VIEW_ABI = [
     "function asset() view returns (address)",
     "function totalAssets() view returns (uint256)",
     "function exchangeRate() view returns (uint256)",
+    "function exchangeRateHighWatermark() view returns (uint256)",
     "function fee() view returns (uint256)",
     "function getApprovedMarkets() view returns (address[])",
     "function allocationCaps(address cToken) view returns (uint256)",
@@ -40,7 +41,9 @@ export interface OptimizerMarketData {
     markets: OptimizerCTokenData[];
     totalLiquidity: bigint;
     sharePrice: bigint;
+    exchangeRateHighWatermark: bigint;
     performanceFee: bigint;
+    numApprovedMarkets: bigint;
     /** Pre-performance-fee weighted supply APY in WAD (1e18 = 100%). */
     apy: bigint;
 }
@@ -178,10 +181,18 @@ export class OptimizerReader {
     async getOptimizerMarketData(optimizers: address[]): Promise<OptimizerMarketData[]> {
         return Promise.all(optimizers.map(async (optimizer) => {
             const opt = new Contract(optimizer, OPTIMIZER_VIEW_ABI, this.provider) as any;
-            const [asset, totalAssets, sharePrice, performanceFee, markets] = await Promise.all([
+            const [
+                asset,
+                totalAssets,
+                sharePrice,
+                exchangeRateHighWatermark,
+                performanceFee,
+                markets,
+            ] = await Promise.all([
                 opt.asset(),
                 opt.totalAssets(),
                 opt.exchangeRate(),
+                opt.exchangeRateHighWatermark(),
                 opt.fee(),
                 opt.getApprovedMarkets(),
             ]);
@@ -220,7 +231,9 @@ export class OptimizerReader {
                 markets: marketRows,
                 totalLiquidity: marketRows.reduce((sum, market) => sum + market.liquidity, 0n),
                 sharePrice: BigInt(sharePrice),
+                exchangeRateHighWatermark: BigInt(exchangeRateHighWatermark),
                 performanceFee: BigInt(performanceFee),
+                numApprovedMarkets: BigInt((markets as address[]).length),
                 apy: await this.getOptimizerAPY(optimizer),
             };
         }));

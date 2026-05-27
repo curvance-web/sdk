@@ -56,8 +56,16 @@ function optimizerReaderFixtureSkip(): string | undefined {
         return 'OptimizerReader fixture is stale: getOptimizerMarketData must be view.';
     }
 
+    if (!optimizerDataFields.some((field) => field.name === 'exchangeRateHighWatermark')) {
+        return 'OptimizerReader fixture is stale: OptimizerMarketData is missing exchangeRateHighWatermark.';
+    }
+
     if (!optimizerDataFields.some((field) => field.name === 'apy')) {
         return 'OptimizerReader fixture is stale: OptimizerMarketData is missing apy.';
+    }
+
+    if (!optimizerDataFields.some((field) => field.name === 'numApprovedMarkets')) {
+        return 'OptimizerReader fixture is stale: OptimizerMarketData is missing numApprovedMarkets.';
     }
 
     if (!marketDataFields.includes('allocationCap') || !marketDataFields.includes('allocationCapUtilizationBps')) {
@@ -91,13 +99,22 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
     let optimizer: any;
     let optimizerAddress: address;
 
+    function formatError(error: unknown): string {
+        return error instanceof Error ? error.message : String(error);
+    }
+
     before(async () => {
-        framework = await TestFramework.init(process.env.DEPLOYER_PRIVATE_KEY as string, 'monad-mainnet', {
-            seedNativeBalance: true,
-            seedUnderlying: true,
-            snapshot: true,
-            log: true,
-        });
+        try {
+            framework = await TestFramework.init(process.env.DEPLOYER_PRIVATE_KEY as string, 'monad-mainnet', {
+                seedNativeBalance: true,
+                seedUnderlying: true,
+                snapshot: true,
+                log: true,
+            });
+        } catch (error) {
+            console.error(`[optimizer.test] fork setup failed: ${formatError(error)}`);
+            throw error;
+        }
         account = framework.account;
 
         // Impersonate DAOTimelock to grant permissions
@@ -148,7 +165,7 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
     });
 
     after(async () => {
-        await framework.destroy();
+        await framework?.destroy();
     });
 
     test('getOptimizerMarketData returns correct data', async () => {
@@ -177,7 +194,17 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
             'reader should preserve optimizer market order',
         );
         assert.strictEqual(entry.sharePrice, expectedSharePrice, 'reader sharePrice should match optimizer assets/supply');
+        assert.strictEqual(
+            entry.exchangeRateHighWatermark,
+            await optimizer.exchangeRateHighWatermark(),
+            'reader high watermark should match optimizer',
+        );
         assert.strictEqual(entry.performanceFee, BigInt(FEE_BPS), 'performanceFee should match deployment config');
+        assert.strictEqual(
+            entry.numApprovedMarkets,
+            BigInt(APPROVED_CTOKENS.length),
+            'reader numApprovedMarkets should match configured market count',
+        );
         assert.strictEqual(
             entry.apy,
             await reader.getOptimizerAPY(optimizerAddress),
@@ -190,6 +217,16 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
 
         const contractData = await readerContract.getFunction('getOptimizerMarketData')([optimizerAddress]);
         const contractEntry = contractData[0];
+        assert.strictEqual(
+            contractEntry.exchangeRateHighWatermark,
+            entry.exchangeRateHighWatermark,
+            'deployed reader high watermark should match SDK direct read',
+        );
+        assert.strictEqual(
+            contractEntry.numApprovedMarkets,
+            entry.numApprovedMarkets,
+            'deployed reader market count should match SDK direct read',
+        );
 
         for (const [index, market] of entry.markets.entries()) {
             const expectedCap = (BigInt(ALLOCATION_CAPS_BPS[index]!) * WAD) / BPS;

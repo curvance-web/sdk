@@ -5,6 +5,7 @@ import { TestFramework } from './TestFramework';
 import { setupChain } from '../../src/setup';
 
 export const MARKET_HOLD_PERIOD_SECS = 1200; // 20 minutes
+const TEST_RPC_PREFLIGHT_TIMEOUT_MS = Number(process.env.TEST_RPC_PREFLIGHT_TIMEOUT_MS ?? 10_000);
 
 const fresh = Wallet.createRandom();
 export const TEST_ACCOUNTS = [
@@ -39,13 +40,47 @@ export async function setNativeBalance(provider: JsonRpcProvider, targetAddress:
     await mineBlock(provider);
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+    let timeout: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+            reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+    });
+
+    try {
+        return await Promise.race([promise, timeoutPromise]);
+    } finally {
+        if (timeout != null) {
+            clearTimeout(timeout);
+        }
+    }
+}
+
 export const getTestSetup = async (private_key: string) => {
     const provider = new JsonRpcProvider(process.env.TEST_RPC);
     const wallet = new Wallet(private_key, provider);
+    let startingNonce: number;
+
+    try {
+        await withTimeout(
+            provider.send('eth_chainId', []),
+            TEST_RPC_PREFLIGHT_TIMEOUT_MS,
+            `TEST_RPC preflight (${process.env.TEST_RPC})`,
+        );
+        startingNonce = await withTimeout(
+            wallet.getNonce('latest'),
+            TEST_RPC_PREFLIGHT_TIMEOUT_MS,
+            `TEST_RPC nonce read (${process.env.TEST_RPC})`,
+        );
+    } catch (error) {
+        provider.destroy();
+        throw error;
+    }
 
     return {
         provider,
-        signer: new NonceManagerSigner(wallet, await wallet.getNonce('latest'))
+        signer: new NonceManagerSigner(wallet, startingNonce)
     };
 }
 
