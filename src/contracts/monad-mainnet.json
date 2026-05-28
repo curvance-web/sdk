@@ -257,7 +257,7 @@
   "Optimizers": {
     "cAUSD+": "0x37Bf94D8Af2Fbbf562Da5a3f1b0787b3515D10dd"
   },
-  "OptimizerReader": "0x2aE8D1f9b2bD10f03AEA27a95697380e1BE878D9",
+  "OptimizerReader": "0x6834b6DFbE949A4059266dB3055f353Cd956215A",
   "ProtocolReader": "0x55C7c1fe1DACB014aD3b21951728B5E580662268",
   "CombinedAggregator-ezETH": "0xd5F84C4497621768f3F08b65ad7019BdF183b1fd",
   "CombinedAggregator-earnAUSD": "0xf80CC9965d260d7cD96E41b9734F031279dCDf2f",
