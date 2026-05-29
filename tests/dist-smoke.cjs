@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { existsSync, mkdtempSync, readFileSync, rmSync } = require("node:fs");
+const { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { execFileSync } = require("node:child_process");
 const Module = require("node:module");
@@ -504,6 +504,32 @@ function npmPackInvocation(packDir) {
     };
 }
 
+function readPackMetadata(output, packDir) {
+    if (output.trim().length > 0) {
+        const [pack] = JSON.parse(output);
+        return pack;
+    }
+
+    const tarballs = readdirSync(packDir).filter((file) => file.endsWith(".tgz"));
+    assert.equal(tarballs.length, 1, "npm pack should create exactly one tarball");
+
+    const filename = tarballs[0];
+    const tarball = path.join(packDir, filename);
+    const listing = execFileSync("tar", ["-tzf", tarball], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+    });
+    const files = listing
+        .trim()
+        .split(/\r?\n/)
+        .map((file) => file.replace(/^package\//, ""))
+        .filter((file) => file.length > 0 && !file.endsWith("/"))
+        .map((file) => ({ path: file }));
+
+    return { filename, files };
+}
+
 function withPackedPackage(run) {
     const packDir = mkdtempSync(path.join(tmpdir(), "curvance-sdk-pack-"));
 
@@ -518,7 +544,7 @@ function withPackedPackage(run) {
                 stdio: ["ignore", "pipe", "pipe"],
             },
         );
-        const [pack] = JSON.parse(output);
+        const pack = readPackMetadata(output, packDir);
         const tarball = path.join(packDir, pack.filename);
         execFileSync("tar", ["-xzf", tarball, "-C", packDir], {
             cwd: repoRoot,
@@ -587,6 +613,7 @@ async function main() {
     assert.equal(typeof sdk.OracleManager, "function", "dist should export OracleManager");
     assert.equal(typeof sdk.PositionManager, "function", "dist should export PositionManager");
     assert.equal(typeof sdk.Zapper, "function", "dist should export Zapper");
+    assert.equal(typeof sdk.OptimizerZapper, "function", "dist should export OptimizerZapper");
     assert.equal(typeof sdk.NativeToken, "function", "dist should export NativeToken");
     assert.equal(typeof sdk.Api, "function", "dist should export Api reward helpers and types");
     assert.equal(typeof sdk.KyberSwap, "function", "dist should export KyberSwap");
@@ -607,6 +634,7 @@ async function main() {
     assert.equal(typeof packedSdk.PositionManager, "function", "packed package root should export PositionManager");
     assert.equal(typeof packedSdk.CToken, "function", "packed package root should export CToken");
     assert.equal(typeof packedSdk.Zapper, "function", "packed package root should export Zapper");
+    assert.equal(typeof packedSdk.OptimizerZapper, "function", "packed package root should export OptimizerZapper");
     assert.equal(typeof packedSdk.KyberSwap, "function", "packed package root should export KyberSwap");
     assert.equal(typeof packedSdk.UnsupportedDexAgg, "function", "packed package root should export UnsupportedDexAgg");
     assert.equal(typeof packedSdk.getActiveUserMarkets, "function", "packed package root should export active-user helpers");

@@ -7,6 +7,7 @@ export * from './Market';
 export * from './CToken';
 export * from './ERC20';
 export * from './Zapper';
+export * from './OptimizerZapper';
 export * from './Calldata';
 export * from './BorrowableCToken';
 export * from './NativeToken';

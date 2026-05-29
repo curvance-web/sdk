@@ -16,6 +16,7 @@ const SWAP_TARGET = "0x00000000000000000000000000000000000000d1" as address;
 
 const optimizerInterface = new Interface([
     "function deposit(uint256 assets,address receiver)",
+    "function maxRedeem(address owner) view returns (uint256)",
     "function withdraw(uint256 assets,address receiver,address owner)",
     "function redeem(uint256 shares,address receiver,address owner)",
     "function rebalance((address cToken,int256 assetsOrBps)[] actions,(address cToken,uint256 minBps,uint256 maxBps)[] bounds)",
@@ -27,9 +28,10 @@ const positionManagerInterface = new Interface([
     "function deleverage((address cToken,uint256 collateralAssets,address borrowableCToken,uint256 repayAssets,(address inputToken,uint256 inputAmount,address outputToken,address target,uint256 slippage,bytes call)[] swapActions,bytes auxData) action,uint256 slippage)",
 ]);
 
-function createLendingOptimizer(allowance: bigint = 10n ** 18n) {
+function createLendingOptimizer(allowance: bigint = 10n ** 18n, redeemableShares: bigint = 987_654_321n) {
     const sent: Array<{ to: string; data: string }> = [];
     const allowanceChecks: Array<{ owner: string; spender: string }> = [];
+    const maxRedeemCalls: string[] = [];
     const optimizer = Object.create(LendingOptimizer.prototype) as LendingOptimizer;
 
     (optimizer as any).address = OPTIMIZER;
@@ -51,9 +53,13 @@ function createLendingOptimizer(allowance: bigint = 10n ** 18n) {
     };
     (optimizer as any).contract = {
         interface: optimizerInterface,
+        maxRedeem: async (owner: string) => {
+            maxRedeemCalls.push(owner);
+            return redeemableShares;
+        },
     };
 
-    return { optimizer, sent, allowanceChecks };
+    return { optimizer, sent, allowanceChecks, maxRedeemCalls };
 }
 
 test("LendingOptimizer.deposit checks asset allowance and submits exact overloaded calldata", async () => {
@@ -116,6 +122,32 @@ test("OptimizerReader user shareBalance can execute an exact LendingOptimizer ma
     assert.equal(redeem[0], 987_654_321n);
     assert.equal(redeem[1].toLowerCase(), SIGNER.toLowerCase());
     assert.equal(redeem[2].toLowerCase(), SIGNER.toLowerCase());
+});
+
+test("LendingOptimizer.redeemAll uses maxRedeem and submits exact share calldata", async () => {
+    const { optimizer, sent, maxRedeemCalls } = createLendingOptimizer(10n ** 18n, 456_789n);
+
+    await optimizer.redeemAll(RECEIVER, OWNER);
+
+    assert.deepEqual(maxRedeemCalls.map(call => call.toLowerCase()), [OWNER.toLowerCase()]);
+    assert.equal(sent.length, 1);
+
+    const redeem = optimizerInterface.decodeFunctionData("redeem(uint256,address,address)", sent[0]!.data);
+    assert.equal(redeem[0], 456_789n);
+    assert.equal(redeem[1].toLowerCase(), RECEIVER.toLowerCase());
+    assert.equal(redeem[2].toLowerCase(), OWNER.toLowerCase());
+});
+
+test("LendingOptimizer.redeemAll rejects when no shares are redeemable", async () => {
+    const { optimizer, sent, maxRedeemCalls } = createLendingOptimizer(10n ** 18n, 0n);
+
+    await assert.rejects(
+        () => optimizer.redeemAll(),
+        /no shares are currently redeemable/,
+    );
+
+    assert.deepEqual(maxRedeemCalls.map(call => call.toLowerCase()), [SIGNER.toLowerCase()]);
+    assert.equal(sent.length, 0);
 });
 
 test("LendingOptimizer.rebalance submits exact optimizer-reader action and bound arrays", async () => {
