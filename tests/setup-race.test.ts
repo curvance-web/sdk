@@ -725,11 +725,18 @@ test("setupChain hydrates Merkl APY through the real chain/action-filtered oppor
                 };
             }
 
-            if (url.origin === "https://api.merkl.xyz" && url.pathname === "/v4/opportunities") {
-                assert.equal(url.searchParams.get("mainProtocolId"), "curvance");
-                assert.equal(url.searchParams.get("chainId"), "143");
+            let merklUrl: URL | null = null;
+            if (url.origin === "https://api2.curvance.com" && url.pathname === "/merkl/proxy") {
+                const proxiedUrl = url.searchParams.get("url");
+                assert.ok(proxiedUrl);
+                merklUrl = new URL(proxiedUrl);
+            }
 
-                if (url.searchParams.get("action") === "LEND") {
+            if (merklUrl?.origin === "https://api.merkl.xyz" && merklUrl.pathname === "/v4/opportunities") {
+                assert.equal(merklUrl.searchParams.get("mainProtocolId"), "curvance");
+                assert.equal(merklUrl.searchParams.get("chainId"), "143");
+
+                if (merklUrl.searchParams.get("action") === "LEND") {
                     return {
                         ok: true,
                         json: async () => [
@@ -784,7 +791,7 @@ test("setupChain hydrates Merkl APY through the real chain/action-filtered oppor
                     };
                 }
 
-                if (url.searchParams.get("action") === "BORROW") {
+                if (merklUrl.searchParams.get("action") === "BORROW") {
                     return {
                         ok: true,
                         json: async () => [

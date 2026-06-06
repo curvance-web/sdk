@@ -28,6 +28,15 @@ function jsonResponse(body) {
     };
 }
 
+function getProxiedMerklUrl(fetchUrl) {
+    const proxyUrl = new URL(fetchUrl);
+    assert.equal(proxyUrl.origin, "https://api2.curvance.com");
+    assert.equal(proxyUrl.pathname, "/merkl/proxy");
+    const merklUrl = proxyUrl.searchParams.get("url");
+    assert.ok(merklUrl);
+    return new URL(merklUrl);
+}
+
 async function withMockedKyberFetch(kyber, calldata, run) {
     const originalFetch = globalThis.fetch;
     let calls = 0;
@@ -2170,7 +2179,8 @@ async function main() {
             if (url.includes("/native_apy")) {
                 return jsonResponse({ native_apy: [] });
             }
-            if (url.startsWith("https://api.merkl.xyz/")) {
+            const merklUrl = getProxiedMerklUrl(url);
+            if (merklUrl.origin === "https://api.merkl.xyz" && merklUrl.pathname === "/v4/opportunities") {
                 return jsonResponse([]);
             }
 
@@ -2352,7 +2362,8 @@ async function main() {
         globalThis.fetch = async (input) => {
             const url = String(input);
             packedArbFetchUrls.push(url);
-            if (url.startsWith("https://api.merkl.xyz/")) {
+            const merklUrl = getProxiedMerklUrl(url);
+            if (merklUrl.origin === "https://api.merkl.xyz" && merklUrl.pathname === "/v4/opportunities") {
                 return jsonResponse([]);
             }
 
@@ -2389,7 +2400,7 @@ async function main() {
             "packed Arbitrum real boot should return the unsupported DEX adapter",
         );
         assert.deepEqual(
-            packedArbFetchUrls.map((url) => new URL(url).searchParams.get("chainId")),
+            packedArbFetchUrls.map((url) => getProxiedMerklUrl(url).searchParams.get("chainId")),
             ["421614", "421614"],
             "packed Arbitrum real boot should only make chain-scoped Merkl opportunity requests",
         );
@@ -2561,7 +2572,7 @@ async function main() {
             async (urls) => {
                 const opportunities = await packedSdk.fetchMerklOpportunities({ action: "LEND", chainId: 143 });
 
-                assert.deepEqual(urls.map((url) => new URL(url).searchParams.get("chainId")), ["143"]);
+                assert.deepEqual(urls.map((url) => getProxiedMerklUrl(url).searchParams.get("chainId")), ["143"]);
                 assert.deepEqual(
                     opportunities.map((opportunity) => opportunity.identifier),
                     ["dist-monad-lend", TOKEN_IN],
@@ -2676,7 +2687,7 @@ async function main() {
             ],
             async (urls) => {
                 const rewards = await packedSdk.fetchMerklUserRewards({ wallet: WALLET, chainId: 143 });
-                const url = new URL(urls[0]);
+                const url = getProxiedMerklUrl(urls[0]);
 
                 assert.equal(url.pathname, `/v4/users/${WALLET}/rewards`);
                 assert.equal(url.searchParams.get("chainId"), "143");
@@ -2726,7 +2737,7 @@ async function main() {
             ],
             async (urls) => {
                 const campaigns = await packedSdk.fetchMerklCampaignsBySymbol({ tokenSymbol: "WMON", chainId: 143 });
-                const url = new URL(urls[0]);
+                const url = getProxiedMerklUrl(urls[0]);
 
                 assert.equal(url.searchParams.get("mainProtocolId"), "curvance");
                 assert.equal(url.searchParams.get("tokenSymbol"), "WMON");
