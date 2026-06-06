@@ -1,6 +1,7 @@
 import { fetchWithTimeout, validateAddress } from "../validation";
 
 const MERKL_API_BASE_URL = 'https://api.merkl.xyz/v4';
+const MERKL_PROXY_URL = 'https://api2.curvance.com/merkl/proxy';
 const PROTOCOL_ID = 'curvance';
 
 export type MerklChainInfo = {
@@ -124,6 +125,12 @@ function validateOptionalChainId(chainId: number | undefined, context: string): 
         throw new Error(`Invalid chainId from ${context}: ${chainId}`);
     }
     return chainId;
+}
+
+function proxyMerklUrl(url: URL): string {
+    const proxyUrl = new URL(MERKL_PROXY_URL);
+    proxyUrl.searchParams.set('url', url.toString());
+    return proxyUrl.toString();
 }
 
 function isAddressLike(value: string): boolean {
@@ -545,7 +552,7 @@ export async function fetchMerklUserRewards({
         url.searchParams.set('chainId', String(validatedChainId));
     }
 
-    const response = await fetchWithTimeout(url.toString(), { signal: signal ?? null, cache: 'no-store' });
+    const response = await fetchWithTimeout(proxyMerklUrl(url), { signal: signal ?? null, cache: 'no-store' });
 
     if (!response.ok) {
         throw new Error('Failed to fetch Merkl rewards');
@@ -587,7 +594,7 @@ export async function fetchMerklCampaignsBySymbol({
         url.searchParams.set('chainId', String(validatedChainId));
     }
 
-    const response = await fetchWithTimeout(url.toString(), { signal: signal ?? null, cache: 'no-store' });
+    const response = await fetchWithTimeout(proxyMerklUrl(url), { signal: signal ?? null, cache: 'no-store' });
 
     if (!response.ok) {
         throw new Error('Failed to fetch Merkl campaigns');
@@ -619,7 +626,7 @@ export async function fetchMerklOpportunities({
         url.searchParams.set('chainId', String(validatedChainId));
     }
 
-    const response = await fetchWithTimeout(url.toString(), { signal: signal ?? null, cache: 'no-store' });
+    const response = await fetchWithTimeout(proxyMerklUrl(url), { signal: signal ?? null, cache: 'no-store' });
 
     if (!response.ok) {
         throw new Error('Failed to fetch Merkl opportunities');

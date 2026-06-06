@@ -460,6 +460,15 @@ test("Merkl reward and campaign lookups stay path-safe, protocol-scoped, and cha
 
     assert.match(source, /function validateOptionalChainId\(chainId: number \| undefined, context: string\)/);
     assert.match(source, /Number\.isSafeInteger\(chainId\) \|\| chainId <= 0/);
+    assert.match(source, /const MERKL_PROXY_URL = 'https:\/\/api2\.curvance\.com\/merkl\/proxy';/);
+    assert.match(source, /function proxyMerklUrl\(url: URL\): string/);
+    assert.match(source, /proxyUrl\.searchParams\.set\('url', url\.toString\(\)\);/);
+    assert.equal(
+        (source.match(/fetchWithTimeout\(proxyMerklUrl\(url\),/g) ?? []).length,
+        3,
+        "all Merkl fetches must use the Curvance proxy while preserving the original URL",
+    );
+    assert.doesNotMatch(source, /fetchWithTimeout\(url\.toString\(\)/);
     assert.match(rewardsBody, /const validatedWallet = validateAddress\(wallet, 'Merkl rewards wallet'\);/);
     assert.match(rewardsBody, /const validatedChainId = validateOptionalChainId\(chainId, 'Merkl rewards chainId'\);/);
     assert.match(rewardsBody, /`\$\{MERKL_API_BASE_URL\}\/users\/\$\{validatedWallet\}\/rewards`/);

@@ -21,6 +21,19 @@ function assertDecimalString(actual: Decimal | undefined, expected: string, mess
     assert.equal(actual?.toString(), expected, message);
 }
 
+function assertProxiedMerklUrl(requestedUrl: string | null): { proxyUrl: URL; merklUrl: URL; merklUrlString: string } {
+    assert.notEqual(requestedUrl, null);
+    const proxyUrl = new URL(requestedUrl!);
+    assert.equal(proxyUrl.origin, "https://api2.curvance.com");
+    assert.equal(proxyUrl.pathname, "/merkl/proxy");
+
+    const merklUrlString = proxyUrl.searchParams.get("url");
+    assert.notEqual(merklUrlString, null);
+    const merklUrl = new URL(merklUrlString!);
+    assert.equal(merklUrl.origin, "https://api.merkl.xyz");
+    return { proxyUrl, merklUrl, merklUrlString: merklUrlString! };
+}
+
 function merklOpportunity(overrides: Partial<MerklOpportunity> & Pick<MerklOpportunity, "identifier">): MerklOpportunity {
     const { identifier, ...rest } = overrides;
 
@@ -58,8 +71,13 @@ test("fetchMerklOpportunities forwards action and chainId in the request URL", a
 
     await fetchMerklOpportunities({ action: "LEND", chainId: 421614 });
 
-    assert.notEqual(requestedUrl, null);
-    const url = new URL(requestedUrl!);
+    const { proxyUrl, merklUrl, merklUrlString } = assertProxiedMerklUrl(requestedUrl);
+    assert.equal(proxyUrl.searchParams.get("url"), merklUrlString);
+    assert.equal(
+        merklUrlString,
+        "https://api.merkl.xyz/v4/opportunities?items=100&tokenTypes=TOKEN&mainProtocolId=curvance&action=LEND&chainId=421614",
+    );
+    const url = merklUrl;
     assert.equal(url.searchParams.get("mainProtocolId"), "curvance");
     assert.equal(url.searchParams.get("action"), "LEND");
     assert.equal(url.searchParams.get("chainId"), "421614");
@@ -806,8 +824,7 @@ test("fetchMerklUserRewards omits chainId instead of sending chainId=undefined",
         wallet: "0x00000000000000000000000000000000000000aa",
     }), []);
 
-    assert.notEqual(requestedUrl, null);
-    const url = new URL(requestedUrl!);
+    const { merklUrl: url } = assertProxiedMerklUrl(requestedUrl);
     assert.equal(url.searchParams.has("chainId"), false);
     assert.equal(url.toString().includes("undefined"), false);
 });
@@ -833,8 +850,8 @@ test("fetchMerklCampaignsBySymbol scopes requests by protocol and chain", async 
         [],
     );
 
-    assert.notEqual(requestedUrl, null);
-    const url = new URL(requestedUrl!);
+    const { proxyUrl, merklUrl: url } = assertProxiedMerklUrl(requestedUrl);
+    assert.equal(proxyUrl.searchParams.get("url"), url.toString());
     assert.equal(url.searchParams.get("mainProtocolId"), "curvance");
     assert.equal(url.searchParams.get("tokenSymbol"), "USDC");
     assert.equal(url.searchParams.get("chainId"), "143");
@@ -862,8 +879,7 @@ test("fetchMerklCampaignsBySymbol omits chainId for explicit all-chain lookups",
         [],
     );
 
-    assert.notEqual(requestedUrl, null);
-    const url = new URL(requestedUrl!);
+    const { merklUrl: url } = assertProxiedMerklUrl(requestedUrl);
     assert.equal(url.searchParams.get("mainProtocolId"), "curvance");
     assert.equal(url.searchParams.get("tokenSymbol"), "USDC");
     assert.equal(url.searchParams.has("chainId"), false);
