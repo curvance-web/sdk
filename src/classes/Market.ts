@@ -1313,13 +1313,12 @@ export class Market {
             const userData = userByAddress.get(market_address.toLowerCase());
 
             if(deploy_data == undefined) {
-                if (resolvedSetup.environment === "production-mainnet") {
-                    throw new Error(
-                        `Missing deployment metadata for market ${market_address} during ` +
-                        `${resolvedSetup.chain} production setup.`,
-                    );
-                }
-                console.warn(`Could not find deploy data for market: ${market_address}, skipping...`);
+                // No SDK metadata (name + plugin addresses) for this on-chain market, so it
+                // can't be operated anyway — skip rather than fail.
+                console.warn(
+                    `Skipping market ${market_address} (${resolvedSetup.chain}): ` +
+                    `no SDK deployment metadata.`,
+                );
                 continue;
             }
 

@@ -207,6 +207,121 @@ test("Market.getAll joins dynamic and user payloads by address during boot", asy
     assert.equal((markets[1]?.tokens[0] as any).cache.userAssetBalance, 22n);
 });
 
+test("Market.getAll skips on-chain markets without SDK deployment metadata instead of throwing", async () => {
+    Api.fetchNativeYields = async () => [];
+    merklModule.fetchMerklOpportunities = async () => [];
+
+    const UNLISTED_MARKET = "0x00000000000000000000000000000000000000d4";
+    const UNLISTED_TOKEN = "0x00000000000000000000000000000000000000d5";
+
+    const reader = {
+        getAllMarketData: async () => ({
+            staticMarket: [
+                createStaticMarket(MARKET_A, TOKEN_A),
+                createStaticMarket(UNLISTED_MARKET, UNLISTED_TOKEN),
+            ],
+            dynamicMarket: [
+                createDynamicMarket(MARKET_A, TOKEN_A, 111n),
+                createDynamicMarket(UNLISTED_MARKET, UNLISTED_TOKEN, 999n),
+            ],
+            userData: {
+                locks: [],
+                markets: [
+                    createUserMarket(MARKET_A, TOKEN_A, 11n),
+                    createUserMarket(UNLISTED_MARKET, UNLISTED_TOKEN, 99n),
+                ],
+            },
+        }),
+    } as any;
+
+    // monad-mainnet resolves to environment "production-mainnet" — the path that
+    // used to throw on a market missing from the deploy index.
+    const setup = createSetup();
+    assert.equal(
+        (setup as any).environment,
+        "production-mainnet",
+        "precondition: exercising the production-mainnet path",
+    );
+
+    const markets = await Market.getAll(
+        reader,
+        {} as any,
+        {} as any,
+        null,
+        ACCOUNT as any,
+        {},
+        {},
+        setup as any,
+    );
+
+    // Only MARKET_A is in createSetup().contracts.markets; the unlisted market must be
+    // skipped (not fatal), leaving the known market usable.
+    assert.equal(markets.length, 1, "unlisted market is skipped, not fatal");
+    assert.equal(markets[0]?.address, MARKET_A);
+    assert.ok(
+        !markets.some((m) => m.address.toLowerCase() === UNLISTED_MARKET.toLowerCase()),
+        "market with no deployment metadata must be excluded",
+    );
+});
+
+test("Market.getAll signals skipped markets account-independently (not gated on user position)", async () => {
+    Api.fetchNativeYields = async () => [];
+    merklModule.fetchMerklOpportunities = async () => [];
+
+    const UNLISTED_MARKET = "0x00000000000000000000000000000000000000d4";
+    const UNLISTED_TOKEN = "0x00000000000000000000000000000000000000d5";
+
+    const reader = {
+        getAllMarketData: async () => ({
+            staticMarket: [
+                createStaticMarket(MARKET_A, TOKEN_A),
+                createStaticMarket(UNLISTED_MARKET, UNLISTED_TOKEN),
+            ],
+            dynamicMarket: [
+                createDynamicMarket(MARKET_A, TOKEN_A, 111n),
+                createDynamicMarket(UNLISTED_MARKET, UNLISTED_TOKEN, 999n),
+            ],
+            userData: {
+                locks: [],
+                markets: [
+                    createUserMarket(MARKET_A, TOKEN_A, 11n),
+                    // createUserMarket defaults userCollateral/userDebt to 0n → no position.
+                    createUserMarket(UNLISTED_MARKET, UNLISTED_TOKEN, 0n),
+                ],
+            },
+        }),
+    } as any;
+
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+        warnings.push(args.map((a) => String(a)).join(" "));
+    };
+
+    try {
+        // No connected account and no position in the unlisted market — the skip signal
+        // must still fire, proving it is account-independent (SDK-support condition only).
+        const markets = await Market.getAll(
+            reader,
+            {} as any,
+            {} as any,
+            null,
+            null,
+            {},
+            {},
+            createSetup() as any,
+        );
+        assert.equal(markets.length, 1);
+    } finally {
+        console.warn = originalWarn;
+    }
+
+    assert.ok(
+        warnings.some((w) => w.toLowerCase().includes(UNLISTED_MARKET.toLowerCase())),
+        "skipped market must produce an account-independent warning",
+    );
+});
+
 test("Market.getAll joins token rows by address within each market", async () => {
     Api.fetchNativeYields = async () => [];
     merklModule.fetchMerklOpportunities = async () => [];
@@ -422,10 +537,12 @@ test("Market.getAll fails clearly when a static market is missing dynamic state"
     );
 });
 
-test("Market.getAll fails production boot when deploy metadata is missing", async (t) => {
+test("Market.getAll skips, rather than fails, production boot when deploy metadata is missing", async (t) => {
     Api.fetchNativeYields = async () => [];
     merklModule.fetchMerklOpportunities = async () => [];
     const setup = createSetup({ contracts: { markets: {} } });
+    // `setup.environment` is captured as production-mainnet at createSetup() time; the
+    // global mutation/restore below only isolates chain_config for unrelated lookups.
     const originalEnvironment = chain_config["monad-mainnet"].environment;
     (chain_config["monad-mainnet"] as any).environment = "testnet";
     t.after(() => {
@@ -443,19 +560,22 @@ test("Market.getAll fails production boot when deploy metadata is missing", asyn
         }),
     } as any;
 
-    await assert.rejects(
-        () => Market.getAll(
-            reader,
-            {} as any,
-            {} as any,
-            null,
-            ACCOUNT as any,
-            {},
-            {},
-            setup as any,
-        ),
-        /Missing deployment metadata for market .* during monad-mainnet production setup/i,
+    assert.equal((setup as any).environment, "production-mainnet", "precondition: production env");
+
+    // Empty deploy index: the only on-chain market has no SDK metadata. Production boot
+    // must now SKIP it and resolve cleanly (previously this threw, blanking the load).
+    const markets = await Market.getAll(
+        reader,
+        {} as any,
+        {} as any,
+        null,
+        ACCOUNT as any,
+        {},
+        {},
+        setup as any,
     );
+
+    assert.equal(markets.length, 0, "unsupported market is skipped, boot does not fail");
 });
 
 test("Market.getAll rejects duplicate market identity rows before boot", async () => {
