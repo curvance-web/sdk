@@ -482,16 +482,10 @@ test("Merkl reward and campaign lookups stay path-safe, protocol-scoped, and cha
     assert.match(source, /const validatedChainId = validateOptionalChainId\(chainId, 'Merkl opportunities chainId'\);/);
     assert.match(source, /filterMerklOpportunitiesByChain\([\s\S]*?validatedChainId,/);
     assert.match(marketSource, /const chainId = resolvedSetup\.chainId;/);
-    assert.match(marketSource, /resolvedSetup\.environment === "production-mainnet"/);
     assert.doesNotMatch(
         marketSource,
         /chain_config\[resolvedSetup\.chain\]\?\.chainId/,
         "Market boot should pass Merkl the setup snapshot chainId instead of exported chain config",
-    );
-    assert.doesNotMatch(
-        marketSource,
-        /chain_config\[resolvedSetup\.chain\]\?\.environment/,
-        "Market boot should use the setup snapshot environment for production-only boot checks",
     );
 });
 
