@@ -299,6 +299,30 @@ describe('vault leverage behavior', () => {
         assert.deepEqual(convertCalls, [49_990n]);
     });
 
+    test('getVaultExpectedShares rejects a borrow token from a foreign market', async () => {
+        const depositToken = {
+            address: COLLATERAL,
+            market: {
+                address: '0x00000000000000000000000000000000000000a1',
+                setup: { chain: 'monad-mainnet' },
+                reader: { batchKey: 'monad-mainnet:vault-planner' },
+            },
+        } as any;
+        const foreignBorrowToken = {
+            address: DEBT,
+            market: {
+                address: '0x00000000000000000000000000000000000000b2',
+                setup: { chain: 'monad-mainnet' },
+                reader: { batchKey: 'monad-mainnet:other-deployment' },
+            },
+        } as any;
+
+        await assert.rejects(
+            () => PositionManager.getVaultExpectedShares(depositToken, foreignBorrowToken, Decimal(1)),
+            /with a different reader deployment/i,
+        );
+    });
+
     test('getVaultExpectedShares accepts same-deployment reader clones', async () => {
         const depositToken = Object.create(CToken.prototype) as CToken;
         const borrowToken = Object.create(CToken.prototype) as CToken;

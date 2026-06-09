@@ -23,6 +23,15 @@ function assertDecimalString(actual: Decimal | undefined, expected: string, mess
     assert.equal(actual?.toString(), expected, message);
 }
 
+// Merkl requests are routed through the Curvance proxy
+// (api2.curvance.com/merkl/proxy?url=<encoded>), so the real Merkl URL — carrying
+// action/chainId — is the encoded `url` param, not the top-level request URL.
+function resolveMerklRequestUrl(requestedUrl: string): URL {
+    const url = new URL(requestedUrl);
+    const proxied = url.searchParams.get("url");
+    return proxied ? new URL(proxied) : url;
+}
+
 function createStaticMarket(marketAddress: string, tokenAddress: string) {
     return {
         address: marketAddress as any,
@@ -319,6 +328,66 @@ test("Market.getAll signals skipped markets account-independently (not gated on 
     assert.ok(
         warnings.some((w) => w.toLowerCase().includes(UNLISTED_MARKET.toLowerCase())),
         "skipped market must produce an account-independent warning",
+    );
+});
+
+async function bootSingleMarket() {
+    Api.fetchNativeYields = async () => [];
+    merklModule.fetchMerklOpportunities = async () => [];
+    const reader = {
+        getAllMarketData: async () => ({
+            staticMarket: [createStaticMarket(MARKET_A, TOKEN_A)],
+            dynamicMarket: [createDynamicMarket(MARKET_A, TOKEN_A, 111n)],
+            userData: { locks: [], markets: [createUserMarket(MARKET_A, TOKEN_A, 11n)] },
+        }),
+    } as any;
+    const markets = await Market.getAll(
+        reader,
+        {} as any,
+        {} as any,
+        null,
+        ACCOUNT as any,
+        {},
+        {},
+        createSetup() as any,
+    );
+    return markets[0]!;
+}
+
+// A foreign token whose `.market` differs only by address (same reader + chain), so
+// the ownership guards must reject it solely on market identity.
+function foreignMarketToken(market: any) {
+    return {
+        address: TOKEN_B,
+        market: { address: MARKET_B, reader: market.reader, setup: { chain: "monad-mainnet" } },
+    } as any;
+}
+
+test("previewAssetImpact rejects a collateral token from a foreign market before reader RPC", async () => {
+    const market = await bootSingleMarket();
+    const debtToken = market.tokens[0] as any;
+
+    await assert.rejects(
+        () =>
+            (market as any).previewAssetImpact(
+                ACCOUNT as any,
+                foreignMarketToken(market),
+                debtToken,
+                new Decimal(1),
+                new Decimal(0),
+                0 as any,
+            ),
+        /belongs to market .* not market .* with the same reader deployment/i,
+    );
+});
+
+test("CToken.previewLeverageDown rejects a borrow token from a foreign market", async () => {
+    const market = await bootSingleMarket();
+    const ctoken = market.tokens[0] as any;
+
+    assert.throws(
+        () => ctoken.previewLeverageDown(new Decimal("1.5"), new Decimal("2"), foreignMarketToken(market)),
+        /belongs to market .* not market .* with the same reader deployment/i,
     );
 });
 
@@ -822,7 +891,7 @@ test("Market.getAll consumes Merkl chain filtering through the real opportunity 
                     : input.url;
         requestedUrls.push(requestedUrl);
 
-        const url = new URL(requestedUrl);
+        const url = resolveMerklRequestUrl(requestedUrl);
         const action = url.searchParams.get("action");
         const body = action === "LEND"
             ? [
@@ -969,7 +1038,7 @@ test("Market.getAll consumes Merkl chain filtering through the real opportunity 
 
     const requestsByAction = new Map(
         requestedUrls.map((request) => {
-            const url = new URL(request);
+            const url = resolveMerklRequestUrl(request);
             return [url.searchParams.get("action"), url] as const;
         }),
     );

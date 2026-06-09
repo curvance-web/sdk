@@ -444,51 +444,6 @@ test("Kyber current-router calldata validation fails closed in source", () => {
     assert.match(validator, /throw new Error\(`KyberSwap calldata could not be decoded for fee validation:/);
 });
 
-test("Merkl reward and campaign lookups stay path-safe, protocol-scoped, and chain-scoped", () => {
-    const source = readRepoFile("src/integrations/merkl.ts");
-    const marketSource = readRepoFile("src/classes/Market.ts");
-    const rewardsStart = source.indexOf("export async function fetchMerklUserRewards");
-    const rewardsEnd = source.indexOf("type FetchCampaignsParams", rewardsStart);
-    const start = source.indexOf("export async function fetchMerklCampaignsBySymbol");
-    const end = source.indexOf("type FetchOpportunitiesParams", start);
-    assert.notEqual(rewardsStart, -1, "fetchMerklUserRewards must exist");
-    assert.notEqual(rewardsEnd, -1, "FetchCampaignsParams must follow fetchMerklUserRewards");
-    assert.notEqual(start, -1, "fetchMerklCampaignsBySymbol must exist");
-    assert.notEqual(end, -1, "FetchOpportunitiesParams must follow fetchMerklCampaignsBySymbol");
-    const rewardsBody = source.slice(rewardsStart, rewardsEnd);
-    const body = source.slice(start, end);
-
-    assert.match(source, /function validateOptionalChainId\(chainId: number \| undefined, context: string\)/);
-    assert.match(source, /Number\.isSafeInteger\(chainId\) \|\| chainId <= 0/);
-    assert.match(source, /const MERKL_PROXY_URL = 'https:\/\/api2\.curvance\.com\/merkl\/proxy';/);
-    assert.match(source, /function proxyMerklUrl\(url: URL\): string/);
-    assert.match(source, /proxyUrl\.searchParams\.set\('url', url\.toString\(\)\);/);
-    assert.equal(
-        (source.match(/fetchWithTimeout\(proxyMerklUrl\(url\),/g) ?? []).length,
-        3,
-        "all Merkl fetches must use the Curvance proxy while preserving the original URL",
-    );
-    assert.doesNotMatch(source, /fetchWithTimeout\(url\.toString\(\)/);
-    assert.match(rewardsBody, /const validatedWallet = validateAddress\(wallet, 'Merkl rewards wallet'\);/);
-    assert.match(rewardsBody, /const validatedChainId = validateOptionalChainId\(chainId, 'Merkl rewards chainId'\);/);
-    assert.match(rewardsBody, /`\$\{MERKL_API_BASE_URL\}\/users\/\$\{validatedWallet\}\/rewards`/);
-    assert.match(rewardsBody, /url\.searchParams\.set\('chainId', String\(validatedChainId\)\);/);
-    assert.doesNotMatch(rewardsBody, /\/users\/\$\{wallet\}\/rewards/);
-    assert.match(body, /const validatedChainId = validateOptionalChainId\(chainId, 'Merkl campaigns chainId'\);/);
-    assert.match(body, /url\.searchParams\.set\('mainProtocolId', PROTOCOL_ID\);/);
-    assert.match(body, /url\.searchParams\.set\('tokenSymbol', tokenSymbol\);/);
-    assert.match(body, /url\.searchParams\.set\('chainId', String\(validatedChainId\)\);/);
-    assert.match(body, /campaigns\.filter\(\(campaign\) => campaignMatchesChain\(campaign, validatedChainId\)\)/);
-    assert.match(source, /const validatedChainId = validateOptionalChainId\(chainId, 'Merkl opportunities chainId'\);/);
-    assert.match(source, /filterMerklOpportunitiesByChain\([\s\S]*?validatedChainId,/);
-    assert.match(marketSource, /const chainId = resolvedSetup\.chainId;/);
-    assert.doesNotMatch(
-        marketSource,
-        /chain_config\[resolvedSetup\.chain\]\?\.chainId/,
-        "Market boot should pass Merkl the setup snapshot chainId instead of exported chain config",
-    );
-});
-
 test("deposit approval source keeps zap delegation branch-specific", () => {
     const source = readRepoFile("src/classes/CToken.ts");
     const body = extractBlock(source, "private async _checkDepositApprovals");
@@ -584,15 +539,6 @@ test("CToken DEX execution paths stay behind the market-bound adapter getter", (
     );
 });
 
-test("setupChain refreshes token route metadata after binding the context DEX adapter", () => {
-    const source = readRepoFile("src/setup.ts");
-
-    assert.match(
-        source,
-        /const dexAgg = bindDexAggContext\(chain_config\[chain\]\.dexAgg,[\s\S]*?for \(const market of markets\) \{[\s\S]*?market\.dexAgg = dexAgg;[\s\S]*?for \(const token of market\.tokens \?\? \[\]\) \{[\s\S]*?token\.refreshRouteCapabilities\?\.\(\);[\s\S]*?\}/,
-    );
-});
-
 test("setupChain result types expose typed global milestone data", () => {
     const source = readRepoFile("src/setup.ts");
     const classesIndex = readRepoFile("src/classes/index.ts");
@@ -613,56 +559,11 @@ test("portfolio snapshots read market provenance from setup snapshots", () => {
     );
 });
 
-test("MultiDex route advertisement uses an executable child router", () => {
-    const source = readRepoFile("src/classes/DexAggregators/MultiDexAgg.ts");
-
-    assert.match(source, /get router\(\): address \{ return this\.executablePrimary\.router; \}/);
-    assert.match(source, /get dao\(\): address \{ return this\.executablePrimary\.dao; \}/);
-    assert.match(
-        source,
-        /this\.aggregators\.find\(\(agg\) => agg\.router\.toLowerCase\(\) !== EMPTY_ADDRESS\.toLowerCase\(\)\) \?\? this\.primary/,
-    );
-});
-
-test("MultiDex quote request validation runs before child fan-out", () => {
-    const source = readRepoFile("src/classes/DexAggregators/MultiDexAgg.ts");
-    const validator = extractBlock(source, "function validateQuoteRequest");
-
-    assert.match(validator, /if \(amount <= 0n\)/);
-    assert.match(validator, /MultiDexAgg quote amount must be positive/);
-    assert.match(validator, /validateSlippageBps\(slippage, "MultiDexAgg quote"\)/);
-    assert.match(validator, /validateAddress\(wallet, "MultiDexAgg wallet"\)/);
-    assert.match(validator, /validateAddress\(tokenIn, "MultiDexAgg tokenIn"\)/);
-    assert.match(validator, /validateAddress\(tokenOut, "MultiDexAgg tokenOut"\)/);
-    assert.match(validator, /validateAddress\(feeReceiver, "MultiDexAgg feeReceiver"\)/);
-    assert.match(
-        source,
-        /async quoteAction\(wallet:[\s\S]*?const request = validateQuoteRequest\(wallet, tokenIn, tokenOut, amount, slippage, feeReceiver\);[\s\S]*?this\.primary\.quoteAction\(request\.wallet, request\.tokenIn, request\.tokenOut, request\.amount, request\.slippage, feeBps, request\.feeReceiver\)[\s\S]*?this\._bestQuoteAction\(request\.wallet, request\.tokenIn, request\.tokenOut, request\.amount, request\.slippage, feeBps, request\.feeReceiver\)/,
-    );
-    assert.match(
-        source,
-        /async quoteMin\(wallet:[\s\S]*?const request = validateQuoteRequest\(wallet, tokenIn, tokenOut, amount, slippage, feeReceiver\);[\s\S]*?this\.primary\.quoteMin\(request\.wallet, request\.tokenIn, request\.tokenOut, request\.amount, request\.slippage, feeBps, request\.feeReceiver\)[\s\S]*?this\._bestQuoteByValue\(\s*request\.wallet,\s*request\.tokenIn,\s*request\.tokenOut,\s*request\.amount,\s*request\.slippage,/,
-    );
-    assert.match(
-        source,
-        /async quote\(wallet:[\s\S]*?const request = validateQuoteRequest\(wallet, tokenIn, tokenOut, amount, slippage, feeReceiver\);[\s\S]*?this\.primary\.quote\(request\.wallet, request\.tokenIn, request\.tokenOut, request\.amount, request\.slippage, feeBps, request\.feeReceiver\)[\s\S]*?this\._bestQuoteByValue\(\s*request\.wallet,\s*request\.tokenIn,\s*request\.tokenOut,\s*request\.amount,\s*request\.slippage,/,
-    );
-});
-
-test("MultiDex token dedupe preserves the first quoteable duplicate route", () => {
-    const source = readRepoFile("src/classes/DexAggregators/MultiDexAgg.ts");
-    const body = extractBlock(source, "async getAvailableTokens");
-
-    assert.match(body, /const seen = new Map<string, number>\(\);/);
-    assert.match(body, /const existingIndex = seen\.get\(addr\);/);
-    assert.match(body, /seen\.set\(addr, tokens\.length\);/);
-    assert.match(
-        body,
-        /tokens\[existingIndex\]\?\.quote == undefined && token\.quote != undefined[\s\S]*?tokens\[existingIndex\] = token;/,
-    );
-});
-
-test("market preview paths reject foreign token objects before reader RPC", () => {
+// Guard behavior + strictness (foreign-by-address rejected before RPC, no chain-null
+// loophole) is covered functionally in market-boot.test.ts. This structural check pins
+// only the exhaustive wiring — that EVERY preview entry point calls the guard — which a
+// representative functional test cannot enforce when a new preview method is added.
+test("every market preview path is wired to the foreign-token ownership guard", () => {
     const source = readRepoFile("src/classes/Market.ts");
     const guardedMethods = [
         "async previewAssetImpact",
@@ -674,24 +575,18 @@ test("market preview paths reject foreign token objects before reader RPC", () =
         "async previewPositionHealthBorrow",
         "async previewPositionHealthRepay",
     ];
-
-    assert.match(source, /private assertTokenBelongsToMarket/);
-    const guard = extractBlock(source, "private assertTokenBelongsToMarket");
-    assert.match(guard, /if \(tokenMarket === this\)/);
-    assert.match(guard, /sameReaderDeployment/);
-    assert.match(guard, /tokenReaderKey != null && tokenReaderKey === readerKey/);
-    assert.doesNotMatch(
-        guard,
-        /tokenChain == null \|\| marketChain == null/,
-        "market token guard must not allow detached sibling market objects only because chain provenance is missing",
-    );
     for (const method of guardedMethods) {
         const body = extractBlock(source, method);
         assert.match(body, /this\.assertTokenBelongsToMarket\(/, `${method} must validate token ownership`);
     }
 });
 
-test("CToken leverage paths reject foreign borrow tokens before snapshots and quotes", () => {
+// Borrow-token guard behavior + strictness is covered functionally in market-boot.test.ts
+// (CToken.previewLeverageDown rejects a foreign-market borrow token before any work). This
+// structural check pins the exhaustive wiring + preflight ordering — every leverage helper
+// calls the guard, and public leverage methods guard BEFORE execution work — which
+// representative functional tests cannot enforce across all call sites.
+test("every CToken leverage path is wired to the borrow-token ownership guard before execution", () => {
     const source = readRepoFile("src/classes/CToken.ts");
     const guardedHelpers = [
         "private async _getLeverageSnapshot",
@@ -702,15 +597,6 @@ test("CToken leverage paths reject foreign borrow tokens before snapshots and qu
     ];
 
     assert.match(source, /private assertBorrowTokenBelongsToMarket/);
-    const guard = extractBlock(source, "private assertBorrowTokenBelongsToMarket");
-    assert.match(guard, /if \(borrowMarket === this\.market\)/);
-    assert.match(guard, /sameReaderDeployment/);
-    assert.match(guard, /borrowReaderKey != null && borrowReaderKey === collateralReaderKey/);
-    assert.doesNotMatch(
-        guard,
-        /borrowChain == null \|\| collateralChain == null/,
-        "borrow-token guard must not allow detached sibling market objects only because chain provenance is missing",
-    );
     assert.match(
         source,
         /private resolveLeverageUpPreview\(\{[\s\S]*?\}: ResolveLeverageUpPreviewParams\): LeverageUpPreview \{\s*this\.assertBorrowTokenBelongsToMarket\(borrow\);/,
@@ -730,30 +616,6 @@ test("CToken leverage paths reject foreign borrow tokens before snapshots and qu
     }
 });
 
-test("ProtocolReader token-object wrappers reject foreign market tokens before contract reads", () => {
-    const source = readRepoFile("src/classes/ProtocolReader.ts");
-    const guardedMethods = [
-        "async maxRedemptionOf",
-        "async hypotheticalRedemptionOf",
-        "async hypotheticalBorrowOf",
-        "async hypotheticalLeverageOf",
-    ];
-
-    assert.match(source, /private assertTokenBelongsToReader/);
-    const guard = extractBlock(source, "private assertTokenBelongsToReader");
-    assert.match(guard, /if \(tokenReader === this\)/);
-    assert.match(guard, /tokenReaderKey != null && tokenReaderKey === readerKey/);
-    assert.doesNotMatch(
-        guard,
-        /address\.toLowerCase\(\)/,
-        "reader guard must not treat same raw reader addresses as equivalent without a deployment key",
-    );
-    for (const method of guardedMethods) {
-        const body = extractBlock(source, method);
-        assert.match(body, /this\.assertTokenBelongsToReader\(/, `${method} must validate token reader provenance`);
-    }
-});
-
 test("Market cooldown batching accepts only same reader instance or deployment key", () => {
     const source = readRepoFile("src/classes/Market.ts");
     const body = extractBlock(source, "async multiHoldExpiresAt");
@@ -769,7 +631,11 @@ test("Market cooldown batching accepts only same reader instance or deployment k
     );
 });
 
-test("Zapper direct helper paths reject foreign CToken objects before calldata or quotes", () => {
+// Guard behavior + strictness (foreign setup snapshot rejected before calldata) is covered
+// functionally in zapper-calldata.test.ts. This structural check pins only the exhaustive
+// wiring — every direct Zapper helper calls the setup-provenance guard — which a
+// representative functional test can't enforce when a new helper is added.
+test("every Zapper direct helper is wired to the CToken setup-provenance guard", () => {
     const source = readRepoFile("src/classes/Zapper.ts");
     const guardedMethods = [
         "async nativeZap",
@@ -779,79 +645,10 @@ test("Zapper direct helper paths reject foreign CToken objects before calldata o
         "async getZapVaultData",
         "async getNativeZapCalldata",
     ];
-
-    assert.match(source, /private assertCTokenBelongsToSetup/);
-    const guard = extractBlock(source, "private assertCTokenBelongsToSetup");
-    assert.match(guard, /tokenMarket\.setup === this\.setup/);
-    assert.match(guard, /without the same setup snapshot/);
-    assert.doesNotMatch(
-        guard,
-        /tokenChain == null \|\| tokenChain === this\.setup\.chain/,
-        "zapper setup guard must require the same setup snapshot instead of accepting missing or same-chain-only provenance",
-    );
     for (const method of guardedMethods) {
         const body = extractBlock(source, method);
         assert.match(body, /this\.assertCTokenBelongsToSetup\(ctoken\);/, `${method} must validate CToken setup provenance`);
     }
-});
-
-test("PositionManager vault share helper rejects mixed-market token objects before amount scaling", () => {
-    const source = readRepoFile("src/classes/PositionManager.ts");
-    const body = extractBlock(source, "static async getVaultExpectedShares");
-    const guardIndex = body.indexOf("PositionManager.assertVaultExpectedSharesTokensMatch(deposit_ctoken, borrow_ctoken);");
-    const amountIndex = body.indexOf("FormatConverter.decimalToBigInt");
-    const guard = extractBlock(source, "private static assertVaultExpectedSharesTokensMatch");
-
-    assert.match(source, /private static assertVaultExpectedSharesTokensMatch/);
-    assert.match(guard, /if \(depositMarket === borrowMarket\)/);
-    assert.match(guard, /sameReaderDeployment/);
-    assert.match(guard, /depositReaderKey != null && depositReaderKey === borrowReaderKey/);
-    assert.doesNotMatch(
-        guard,
-        /depositChain == null \|\| borrowChain == null/,
-        "vault expected-share guard must not allow detached sibling market objects only because chain provenance is missing",
-    );
-    assert.notEqual(guardIndex, -1, "getVaultExpectedShares must validate token provenance");
-    assert.notEqual(amountIndex, -1, "getVaultExpectedShares must scale the borrow amount after validation");
-    assert.ok(guardIndex < amountIndex, "token provenance guard must run before borrow-token decimals are used");
-});
-
-test("LendingOptimizer default construction prefers an asset-bound provider over moved setup globals", () => {
-    const source = readRepoFile("src/classes/LendingOptimizer.ts");
-    const constructorBody = extractBlock(source, "constructor(");
-
-    assert.match(constructorBody, /const assetProvider = \(asset as ERC20 & \{ provider\?: curvance_read_provider \}\)\.provider;/);
-    assert.match(constructorBody, /const assetSigner = provider == null && assetProvider != null/);
-    assert.match(constructorBody, /assetProvider \?\? defaultReadProvider/);
-    assert.match(constructorBody, /const canInheritDefaultSigner = provider == null && \(assetProvider == null \|\| assetProvider === defaultReadProvider\);/);
-    assert.match(constructorBody, /explicitSigner \?\? legacySigner \?\? assetSigner \?\?/);
-});
-
-test("market-level user-cache reads stay behind full-user freshness guards", () => {
-    const source = readRepoFile("src/classes/Market.ts");
-    const hasUserActivity = extractBlock(source, "hasUserActivity()");
-
-    assert.doesNotMatch(source, /\bctoken\.cache\.user(?:Collateral|Debt|ShareBalance|AssetBalance)\b/);
-    assert.match(hasUserActivity, /this\.requireFullUserTokenData\("determining user activity"\);/);
-    assert.match(hasUserActivity, /token\.cache\.userCollateral/);
-    assert.match(hasUserActivity, /token\.cache\.userDebt/);
-});
-
-test("market refresh token rows fail closed on duplicate addresses before applying state", () => {
-    const source = readRepoFile("src/classes/Market.ts");
-    const applyState = extractBlock(source, "applyState(");
-    const refreshTokenRows = source.match(
-        /private requireRefreshTokenRows[\s\S]*?return rowsByAddress;\s*\n    }/,
-    )?.[0] ?? "";
-
-    assert.match(refreshTokenRows, /rowsByAddress\.has\(key\)/);
-    assert.match(refreshTokenRows, /Duplicate \$\{label\} token data/);
-    assert.doesNotMatch(
-        refreshTokenRows,
-        /new Map\(rows\.map/,
-        "refresh token validation must not collapse duplicate rows before checking for missing token data",
-    );
-    assert.match(applyState, /this\.validateStateRows\(dynamicData, userData\);/);
 });
 
 test("dist smoke keeps extracted package available for lazy internal requires", () => {

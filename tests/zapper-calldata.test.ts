@@ -257,6 +257,24 @@ test("CToken.getZapper binds simple zap quotes to the market DEX aggregator", as
     }]);
 });
 
+test("Zapper rejects a CToken from a foreign setup snapshot before building calldata", async () => {
+    const { zapper } = createZapper();
+    // Foreign CToken: its market carries a different setup snapshot object, so the
+    // setup-provenance guard must reject it before any calldata/quote work.
+    const foreignCToken = {
+        address: "0x00000000000000000000000000000000000000a1",
+        market: {
+            address: "0x00000000000000000000000000000000000000b2",
+            setup: { chain: "monad-mainnet" },
+        },
+    } as any;
+
+    await assert.rejects(
+        () => zapper.nativeZap(foreignCToken, 1n, false, RECEIVER),
+        /without the same setup snapshot/i,
+    );
+});
+
 test("Zapper constructor requires the setup-bound DEX aggregator", () => {
     assert.throws(
         () => new (Zapper as any)(
