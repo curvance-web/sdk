@@ -2,24 +2,8 @@ import { Contract } from "ethers";
 import Decimal from "decimal.js";
 import abi from '../abis/OptimizerReader.json'
 import { address, curvance_read_provider } from "../types";
-import { BPS, WAD, WAD_DECIMAL } from "../helpers";
+import { WAD_DECIMAL } from "../helpers";
 import type { Market, MarketToken } from "./Market";
-
-const OPTIMIZER_VIEW_ABI = [
-    "function asset() view returns (address)",
-    "function totalAssets() view returns (uint256)",
-    "function exchangeRate() view returns (uint256)",
-    "function exchangeRateHighWatermark() view returns (uint256)",
-    "function fee() view returns (uint256)",
-    "function getApprovedMarkets() view returns (address[])",
-    "function allocationCaps(address cToken) view returns (uint256)",
-] as const;
-
-const BORROWABLE_CTOKEN_VIEW_ABI = [
-    "function balanceOf(address owner) view returns (uint256)",
-    "function convertToAssets(uint256 shares) view returns (uint256)",
-    "function assetsHeld() view returns (uint256)",
-] as const;
 
 function resolveDefaultReadProvider(): curvance_read_provider | undefined {
     return (require("../setup") as typeof import("../setup")).setup_config?.readProvider;
@@ -92,14 +76,18 @@ export interface AllocationBound {
     maxBps: bigint;
 }
 
+type ReaderMethod<TArgs extends unknown[], TResult> = {
+    (...args: TArgs): Promise<TResult>;
+    staticCall?: (...args: TArgs) => Promise<TResult>;
+};
+
 export interface IOptimizerReader {
-    getOptimizerAPY(optimizer: address): Promise<bigint>;
-    getOptimizerUserData(optimizers: address[], account: address): Promise<any[]>;
-    assetsAtTimestamp(account: address, cToken: address, timestamp: bigint): Promise<bigint>;
-    isBad(optimizer: address): Promise<address[]>;
-    multiIsBadCheck(optimizers: address[]): Promise<address[][]>;
-    optimalRebalance(optimizer: address, slippageBps: bigint): Promise<any>;
-    optimalRebalanceAt(optimizer: address, slippageBps: bigint, timestamp: bigint): Promise<any>;
+    getOptimizerAPY: ReaderMethod<[address], bigint>;
+    getOptimizerMarketData: ReaderMethod<[address[]], any[]>;
+    getOptimizerUserData: ReaderMethod<[address[], address], any[]>;
+    isBad: ReaderMethod<[address], address[]>;
+    multiIsBadCheck: ReaderMethod<[address[]], address[][]>;
+    optimalRebalance: ReaderMethod<[address, bigint], any>;
 }
 
 function normalizeReallocationAction(action: any): ReallocationAction {
@@ -117,13 +105,44 @@ function normalizeAllocationBound(bound: any): AllocationBound {
     };
 }
 
-function calculateAllocationCapUtilizationBps(
-    totalAssets: bigint,
-    allocatedAssets: bigint,
-    allocationCap: bigint,
-): bigint {
-    const maxAllocation = (totalAssets * allocationCap) / WAD;
-    return maxAllocation === 0n ? 0n : (allocatedAssets * BPS) / maxAllocation;
+async function staticCallOrCall<TArgs extends unknown[], TResult>(
+    method: ReaderMethod<TArgs, TResult>,
+    ...args: TArgs
+): Promise<TResult> {
+    return method.staticCall == undefined
+        ? method(...args)
+        : method.staticCall(...args);
+}
+
+function normalizeOptimizerMarketData(data: any): OptimizerMarketData {
+    const markets = (data.markets ?? data[3] ?? []).map((market: any) => ({
+        address: market._address ?? market[0],
+        allocatedAssets: BigInt(market.allocatedAssets ?? market[1]),
+        liquidity: BigInt(market.liquidity ?? market[2]),
+        allocationCap: BigInt(market.allocationCap ?? market[3]),
+        allocationCapUtilizationBps: BigInt(market.allocationCapUtilizationBps ?? market[4]),
+    }));
+
+    return {
+        address: data._address ?? data[0],
+        asset: data.asset ?? data[1],
+        totalAssets: BigInt(data.totalAssets ?? data[2]),
+        markets,
+        totalLiquidity: BigInt(data.totalLiquidity ?? data[4]),
+        sharePrice: BigInt(data.sharePrice ?? data[5]),
+        exchangeRateHighWatermark: BigInt(data.exchangeRateHighWatermark ?? data[6]),
+        performanceFee: BigInt(data.performanceFee ?? data[7]),
+        numApprovedMarkets: BigInt(data.numApprovedMarkets ?? data[8]),
+        apy: BigInt(data.apy ?? data[9]),
+    };
+}
+
+function normalizeOptimizerUserData(data: any): OptimizerUserData {
+    return {
+        address: data._address ?? data[0],
+        shareBalance: BigInt(data.shareBalance ?? data[1]),
+        redeemable: BigInt(data.redeemable ?? data[2]),
+    };
 }
 
 function normalizeRebalanceResult(data: any): { actions: ReallocationAction[]; bounds: AllocationBound[] } {
@@ -175,68 +194,12 @@ export class OptimizerReader {
     }
 
     async getOptimizerAPY(optimizer: address): Promise<bigint> {
-        return BigInt(await this.contract.getOptimizerAPY(optimizer));
+        return BigInt(await staticCallOrCall(this.contract.getOptimizerAPY, optimizer));
     }
 
     async getOptimizerMarketData(optimizers: address[]): Promise<OptimizerMarketData[]> {
-        return Promise.all(optimizers.map(async (optimizer) => {
-            const opt = new Contract(optimizer, OPTIMIZER_VIEW_ABI, this.provider) as any;
-            const [
-                asset,
-                totalAssets,
-                sharePrice,
-                exchangeRateHighWatermark,
-                performanceFee,
-                markets,
-            ] = await Promise.all([
-                opt.asset(),
-                opt.totalAssets(),
-                opt.exchangeRate(),
-                opt.exchangeRateHighWatermark(),
-                opt.fee(),
-                opt.getApprovedMarkets(),
-            ]);
-            const totalAssetsBig = BigInt(totalAssets);
-
-            const marketRows = await Promise.all((markets as address[]).map(async (market) => {
-                const cToken = new Contract(market, BORROWABLE_CTOKEN_VIEW_ABI, this.provider) as any;
-                const [shareBalance, allocationCap] = await Promise.all([
-                    cToken.balanceOf(optimizer),
-                    opt.allocationCaps(market),
-                ]);
-                const [allocatedAssets, liquidity] = await Promise.all([
-                    cToken.convertToAssets(shareBalance),
-                    cToken.assetsHeld(),
-                ]);
-                const allocatedAssetsBig = BigInt(allocatedAssets);
-                const allocationCapBig = BigInt(allocationCap);
-
-                return {
-                    address: market,
-                    allocatedAssets: allocatedAssetsBig,
-                    liquidity: BigInt(liquidity),
-                    allocationCap: allocationCapBig,
-                    allocationCapUtilizationBps: calculateAllocationCapUtilizationBps(
-                        totalAssetsBig,
-                        allocatedAssetsBig,
-                        allocationCapBig,
-                    ),
-                };
-            }));
-
-            return {
-                address: optimizer,
-                asset: asset as address,
-                totalAssets: totalAssetsBig,
-                markets: marketRows,
-                totalLiquidity: marketRows.reduce((sum, market) => sum + market.liquidity, 0n),
-                sharePrice: BigInt(sharePrice),
-                exchangeRateHighWatermark: BigInt(exchangeRateHighWatermark),
-                performanceFee: BigInt(performanceFee),
-                numApprovedMarkets: BigInt((markets as address[]).length),
-                apy: await this.getOptimizerAPY(optimizer),
-            };
-        }));
+        const data = await staticCallOrCall(this.contract.getOptimizerMarketData, optimizers);
+        return data.map((optimizerData: any) => normalizeOptimizerMarketData(optimizerData));
     }
 
     /**
@@ -300,16 +263,8 @@ export class OptimizerReader {
     }
 
     async getOptimizerUserData(optimizers: address[], account: address): Promise<OptimizerUserData[]> {
-        const data = await this.contract.getOptimizerUserData(optimizers, account);
-        return data.map((opt: any) => ({
-            address: opt._address,
-            shareBalance: BigInt(opt.shareBalance),
-            redeemable: BigInt(opt.redeemable)
-        }));
-    }
-
-    async assetsAtTimestamp(account: address, cToken: address, timestamp: bigint): Promise<bigint> {
-        return BigInt(await this.contract.assetsAtTimestamp(account, cToken, timestamp));
+        const data = await staticCallOrCall(this.contract.getOptimizerUserData, optimizers, account);
+        return data.map((opt: any) => normalizeOptimizerUserData(opt));
     }
 
     async isBad(optimizer: address): Promise<address[]> {
@@ -326,16 +281,7 @@ export class OptimizerReader {
         optimizer: address,
         slippageBps: bigint = 0n,
     ): Promise<{ actions: ReallocationAction[]; bounds: AllocationBound[] }> {
-        const data = await this.contract.optimalRebalance(optimizer, slippageBps);
-        return normalizeRebalanceResult(data);
-    }
-
-    async optimalRebalanceAt(
-        optimizer: address,
-        slippageBps: bigint,
-        timestamp: bigint,
-    ): Promise<{ actions: ReallocationAction[]; bounds: AllocationBound[] }> {
-        const data = await this.contract.optimalRebalanceAt(optimizer, slippageBps, timestamp);
+        const data = await staticCallOrCall(this.contract.optimalRebalance, optimizer, slippageBps);
         return normalizeRebalanceResult(data);
     }
 }

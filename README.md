@@ -699,7 +699,7 @@ const marketSnapshot = snapshotMarket(market)
 
 ## ❯ Optimizer
 
-The `OptimizerReader` reads yield-rebalancing vaults that allocate across markets.
+The `OptimizerReader` reads yield-rebalancing vaults that allocate across markets. Reader calls that accrue optimizer state are simulated with `staticCall` by the SDK.
 
 ```ts
 import Decimal from "decimal.js"
@@ -718,9 +718,6 @@ await optimizerReader.getOptimizerUserData(optimizerAddresses, account)
 
 await optimizerReader.optimalRebalance(optimizerAddress, 100n)
 // Returns: { actions: { cToken, assetsOrBps }[], bounds: { cToken, minBps, maxBps }[] }
-
-await optimizerReader.optimalRebalanceAt(optimizerAddress, 100n, timestamp)
-// Returns the rebalance plan projected at a specific timestamp
 
 await optimizerReader.isBad(optimizerAddress)
 // Returns bad cToken markets for the optimizer

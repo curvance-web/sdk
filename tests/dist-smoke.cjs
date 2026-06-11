@@ -514,9 +514,14 @@ function npmPackInvocation(packDir) {
 }
 
 function readPackMetadata(output, packDir) {
-    if (output.trim().length > 0) {
-        const [pack] = JSON.parse(output);
-        return pack;
+    const trimmedOutput = output.trim();
+
+    if (trimmedOutput.length > 0) {
+        const jsonStart = trimmedOutput.indexOf("[");
+        if (jsonStart !== -1) {
+            const [pack] = JSON.parse(trimmedOutput.slice(jsonStart));
+            return pack;
+        }
     }
 
     const tarballs = readdirSync(packDir).filter((file) => file.endsWith(".tgz"));
@@ -2770,13 +2775,13 @@ async function main() {
     );
     assert.match(
         optimizerReaderDist,
-        /function exchangeRate\(\) view returns \(uint256\)/,
-        "dist OptimizerReader fallback ABI should use view-only exchangeRate",
+        /staticCallOrCall/,
+        "dist OptimizerReader should use static simulation for reader calls",
     );
     assert.doesNotMatch(
         optimizerReaderDist,
-        /exchangeRateUpdated/,
-        "dist OptimizerReader fallback must not call non-view exchangeRateUpdated",
+        /assetsAtTimestamp|optimalRebalanceAt|optimalRebalanceUpdated/,
+        "dist OptimizerReader should not expose removed reader helpers",
     );
 
     const calls = [];
