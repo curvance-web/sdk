@@ -42,5 +42,6 @@ export const mainnet: ChainConfig = {
         'YZM',
         'wsrUSD',
         'sAUSD',
+        'savUSD'
     ],
 };
