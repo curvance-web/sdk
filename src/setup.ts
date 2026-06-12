@@ -1,5 +1,6 @@
 import { ChainRpcPrefix, getContractAddresses } from "./helpers";
 import { Market } from "./classes/Market";
+import { Optimizer } from "./classes/Optimizer";
 import { address, curvance_provider, curvance_read_provider, curvance_signer } from './types';
 import { ProtocolReader } from "./classes/ProtocolReader";
 import { OracleManager } from "./classes/OracleManager";
@@ -33,12 +34,14 @@ export interface SetupConfigSnapshot {
 export let setup_config: SetupConfigSnapshot;
 
 export let all_markets: Market[] = [];
+export let all_optimizers: Optimizer[] = [];
 let latest_setup_invocation = 0;
 let latest_published_setup_invocation = 0;
 const pending_setup_invocations = new Set<number>();
 const successful_setup_results = new Map<number, {
     setupConfig: SetupConfigSnapshot;
     markets: Market[];
+    optimizers: Optimizer[];
 }>();
 
 export interface SetupChainOptions {
@@ -56,6 +59,7 @@ export interface SetupChainResult {
     chainId: number;
     setupConfigSnapshot: Readonly<SetupConfigSnapshot>;
     markets: Market[];
+    optimizers: Optimizer[];
     reader: ProtocolReader;
     dexAgg: IDexAgg;
     global_milestone: MilestoneResponse | null;
@@ -217,6 +221,7 @@ function publishLatestSuccessfulSetup() {
         | {
               setupConfig: SetupConfigSnapshot;
               markets: Market[];
+              optimizers: Optimizer[];
           }
         | undefined;
 
@@ -237,6 +242,7 @@ function publishLatestSuccessfulSetup() {
     latest_published_setup_invocation = candidateInvocation;
     setup_config = candidate.setupConfig;
     all_markets = candidate.markets;
+    all_optimizers = candidate.optimizers;
 
     for (const invocation of [...successful_setup_results.keys()]) {
         if (invocation <= latest_published_setup_invocation) {
@@ -356,6 +362,7 @@ export async function setupChain(
             nextSetupConfig.contracts.OracleManager as address,
             nextSetupConfig.readProvider,
         );
+        const optimizers = Optimizer.getAll(nextSetupConfig, oracle_manager);
         const markets = await Market.getAll(
             reader,
             oracle_manager,
@@ -382,6 +389,7 @@ export async function setupChain(
         successful_setup_results.set(setupInvocation, {
             setupConfig: nextSetupConfig,
             markets,
+            optimizers,
         });
         publishLatestSuccessfulSetup();
 
@@ -390,6 +398,7 @@ export async function setupChain(
             chainId: nextSetupConfig.chainId,
             setupConfigSnapshot: nextSetupConfig,
             markets,
+            optimizers,
             reader,
             dexAgg,
             global_milestone: milestones['global'] ?? null

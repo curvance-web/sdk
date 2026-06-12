@@ -1,6 +1,7 @@
 export * from './ProtocolReader';
 export * from './OptimizerReader';
 export * from './LendingOptimizer';
+export * from './Optimizer';
 export * from './OracleManager';
 export * from './Api';
 export * from './Market';

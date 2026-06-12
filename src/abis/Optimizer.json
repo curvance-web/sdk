@@ -1,0 +1,484 @@
+[
+    {
+        "inputs": [
+            {
+                "internalType": "contract ICentralRegistry",
+                "name": "_centralRegistry",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "_stalenessMultiplier",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "nonpayable",
+        "type": "constructor"
+    },
+    {
+        "inputs": [],
+        "name": "OptimizerReader__InvalidMultiplier",
+        "type": "error"
+    },
+    {
+        "inputs": [],
+        "name": "OptimizerReader__Unauthorized",
+        "type": "error"
+    },
+    {
+        "anonymous": false,
+        "inputs": [
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "oldMultiplier",
+                "type": "uint256"
+            },
+            {
+                "indexed": false,
+                "internalType": "uint256",
+                "name": "newMultiplier",
+                "type": "uint256"
+            }
+        ],
+        "name": "StalenessMultiplierUpdated",
+        "type": "event"
+    },
+    {
+        "inputs": [],
+        "name": "CAP_BUFFER_BPS",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "ORACLE_MANAGER",
+        "outputs": [
+            {
+                "internalType": "contract IOracleManager",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "REBALANCE_CHUNKS",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "USD_THRESHOLD",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "account",
+                "type": "address"
+            },
+            {
+                "internalType": "address",
+                "name": "cToken",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "timestamp",
+                "type": "uint256"
+            }
+        ],
+        "name": "assetsAtTimestamp",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "assets",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "centralRegistry",
+        "outputs": [
+            {
+                "internalType": "contract ICentralRegistry",
+                "name": "",
+                "type": "address"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "optimizer",
+                "type": "address"
+            }
+        ],
+        "name": "getOptimizerAPY",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "apy",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address[]",
+                "name": "optimizers",
+                "type": "address[]"
+            }
+        ],
+        "name": "getOptimizerMarketData",
+        "outputs": [
+            {
+                "components": [
+                    {
+                        "internalType": "address",
+                        "name": "_address",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "asset",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "totalAssets",
+                        "type": "uint256"
+                    },
+                    {
+                        "components": [
+                            {
+                                "internalType": "address",
+                                "name": "_address",
+                                "type": "address"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "allocatedAssets",
+                                "type": "uint256"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "liquidity",
+                                "type": "uint256"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "allocationCap",
+                                "type": "uint256"
+                            },
+                            {
+                                "internalType": "uint256",
+                                "name": "allocationCapUtilizationBps",
+                                "type": "uint256"
+                            }
+                        ],
+                        "internalType": "struct OptimizerReader.OptimizerCTokenData[]",
+                        "name": "markets",
+                        "type": "tuple[]"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "totalLiquidity",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "sharePrice",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "exchangeRateHighWatermark",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "performanceFee",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "numApprovedMarkets",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "apy",
+                        "type": "uint256"
+                    }
+                ],
+                "internalType": "struct OptimizerReader.OptimizerMarketData[]",
+                "name": "data",
+                "type": "tuple[]"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address[]",
+                "name": "optimizers",
+                "type": "address[]"
+            },
+            {
+                "internalType": "address",
+                "name": "account",
+                "type": "address"
+            }
+        ],
+        "name": "getOptimizerUserData",
+        "outputs": [
+            {
+                "components": [
+                    {
+                        "internalType": "address",
+                        "name": "_address",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "shareBalance",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "redeemable",
+                        "type": "uint256"
+                    }
+                ],
+                "internalType": "struct OptimizerReader.OptimizerUserData[]",
+                "name": "data",
+                "type": "tuple[]"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "optimizer",
+                "type": "address"
+            }
+        ],
+        "name": "isBad",
+        "outputs": [
+            {
+                "internalType": "address[]",
+                "name": "bad",
+                "type": "address[]"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address[]",
+                "name": "optimizers",
+                "type": "address[]"
+            }
+        ],
+        "name": "multiIsBadCheck",
+        "outputs": [
+            {
+                "internalType": "address[][]",
+                "name": "badOptimizers",
+                "type": "address[][]"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "optimizer",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "slippageBps",
+                "type": "uint256"
+            }
+        ],
+        "name": "optimalRebalance",
+        "outputs": [
+            {
+                "components": [
+                    {
+                        "internalType": "contract IBorrowableCToken",
+                        "name": "cToken",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "int256",
+                        "name": "assetsOrBps",
+                        "type": "int256"
+                    }
+                ],
+                "internalType": "struct LendingOptimizer.ReallocationAction[]",
+                "name": "actions",
+                "type": "tuple[]"
+            },
+            {
+                "components": [
+                    {
+                        "internalType": "address",
+                        "name": "cToken",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "minBps",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "maxBps",
+                        "type": "uint256"
+                    }
+                ],
+                "internalType": "struct LendingOptimizer.AllocationBound[]",
+                "name": "bounds",
+                "type": "tuple[]"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "address",
+                "name": "optimizer",
+                "type": "address"
+            },
+            {
+                "internalType": "uint256",
+                "name": "slippageBps",
+                "type": "uint256"
+            },
+            {
+                "internalType": "uint256",
+                "name": "timestamp",
+                "type": "uint256"
+            }
+        ],
+        "name": "optimalRebalanceAt",
+        "outputs": [
+            {
+                "components": [
+                    {
+                        "internalType": "contract IBorrowableCToken",
+                        "name": "cToken",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "int256",
+                        "name": "assetsOrBps",
+                        "type": "int256"
+                    }
+                ],
+                "internalType": "struct LendingOptimizer.ReallocationAction[]",
+                "name": "actions",
+                "type": "tuple[]"
+            },
+            {
+                "components": [
+                    {
+                        "internalType": "address",
+                        "name": "cToken",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "minBps",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "maxBps",
+                        "type": "uint256"
+                    }
+                ],
+                "internalType": "struct LendingOptimizer.AllocationBound[]",
+                "name": "bounds",
+                "type": "tuple[]"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {
+                "internalType": "uint256",
+                "name": "newMultiplierBps",
+                "type": "uint256"
+            }
+        ],
+        "name": "setStalenessMultiplier",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "stalenessMultiplierBps",
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    }
+]
