@@ -1,6 +1,6 @@
 {
   "name": "curvance",
-  "version": "5.2.4",
+  "version": "5.3.0",
   "packageManager": "npm@11.14.1",
   "engines": {
     "npm": ">=11.14.1 <12"
