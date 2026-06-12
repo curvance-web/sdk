@@ -51,8 +51,8 @@ function optimizerReaderFixtureSkip(): string | undefined {
         return 'OptimizerReader fixture is stale: expected constructor(ICentralRegistry,uint256).';
     }
 
-    if (getOptimizerMarketData?.stateMutability !== 'view') {
-        return 'OptimizerReader fixture is stale: getOptimizerMarketData must be view.';
+    if (getOptimizerMarketData?.stateMutability !== 'nonpayable') {
+        return 'OptimizerReader fixture is stale: getOptimizerMarketData must be nonpayable.';
     }
 
     if (!optimizerDataFields.some((field) => field.name === 'exchangeRateHighWatermark')) {
@@ -275,7 +275,7 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
             'at least one market should hold the initialized deposit',
         );
 
-        const contractData = await readerContract.getFunction('getOptimizerMarketData')([optimizerAddress]);
+        const contractData = await readerContract.getFunction('getOptimizerMarketData').staticCall([optimizerAddress]);
         const contractEntry = contractData[0];
         assert.strictEqual(
             contractEntry.exchangeRateHighWatermark,

@@ -69,35 +69,6 @@
   },
   {
     "type": "function",
-    "name": "assetsAtTimestamp",
-    "inputs": [
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "cToken",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "timestamp",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "assets",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "centralRegistry",
     "inputs": [],
     "outputs": [
@@ -126,7 +97,7 @@
         "internalType": "uint256"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -224,7 +195,7 @@
         ]
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -265,7 +236,7 @@
         ]
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -361,70 +332,7 @@
         ]
       }
     ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "optimalRebalanceAt",
-    "inputs": [
-      {
-        "name": "optimizer",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "slippageBps",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "timestamp",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "actions",
-        "type": "tuple[]",
-        "internalType": "struct LendingOptimizer.ReallocationAction[]",
-        "components": [
-          {
-            "name": "cToken",
-            "type": "address",
-            "internalType": "contract IBorrowableCToken"
-          },
-          {
-            "name": "assetsOrBps",
-            "type": "int256",
-            "internalType": "int256"
-          }
-        ]
-      },
-      {
-        "name": "bounds",
-        "type": "tuple[]",
-        "internalType": "struct LendingOptimizer.AllocationBound[]",
-        "components": [
-          {
-            "name": "cToken",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "minBps",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "maxBps",
-            "type": "uint256",
-            "internalType": "uint256"
-          }
-        ]
-      }
-    ],
-    "stateMutability": "view"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
