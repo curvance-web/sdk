@@ -292,7 +292,7 @@
   "VaultAggregator-AUSD-vUSD": "0x084BC7bE1326Ee1FD5387a4A48fD6999A79BFa8b",
   "VaultAggregator-accNUSD-AUSD": "0xd9b905207d53d521B265330a050F7993F60fEa42",
   "ProtocolManagerMassPause-EC": "0xBB82Aee16936fB2232F3c0d700b6fc832D7Ead73",
-  "ProtocolManagerMassPause-RapidResponse": "0xc1b306219114a8610B4Cd4DACE4D75AA4BC139Aa",
+  "ProtocolManagerMassPause-RapidResponse": "0x89D2253b13c718d06B78fCcE3d973a520bD07803",
   "PendlePTAggregator-PT-AUSD-8OCT2026": "0x3ED78CA090d4B20aC043505A880A04B0f23B6134",
   "oracleMigration": {
     "adaptors": {
