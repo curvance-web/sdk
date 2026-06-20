@@ -266,6 +266,17 @@
         "savUSD": "0x2552232caBd544b67eEa900A951346D3272c7c2f",
         "AUSD": "0xD1BFEA1728ffe98F515f26082fACfcc3341691D4"
       }
+    },
+    "PT AUSD 8OCT2026 | AUSD": {
+      "address": "0xdDd5681fCBB040e3bD3c126AA6caf1677DFCEc2e",
+      "irms": {
+        "PT-AUSD-8OCT2026": "0xA1Ef78a09f5d718E2459CC98298AD41bf26Ab07b",
+        "AUSD": "0xA4dbce4883df78Ad6518738a3D383B827E1cc108"
+      },
+      "tokens": {
+        "PT-AUSD-8OCT2026": "0x6eD14BA7d1Ec30a97E21d0D8037867535BA43bF8",
+        "AUSD": "0xbDe2459A033f20442CE18483CDD48643D80C6c93"
+      }
     }
   },
   "Optimizers": {
@@ -282,6 +293,7 @@
   "VaultAggregator-accNUSD-AUSD": "0xd9b905207d53d521B265330a050F7993F60fEa42",
   "ProtocolManagerMassPause-EC": "0xBB82Aee16936fB2232F3c0d700b6fc832D7Ead73",
   "ProtocolManagerMassPause-RapidResponse": "0xc1b306219114a8610B4Cd4DACE4D75AA4BC139Aa",
+  "PendlePTAggregator-PT-AUSD-8OCT2026": "0x3ED78CA090d4B20aC043505A880A04B0f23B6134",
   "oracleMigration": {
     "adaptors": {
       "ChainlinkAdaptor": "0x42B318abFDE82a43B3685eB65a5863B9367B22e1",
