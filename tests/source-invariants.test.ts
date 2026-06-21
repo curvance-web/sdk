@@ -328,6 +328,48 @@ test("deployment manifests do not declare duplicate market addresses", () => {
     assert.deepEqual(duplicates, []);
 });
 
+test("deployment manifests store every market token IRM in the canonical irms map", () => {
+    const missingIrmEntries: string[] = [];
+    const legacyIrmKeys: string[] = [];
+    const misorderedIrmKeys: string[] = [];
+    const misorderedMarketKeys: string[] = [];
+    const canonicalMarketKeyOrder = ["address", "tokens", "irms", "plugins"];
+
+    for (const [chain, config] of Object.entries(chains)) {
+        const markets = (config as any).markets as Record<string, any>;
+        for (const [marketName, market] of Object.entries(markets)) {
+            const expectedMarketKeys = canonicalMarketKeyOrder.filter((key) => key in market);
+            const actualMarketKeys = Object.keys(market).slice(0, expectedMarketKeys.length);
+            if (actualMarketKeys.join(",") !== expectedMarketKeys.join(",")) {
+                misorderedMarketKeys.push(`${chain}:${marketName}:${actualMarketKeys.join(",")}`);
+            }
+
+            for (const key of Object.keys(market)) {
+                if (key.endsWith("-DynamicIRM")) {
+                    legacyIrmKeys.push(`${chain}:${marketName}:${key}`);
+                }
+            }
+
+            const irms = market.irms as Record<string, unknown> | undefined;
+            const tokenSymbols = Object.keys(market.tokens ?? {});
+            if (Object.keys(irms ?? {}).slice(0, tokenSymbols.length).join(",") !== tokenSymbols.join(",")) {
+                misorderedIrmKeys.push(`${chain}:${marketName}`);
+            }
+
+            for (const tokenSymbol of tokenSymbols) {
+                if (typeof irms?.[tokenSymbol] !== "string") {
+                    missingIrmEntries.push(`${chain}:${marketName}:${tokenSymbol}`);
+                }
+            }
+        }
+    }
+
+    assert.deepEqual(legacyIrmKeys, []);
+    assert.deepEqual(missingIrmEntries, []);
+    assert.deepEqual(misorderedIrmKeys, []);
+    assert.deepEqual(misorderedMarketKeys, []);
+});
+
 test("README public examples stay multichain-safe", () => {
     const readme = readRepoFile("README.md");
     const merklSectionStart = readme.indexOf("### Merkl rewards");

@@ -23,21 +23,25 @@
   "markets": {
     "Stable Market": {
       "address": "0x8fe35902B67D81c94CF81fd9a96558e8349215F5",
-      "USDC-DynamicIRM": "0x2a5d40ccbD99cf6aC202A32725e2E1680bd3B2A0",
       "tokens": {
         "USDC": "0x4Fd99EFd43d66F0eF854Ca58Ec0c9b9950514aF3",
         "AUSD": "0xC9cfa1ABf23F672a0a75eC567cE13619d0062CAD"
       },
-      "AUSD-DynamicIRM": "0xa8CAc481f9f8D690609f4A1EF1C32d58cFC687F0"
+      "irms": {
+        "USDC": "0x2a5d40ccbD99cf6aC202A32725e2E1680bd3B2A0",
+        "AUSD": "0xa8CAc481f9f8D690609f4A1EF1C32d58cFC687F0"
+      }
     },
     "Volatile Market": {
       "address": "0x405793BfAC1A82F056fdE8A71580FCeDa68Ef8d6",
-      "BTC-DynamicIRM": "0xA6D76582F0cBaaBB512edCeB138c106185C8f0c6",
       "tokens": {
         "BTC": "0xe98D2e7EB66e504e26Dbc208601cb04F31652AA5",
         "ETH": "0x79049726F807407eEa9eFc49DEa4010332Aa6d7f"
       },
-      "ETH-DynamicIRM": "0xFae2a261D376acDCcf5fe6D63944650209f22C2C"
+      "irms": {
+        "BTC": "0xA6D76582F0cBaaBB512edCeB138c106185C8f0c6",
+        "ETH": "0xFae2a261D376acDCcf5fe6D63944650209f22C2C"
+      }
     }
   },
   "ProtocolReader": "0xC57e4e42278CA815C5717eFA84a536f30Ee49637"
