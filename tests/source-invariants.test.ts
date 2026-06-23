@@ -370,6 +370,29 @@ test("deployment manifests store every market token IRM in the canonical irms ma
     assert.deepEqual(misorderedMarketKeys, []);
 });
 
+test("Monad mainnet manifest uses the current oracle and optimizer rollout", () => {
+    const monad = (chains as any)["monad-mainnet"];
+
+    assert.equal(monad.OracleManager, "0x65ADF8aE8420A58278De066593E6fF1713A137c5");
+    assert.deepEqual(monad.adaptors, {
+        ChainlinkAdaptor: "0x42B318abFDE82a43B3685eB65a5863B9367B22e1",
+        RedstoneClassicAdaptor: "0x4d48676f7B407A7715E84862dbA42b276B8851aE",
+    });
+    assert.deepEqual(monad.Optimizers, {
+        "High Yield AUSD": "0xaD663aC84052b52BE4ed1b27BA416505e84a00Bf",
+    });
+    assert.equal(monad["CombinedAggregator-ezETH"], "0xC54481C5425f091DfBE7A8e2B264D7dCf4783cD4");
+    assert.equal(monad["CombinedAggregator-earnAUSD"], "0x4a048D2dFd6cd75A7e239393a14CE913d756f992");
+    assert.equal(monad["CombinedAggregator-savUSD"], "0x7CB9a321c30c753c3F7C6af7Ae8776E5C1524999");
+    assert.equal(monad["StaticPriceAggregator-loAZND"], "0x6eCb16faf9b0c0F7098204e0FE685D2960b4C0Ba");
+    assert.equal(monad["StaticPriceAggregator-sAUSD"], "0x57B546362e562DfccAE46AB69b953cE07F4ffd8a");
+    assert.equal(monad["VaultAggregator-USDC-YZM"], "0xae3E9D51f1384a86C44fa7958b61F92be23cb284");
+    assert.equal(monad["VaultAggregator-AUSD-vUSD"], "0xDa13c308E5bd054C5cfF7bC3Fa67cB7f8b2dFe3c");
+    assert.equal(monad["VaultAggregator-AUSD-sAUSD"], undefined);
+    assert.equal(monad.oracleMigration, undefined);
+    assert.equal(monad.adaptors.RedstoneCoreAdaptor, undefined);
+});
+
 test("README public examples stay multichain-safe", () => {
     const readme = readRepoFile("README.md");
     const merklSectionStart = readme.indexOf("### Merkl rewards");

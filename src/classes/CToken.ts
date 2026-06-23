@@ -598,7 +598,10 @@ export class CToken extends Calldata<ICToken> {
             return null;
         }
 
-    const adaptors = this.setup.contracts.adaptors;
+        const adaptors = this.setup.contracts.adaptors as Partial<Record<
+            "ChainlinkAdaptor" | "RedstoneClassicAdaptor" | "RedstoneCoreAdaptor",
+            address
+        >>;
         let adaptorName: keyof typeof adaptors;
 
         switch (adapter) {
