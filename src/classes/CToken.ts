@@ -920,11 +920,34 @@ export class CToken extends Calldata<ICToken> {
     getPrice(asset: boolean, lower: boolean, formatted: true): USD;
     getPrice(asset: boolean, lower: boolean, formatted: false): USD_WAD;
     getPrice(asset: boolean = false, lower: boolean = false, formatted = true): USD | USD_WAD {
-        let price = asset ? this.cache.assetPrice : this.cache.sharePrice;
-        if(lower) {
-            price = asset ? this.cache.assetPriceLower : this.cache.sharePriceLower;
-        }
+        return this.getCachedPrice(asset, lower, formatted);
+    }
 
+    getAssetPrice(): USD;
+    getAssetPrice(lower: boolean): USD;
+    getAssetPrice(lower: boolean, formatted: true): USD;
+    getAssetPrice(lower: boolean, formatted: false): USD_WAD;
+    getAssetPrice(lower: boolean = false, formatted = true): USD | USD_WAD {
+        return this.getCachedPrice(true, lower, formatted);
+    }
+
+    getSharePrice(): USD;
+    getSharePrice(lower: boolean): USD;
+    getSharePrice(lower: boolean, formatted: true): USD;
+    getSharePrice(lower: boolean, formatted: false): USD_WAD;
+    getSharePrice(lower: boolean = false, formatted = true): USD | USD_WAD {
+        return this.getCachedPrice(false, lower, formatted);
+    }
+
+    private getCachedPrice(asset: boolean, lower: boolean, formatted: boolean): USD | USD_WAD {
+        const price = asset
+            ? lower ? this.cache.assetPriceLower : this.cache.assetPrice
+            : lower ? this.cache.sharePriceLower : this.cache.sharePrice;
+
+        return this.formatCachedPrice(price, formatted);
+    }
+
+    private formatCachedPrice(price: USD_WAD, formatted: boolean): USD | USD_WAD {
         return formatted ? Decimal(price).div(WAD): price;
     }
 

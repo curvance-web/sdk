@@ -1174,8 +1174,8 @@ test("setupChain suppresses every configured Monad zap-excluded deployed market"
     const configuredExclusions = chain_config["monad-mainnet"].excluded_zap_symbols
         .map((symbol) => symbol.toLowerCase())
         .sort();
-    const fixtureSymbols = excludedFixtures
-        .map((fixture) => fixture.symbol.toLowerCase())
+    const fixtureSymbols = [...new Set(excludedFixtures
+        .map((fixture) => fixture.symbol.toLowerCase()))]
         .sort();
     assert.deepEqual(fixtureSymbols, configuredExclusions);
 
