@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import Decimal from "decimal.js";
-import { OptimizerReader } from "../src/classes/OptimizerReader";
+import { DEFAULT_REBALANCE_CHUNKS, OptimizerReader } from "../src/classes/OptimizerReader";
 
 const OPTIMIZER = "0x00000000000000000000000000000000000000aa";
 const CTOKEN_A = "0x00000000000000000000000000000000000000b1";
@@ -215,9 +215,9 @@ test("getOptimizerMarketData uses reader static call and normalizes contract row
     }]);
 });
 
-test("optimalRebalance forwards the default slippage and decodes actions plus bounds", async () => {
+test("optimalRebalance forwards default slippage and chunks, then decodes actions plus bounds", async () => {
     const reader = createReader();
-    let captured: { optimizer: string; slippageBps: bigint } | null = null;
+    let captured: { optimizer: string; slippageBps: bigint; rebalanceChunks: bigint } | null = null;
     const response: any = [
         [
             { cToken: CTOKEN_A, assetsOrBps: -5n },
@@ -235,8 +235,8 @@ test("optimalRebalance forwards the default slippage and decodes actions plus bo
         optimalRebalance: Object.assign(
             async () => { throw new Error("optimalRebalance must use staticCall"); },
             {
-                staticCall: async (optimizer: string, slippageBps: bigint) => {
-                    captured = { optimizer, slippageBps };
+                staticCall: async (optimizer: string, slippageBps: bigint, rebalanceChunks: bigint) => {
+                    captured = { optimizer, slippageBps, rebalanceChunks };
                     return response;
                 },
             },
@@ -248,6 +248,7 @@ test("optimalRebalance forwards the default slippage and decodes actions plus bo
     assert.deepEqual(captured, {
         optimizer: OPTIMIZER,
         slippageBps: 0n,
+        rebalanceChunks: DEFAULT_REBALANCE_CHUNKS,
     });
     assert.deepEqual(result, {
         actions: [
@@ -261,13 +262,13 @@ test("optimalRebalance forwards the default slippage and decodes actions plus bo
     });
 });
 
-test("optimalRebalance preserves explicit slippage and tolerates legacy action field names", async () => {
+test("optimalRebalance preserves explicit slippage and chunks, and tolerates legacy action field names", async () => {
     const reader = createReader();
-    let captured: { optimizer: string; slippageBps: bigint } | null = null;
+    let captured: { optimizer: string; slippageBps: bigint; rebalanceChunks: bigint } | null = null;
 
     reader.contract = {
-        optimalRebalance: async (optimizer: string, slippageBps: bigint) => {
-            captured = { optimizer, slippageBps };
+        optimalRebalance: async (optimizer: string, slippageBps: bigint, rebalanceChunks: bigint) => {
+            captured = { optimizer, slippageBps, rebalanceChunks };
             return [
                 [{ cToken: CTOKEN_A, assets: -9n }],
                 [{ cToken: CTOKEN_A, minBps: 0n, maxBps: 10_000n }],
@@ -275,11 +276,12 @@ test("optimalRebalance preserves explicit slippage and tolerates legacy action f
         },
     } as any;
 
-    const result = await reader.optimalRebalance(OPTIMIZER as any, 25n);
+    const result = await reader.optimalRebalance(OPTIMIZER as any, 25n, 123n);
 
     assert.deepEqual(captured, {
         optimizer: OPTIMIZER,
         slippageBps: 25n,
+        rebalanceChunks: 123n,
     });
     assert.deepEqual(result, {
         actions: [{ cToken: CTOKEN_A, assetsOrBps: -9n }],

@@ -1731,9 +1731,10 @@ async function main() {
         assert.equal(packedOptimizerSent[0].to, packedOptimizerAddress);
         const packedOptimizerReader = Object.create(packedSdk.OptimizerReader.prototype);
         packedOptimizerReader.contract = {
-            optimalRebalance: async (optimizer, slippageBps) => {
+            optimalRebalance: async (optimizer, slippageBps, rebalanceChunks) => {
                 assert.equal(optimizer, packedOptimizerAddress);
                 assert.equal(slippageBps, 31n);
+                assert.equal(rebalanceChunks, 200n);
                 return {
                     actions: [
                         { cToken: TOKEN_IN, assetsOrBps: 1200n },

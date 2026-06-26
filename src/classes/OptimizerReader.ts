@@ -81,13 +81,15 @@ type ReaderMethod<TArgs extends unknown[], TResult> = {
     staticCall?: (...args: TArgs) => Promise<TResult>;
 };
 
+export const DEFAULT_REBALANCE_CHUNKS = 200n;
+
 export interface IOptimizerReader {
     getOptimizerAPY: ReaderMethod<[address], bigint>;
     getOptimizerMarketData: ReaderMethod<[address[]], any[]>;
     getOptimizerUserData: ReaderMethod<[address[], address], any[]>;
     isBad: ReaderMethod<[address], address[]>;
     multiIsBadCheck: ReaderMethod<[address[]], address[][]>;
-    optimalRebalance: ReaderMethod<[address, bigint], any>;
+    optimalRebalance: ReaderMethod<[address, bigint, bigint], any>;
 }
 
 function normalizeReallocationAction(action: any): ReallocationAction {
@@ -280,8 +282,9 @@ export class OptimizerReader {
     async optimalRebalance(
         optimizer: address,
         slippageBps: bigint = 0n,
+        rebalanceChunks: bigint = DEFAULT_REBALANCE_CHUNKS,
     ): Promise<{ actions: ReallocationAction[]; bounds: AllocationBound[] }> {
-        const data = await staticCallOrCall(this.contract.optimalRebalance, optimizer, slippageBps);
+        const data = await staticCallOrCall(this.contract.optimalRebalance, optimizer, slippageBps, rebalanceChunks);
         return normalizeRebalanceResult(data);
     }
 }

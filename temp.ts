@@ -20,6 +20,7 @@ const rebalancer_wallet        = "0xD21DC65f42fB039A1c403a38C18C2731211eCBC7";
 const optimizer_reader_address = contracts.OptimizerReader as address;
 // Slippage band (BPS) around each market's ideal allocation.
 const slippage_bps             = 100n;
+const rebalance_chunks         = 200n;
 
 async function main() {
     const snapshot_id = await provider.send("evm_snapshot", []) as number;
@@ -44,15 +45,12 @@ async function main() {
         //     console.log(`AUSD balance after deposit: ${await ausd.balanceOf(me_address)}`);
         // }
 
-        // Rebalance. optimalRebalance == optimalRebalanceAt(_, _, block.timestamp),
-        // which is the safe default — forward projection adds no real benefit
-        // beyond the cap buffer and risks reverts on full-drain / bad-market
-        // scenarios.
+        // Rebalance.
         {
             const signer = await impersonate(rebalancer_wallet);
             const reader = new OptimizerReader(optimizer_reader_address, provider);
 
-            const instructions = await reader.optimalRebalance(lend_optimizer, slippage_bps);
+            const instructions = await reader.optimalRebalance(lend_optimizer, slippage_bps, rebalance_chunks);
             console.log("Optimal Rebalance Actions:");
             console.log(instructions.actions);
             console.log("Allocation Bounds:");
