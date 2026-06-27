@@ -716,7 +716,8 @@ await optimizerReader.getOptimizerMarketData(optimizerAddresses)
 await optimizerReader.getOptimizerUserData(optimizerAddresses, account)
 // Returns: user balance and redeemable amounts
 
-await optimizerReader.optimalRebalance(optimizerAddress, 100n)
+await optimizerReader.optimalRebalance(optimizerAddress, 100n, 200n)
+// Args: optimizer address, slippage BPS, rebalance chunks
 // Returns: { actions: { cToken, assetsOrBps }[], bounds: { cToken, minBps, maxBps }[] }
 
 await optimizerReader.isBad(optimizerAddress)

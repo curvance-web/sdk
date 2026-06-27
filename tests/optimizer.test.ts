@@ -35,7 +35,7 @@ type AbiComponent = {
 type AbiFragment = {
     type?: string;
     name?: string;
-    inputs?: unknown[];
+    inputs?: AbiComponent[];
     outputs?: AbiComponent[];
     stateMutability?: string;
 };
@@ -44,6 +44,7 @@ function optimizerReaderFixtureSkip(): string | undefined {
     const abi = OptimizerReaderArtifact.abi as AbiFragment[];
     const constructor = abi.find((fragment) => fragment.type === 'constructor');
     const getOptimizerMarketData = abi.find((fragment) => fragment.name === 'getOptimizerMarketData');
+    const optimalRebalance = abi.find((fragment) => fragment.name === 'optimalRebalance');
     const optimizerDataFields = getOptimizerMarketData?.outputs?.[0]?.components ?? [];
     const marketDataFields = optimizerDataFields.find((field) => field.name === 'markets')?.components?.map((field) => field.name) ?? [];
 
@@ -69,6 +70,21 @@ function optimizerReaderFixtureSkip(): string | undefined {
 
     if (!marketDataFields.includes('allocationCap') || !marketDataFields.includes('allocationCapUtilizationBps')) {
         return 'OptimizerReader fixture is stale: OptimizerCTokenData is missing allocation cap fields.';
+    }
+
+    if (
+        (optimalRebalance?.inputs?.length ?? 0) !== 3 ||
+        optimalRebalance?.inputs?.[2]?.name !== 'rebalanceChunks'
+    ) {
+        return 'OptimizerReader fixture is stale: optimalRebalance must accept rebalanceChunks.';
+    }
+
+    if (abi.some((fragment) => fragment.name === 'REBALANCE_CHUNKS')) {
+        return 'OptimizerReader fixture is stale: REBALANCE_CHUNKS should no longer be exposed.';
+    }
+
+    if (!abi.some((fragment) => fragment.type === 'error' && fragment.name === 'OptimizerReader__InvalidRebalanceChunks')) {
+        return 'OptimizerReader fixture is stale: missing OptimizerReader__InvalidRebalanceChunks error.';
     }
 
     if (!OptimizerReaderArtifact.bytecode) {

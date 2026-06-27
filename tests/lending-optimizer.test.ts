@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import Decimal from "decimal.js";
 import { Interface } from "ethers";
-import { LendingOptimizer, OptimizerReader, PositionManager } from "../src";
+import { DEFAULT_REBALANCE_CHUNKS, LendingOptimizer, OptimizerReader, PositionManager } from "../src";
 import type { address } from "../src/types";
 
 const OPTIMIZER = "0x00000000000000000000000000000000000000a1" as address;
@@ -196,9 +196,10 @@ test("OptimizerReader optimalRebalance output can be executed by LendingOptimize
     const { optimizer, sent } = createLendingOptimizer();
     const reader = Object.create(OptimizerReader.prototype) as OptimizerReader;
     (reader as any).contract = {
-        optimalRebalance: async (optimizerAddress: string, slippageBps: bigint) => {
+        optimalRebalance: async (optimizerAddress: string, slippageBps: bigint, rebalanceChunks: bigint) => {
             assert.equal(optimizerAddress, OPTIMIZER);
             assert.equal(slippageBps, 25n);
+            assert.equal(rebalanceChunks, DEFAULT_REBALANCE_CHUNKS);
             return {
                 actions: [
                     { cToken: BORROWABLE, assets: 2500n },
