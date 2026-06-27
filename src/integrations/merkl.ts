@@ -3,6 +3,8 @@ import { fetchWithTimeout, validateAddress } from "../validation";
 const MERKL_API_BASE_URL = 'https://api.merkl.xyz/v4';
 const MERKL_PROXY_URL = 'https://api2.curvance.com/merkl/proxy';
 const PROTOCOL_ID = 'curvance';
+const MERKL_OPPORTUNITIES_PAGE_SIZE = 100;
+const MERKL_OPPORTUNITIES_COALESCE_MS = 30_000;
 
 export type MerklChainInfo = {
     id: number;
@@ -496,9 +498,11 @@ export function filterMerklOpportunitiesByChain(
     });
 }
 
+type MerklOpportunityAction = 'LEND' | 'BORROW' | 'HOLD';
+
 function filterMerklOpportunitiesByAction(
     opportunities: MerklOpportunity[],
-    action?: 'LEND' | 'BORROW',
+    action?: MerklOpportunityAction,
 ): MerklOpportunity[] {
     if (action == undefined) {
         return opportunities;
@@ -607,23 +611,149 @@ export async function fetchMerklCampaignsBySymbol({
 }
 
 type FetchOpportunitiesParams = FetchOptions & {
-    action?: 'LEND' | 'BORROW';
+    action?: MerklOpportunityAction;
     chainId?: number;
+    search?: string;
 };
 
 export async function fetchMerklOpportunities({
     signal,
     action,
     chainId,
+    search,
 }: FetchOpportunitiesParams): Promise<MerklOpportunity[]> {
     const validatedChainId = validateOptionalChainId(chainId, 'Merkl opportunities chainId');
-    const url = new URL(`${MERKL_API_BASE_URL}/opportunities?items=100&tokenTypes=TOKEN`);
+    const trimmedSearch = search?.trim();
+    const cacheKey = getMerklOpportunitiesCoalesceKey({
+        signal,
+        action,
+        chainId: validatedChainId,
+        search: trimmedSearch,
+    });
+
+    if (cacheKey != undefined) {
+        const cached = merklOpportunitiesCoalesceCache.get(cacheKey);
+        if (cached != undefined && cached.expiresAt > Date.now()) {
+            return cached.promise;
+        }
+
+        const promise = fetchMerklOpportunitiesUncached({
+            action,
+            chainId: validatedChainId,
+            search: trimmedSearch,
+        });
+        merklOpportunitiesCoalesceCache.set(cacheKey, {
+            expiresAt: Date.now() + MERKL_OPPORTUNITIES_COALESCE_MS,
+            promise,
+        });
+        promise.catch(() => {
+            if (merklOpportunitiesCoalesceCache.get(cacheKey)?.promise === promise) {
+                merklOpportunitiesCoalesceCache.delete(cacheKey);
+            }
+        });
+        return promise;
+    }
+
+    return fetchMerklOpportunitiesUncached({
+        signal,
+        action,
+        chainId: validatedChainId,
+        search: trimmedSearch,
+    });
+}
+
+type MerklOpportunitiesCoalesceCacheEntry = {
+    expiresAt: number;
+    promise: Promise<MerklOpportunity[]>;
+};
+
+const merklOpportunitiesCoalesceCache = new Map<string, MerklOpportunitiesCoalesceCacheEntry>();
+
+function getMerklOpportunitiesCoalesceKey({
+    signal,
+    action,
+    chainId,
+    search,
+}: {
+    signal?: AbortSignal | undefined;
+    action?: MerklOpportunityAction | undefined;
+    chainId?: number | undefined;
+    search?: string | undefined;
+}): string | undefined {
+    if (signal != undefined || action != undefined || search || chainId == undefined) {
+        return undefined;
+    }
+
+    return `chain:${chainId}`;
+}
+
+async function fetchMerklOpportunitiesUncached({
+    signal,
+    action,
+    chainId,
+    search,
+}: {
+    signal?: AbortSignal | undefined;
+    action?: MerklOpportunityAction | undefined;
+    chainId?: number | undefined;
+    search?: string | undefined;
+}): Promise<MerklOpportunity[]> {
+    const opportunities: MerklOpportunity[] = [];
+    let page = 0;
+
+    while (true) {
+        const pageParams: FetchOpportunitiesPageParams = { page };
+        if (signal != undefined) pageParams.signal = signal;
+        if (action != undefined) pageParams.action = action;
+        if (chainId != undefined) pageParams.chainId = chainId;
+        if (search) pageParams.search = search;
+
+        const pageResult = await fetchMerklOpportunitiesPage(pageParams);
+        opportunities.push(...pageResult.opportunities);
+
+        if (pageResult.rawRowCount < MERKL_OPPORTUNITIES_PAGE_SIZE) {
+            break;
+        }
+
+        page += 1;
+    }
+
+    return filterMerklOpportunitiesByAction(
+        filterMerklOpportunitiesByChain(
+            opportunities,
+            chainId,
+        ),
+        action,
+    );
+}
+
+type FetchOpportunitiesPageParams = FetchOptions & {
+    action?: MerklOpportunityAction;
+    chainId?: number;
+    search?: string;
+    page: number;
+};
+
+async function fetchMerklOpportunitiesPage({
+    signal,
+    action,
+    chainId,
+    search,
+    page,
+}: FetchOpportunitiesPageParams): Promise<{ opportunities: MerklOpportunity[]; rawRowCount: number }> {
+    const url = new URL(`${MERKL_API_BASE_URL}/opportunities`);
+    url.searchParams.set('items', String(MERKL_OPPORTUNITIES_PAGE_SIZE));
+    url.searchParams.set('page', String(page));
+    url.searchParams.set('tokenTypes', 'TOKEN');
     url.searchParams.set('mainProtocolId', PROTOCOL_ID);
     if (action) {
         url.searchParams.set('action', action);
     }
-    if (validatedChainId != undefined) {
-        url.searchParams.set('chainId', String(validatedChainId));
+    if (chainId != undefined) {
+        url.searchParams.set('chainId', String(chainId));
+    }
+    if (search) {
+        url.searchParams.set('search', search);
     }
 
     const response = await fetchWithTimeout(proxyMerklUrl(url), { signal: signal ?? null, cache: 'no-store' });
@@ -632,11 +762,9 @@ export async function fetchMerklOpportunities({
         throw new Error('Failed to fetch Merkl opportunities');
     }
 
-    return filterMerklOpportunitiesByAction(
-        filterMerklOpportunitiesByChain(
-            normalizeMerklOpportunities(await response.json()),
-            validatedChainId,
-        ),
-        action,
-    );
+    const body = await response.json();
+    return {
+        opportunities: normalizeMerklOpportunities(body),
+        rawRowCount: Array.isArray(body) ? body.length : 0,
+    };
 }
