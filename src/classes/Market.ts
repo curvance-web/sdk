@@ -1284,13 +1284,14 @@ export class Market {
         const chainId = resolvedSetup.chainId;
 
         const all_data = await reader.getAllMarketData(resolvedAccount);
-        const [yields, merklLendOpps, merklBorrowOpps] = await Promise.all([
+        const [yields, merklOpps] = await Promise.all([
             Api.fetchNativeYields(resolvedSetup).then(y => (
                 y.filter(yieldEntry => !this.shouldSuppressNativeYield(yieldEntry, resolvedSetup))
             )),
-            fetchMerklOpportunities({ action: 'LEND', chainId }).catch(() => [] as MerklOpportunity[]),
-            fetchMerklOpportunities({ action: 'BORROW', chainId }).catch(() => [] as MerklOpportunity[]),
+            fetchMerklOpportunities({ chainId }).catch(() => [] as MerklOpportunity[]),
         ]);
+        const merklLendOpps = merklOpps.filter(opportunity => !opportunity.action || opportunity.action === "LEND");
+        const merklBorrowOpps = merklOpps.filter(opportunity => opportunity.action === "BORROW");
         const deployIndex = this.buildDeployDataIndex(resolvedSetup);
         const milestonesByAddress = new Map(
             Object.entries(milestones).map(([market, milestone]) => [market.toLowerCase(), milestone]),

@@ -464,25 +464,24 @@ test("setupChain boots arb-sepolia through Market.getAll with chain-scoped enric
                 ],
             },
         }),
-        merkl: (params) => {
-            if (params.action === "LEND") {
-                return [{
-                    identifier: ARB_STABLE_MARKET,
-                    apr: 21,
-                    name: "arb lend",
-                    type: "merkl",
-                    tokens: [{ address: ARB_USDC_CTOKEN, symbol: "cUSDC" }],
-                }];
-            }
-
-            return [{
+        merkl: () => [
+            {
+                identifier: ARB_STABLE_MARKET,
+                apr: 21,
+                name: "arb lend",
+                type: "merkl",
+                action: "LEND",
+                tokens: [{ address: ARB_USDC_CTOKEN, symbol: "cUSDC" }],
+            },
+            {
                 identifier: ARB_AUSD_CTOKEN,
                 apr: 7,
                 name: "arb borrow",
                 type: "merkl",
+                action: "BORROW",
                 tokens: [],
-            }];
-        },
+            },
+        ],
     });
 
     const result = await setupChain("arb-sepolia", null, "https://api.arb-e2e.example", {
@@ -505,8 +504,7 @@ test("setupChain boots arb-sepolia through Market.getAll with chain-scoped enric
     assert.match(readerContext.batchKey ?? "", /^arb-sepolia:/);
 
     assert.deepEqual(harness.merklCalls, [
-        { action: "LEND", chainId: 421614 },
-        { action: "BORROW", chainId: 421614 },
+        { action: undefined, chainId: 421614 },
     ]);
     assert.deepEqual(harness.externalFetchCalls, [], "arb-sepolia native-yield path should not make an HTTP request");
     assert.ok(
@@ -694,7 +692,7 @@ test("setupChain filters wrong-chain reward metadata before market enrichment", 
     ]));
 });
 
-test("setupChain hydrates Merkl APY through the real chain/action-filtered opportunity fetch", async (t) => {
+test("setupChain hydrates Merkl APY through the real chain-filtered opportunity fetch", async (t) => {
     const harness = installSetupChainBootHarness(t, {
         rewards: () => ({ milestones: {}, incentives: {} }),
         merkl: false,
@@ -735,115 +733,115 @@ test("setupChain hydrates Merkl APY through the real chain/action-filtered oppor
             if (merklUrl?.origin === "https://api.merkl.xyz" && merklUrl.pathname === "/v4/opportunities") {
                 assert.equal(merklUrl.searchParams.get("mainProtocolId"), "curvance");
                 assert.equal(merklUrl.searchParams.get("chainId"), "143");
-
-                if (merklUrl.searchParams.get("action") === "LEND") {
-                    return {
-                        ok: true,
-                        json: async () => [
-                            {
-                                identifier: "setup-monad-lend",
-                                apr: 10,
-                                name: "setup monad lend",
-                                type: "merkl",
-                                action: "LEND",
-                                chain: { id: 143, name: "Monad" },
-                                chainId: 143,
-                                computeChainId: 143,
-                                distributionChainId: 143,
-                                tokens: [{ address: MONAD_WMON_CTOKEN, symbol: "cWMON" }],
-                            },
-                            {
-                                identifier: MONAD_WMON_CTOKEN,
-                                apr: 5,
-                                name: "setup metadata-less lend",
-                                type: "merkl",
-                                tokens: [],
-                            },
-                            {
-                                identifier: "setup conflicting lend",
-                                apr: 100,
-                                name: "setup conflicting lend",
-                                type: "merkl",
-                                action: "LEND",
-                                chain: { id: 143, name: "Monad" },
-                                distributionChainId: 421614,
-                                tokens: [{ address: MONAD_WMON_CTOKEN, symbol: "cWMON" }],
-                            },
-                            {
-                                identifier: "setup malformed lend",
-                                apr: 200,
-                                name: "setup malformed lend",
-                                type: "merkl",
-                                action: "LEND",
-                                chainId: "143",
-                                tokens: [{ address: MONAD_WMON_CTOKEN, symbol: "cWMON" }],
-                            },
-                            {
-                                identifier: "setup wrong-action lend",
-                                apr: 300,
-                                name: "setup wrong-action lend",
-                                type: "merkl",
-                                action: "BORROW",
-                                chainId: 143,
-                                tokens: [{ address: MONAD_WMON_CTOKEN, symbol: "cWMON" }],
-                            },
-                        ],
-                    };
-                }
-
-                if (merklUrl.searchParams.get("action") === "BORROW") {
-                    return {
-                        ok: true,
-                        json: async () => [
-                            {
-                                identifier: MONAD_USDC_CTOKEN,
-                                apr: 2,
-                                name: "setup monad borrow",
-                                type: "merkl",
-                                action: "BORROW",
-                                chainId: 143,
-                                computeChainId: 143,
-                                distributionChainId: 143,
-                                tokens: [],
-                            },
-                            {
-                                identifier: MONAD_USDC_CTOKEN.toUpperCase(),
-                                apr: 3,
-                                name: "setup metadata-less borrow",
-                                type: "merkl",
-                                tokens: [],
-                            },
-                            {
-                                identifier: MONAD_USDC_CTOKEN,
-                                apr: 100,
-                                name: "setup wrong-chain borrow",
-                                type: "merkl",
-                                action: "BORROW",
-                                chainId: 421614,
-                                tokens: [],
-                            },
-                            {
-                                identifier: MONAD_USDC_CTOKEN,
-                                apr: 200,
-                                name: "setup conflicting borrow",
-                                type: "merkl",
-                                action: "BORROW",
-                                chainId: 143,
-                                computeChainId: 421614,
-                                tokens: [],
-                            },
-                            {
-                                identifier: MONAD_USDC_CTOKEN,
-                                apr: 300,
-                                name: "setup wrong-action borrow",
-                                type: "merkl",
-                                action: "LEND",
-                                chainId: 143,
-                                tokens: [],
-                            },
-                        ],
-                    };
-                }
+                assert.equal(merklUrl.searchParams.get("action"), null);
+                return {
+                    ok: true,
+                    json: async () => [
+                        {
+                            identifier: "setup-monad-lend",
+                            apr: 10,
+                            name: "setup monad lend",
+                            type: "merkl",
+                            action: "LEND",
+                            chain: { id: 143, name: "Monad" },
+                            chainId: 143,
+                            computeChainId: 143,
+                            distributionChainId: 143,
+                            tokens: [{ address: MONAD_WMON_CTOKEN, symbol: "cWMON" }],
+                        },
+                        {
+                            identifier: MONAD_WMON_CTOKEN,
+                            apr: 5,
+                            name: "setup metadata-less lend",
+                            type: "merkl",
+                            tokens: [],
+                        },
+                        {
+                            identifier: "setup conflicting lend",
+                            apr: 100,
+                            name: "setup conflicting lend",
+                            type: "merkl",
+                            action: "LEND",
+                            chain: { id: 143, name: "Monad" },
+                            distributionChainId: 421614,
+                            tokens: [{ address: MONAD_WMON_CTOKEN, symbol: "cWMON" }],
+                        },
+                        {
+                            identifier: "setup malformed lend",
+                            apr: 200,
+                            name: "setup malformed lend",
+                            type: "merkl",
+                            action: "LEND",
+                            chainId: "143",
+                            tokens: [{ address: MONAD_WMON_CTOKEN, symbol: "cWMON" }],
+                        },
+                        {
+                            identifier: "setup wrong-action lend",
+                            apr: 300,
+                            name: "setup wrong-action lend",
+                            type: "merkl",
+                            action: "BORROW",
+                            chainId: 143,
+                            tokens: [{ address: MONAD_WMON_CTOKEN, symbol: "cWMON" }],
+                        },
+                        {
+                            identifier: MONAD_USDC_CTOKEN,
+                            apr: 2,
+                            name: "setup monad borrow",
+                            type: "merkl",
+                            action: "BORROW",
+                            chainId: 143,
+                            computeChainId: 143,
+                            distributionChainId: 143,
+                            tokens: [],
+                        },
+                        {
+                            identifier: MONAD_USDC_CTOKEN.toUpperCase(),
+                            apr: 3,
+                            name: "setup metadata-less borrow",
+                            type: "merkl",
+                            action: "BORROW",
+                            tokens: [],
+                        },
+                        {
+                            identifier: MONAD_USDC_CTOKEN,
+                            apr: 100,
+                            name: "setup wrong-chain borrow",
+                            type: "merkl",
+                            action: "BORROW",
+                            chainId: 421614,
+                            tokens: [],
+                        },
+                        {
+                            identifier: MONAD_USDC_CTOKEN,
+                            apr: 200,
+                            name: "setup conflicting borrow",
+                            type: "merkl",
+                            action: "BORROW",
+                            chainId: 143,
+                            computeChainId: 421614,
+                            tokens: [],
+                        },
+                        {
+                            identifier: MONAD_USDC_CTOKEN,
+                            apr: 300,
+                            name: "setup malformed borrow",
+                            type: "merkl",
+                            action: "BORROW",
+                            distributionChainId: "143",
+                            tokens: [],
+                        },
+                        {
+                            identifier: "setup wrong-action borrow",
+                            apr: 300,
+                            name: "setup wrong-action borrow",
+                            type: "merkl",
+                            action: "LEND",
+                            chainId: 143,
+                            tokens: [],
+                        },
+                    ],
+                };
             }
 
             throw new Error(`Unexpected fetch URL: ${urlString}`);
@@ -856,7 +854,7 @@ test("setupChain hydrates Merkl APY through the real chain/action-filtered oppor
     });
 
     assert.deepEqual(harness.merklCalls, [], "test should exercise the real Merkl fetch helper");
-    assert.equal(harness.externalFetchCalls.length, 3);
+    assert.equal(harness.externalFetchCalls.length, 2);
 
     const market = result.markets[0];
     assert.ok(market);
@@ -1011,10 +1009,8 @@ test("setupChain keeps market token DEX routes bound after a later chain boot mo
         feeReceiver: BOOT_DAO_FEE_RECEIVER,
     }]);
     assert.deepEqual(harness.merklCalls, [
-        { action: "LEND", chainId: 143 },
-        { action: "BORROW", chainId: 143 },
-        { action: "LEND", chainId: 421614 },
-        { action: "BORROW", chainId: 421614 },
+        { action: undefined, chainId: 143 },
+        { action: undefined, chainId: 421614 },
     ]);
     assert.deepEqual(harness.externalFetchCalls, ["https://api.monad-e2e.example/v1/monad/native_apy"]);
 });
@@ -1339,8 +1335,7 @@ test("setupChain recomputes token route metadata after context-bound DEX adapter
         ],
     );
     assert.deepEqual(harness.merklCalls, [
-        { action: "LEND", chainId: 143 },
-        { action: "BORROW", chainId: 143 },
+        { action: undefined, chainId: 143 },
     ]);
 });
 

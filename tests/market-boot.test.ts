@@ -816,28 +816,39 @@ test("Market.getAll forwards setup snapshot chainId to Merkl and aggregates dupl
     merklModule.fetchMerklOpportunities = async (params: { action?: string; chainId?: number }) => {
         merklCalls.push({ action: params.action, chainId: params.chainId });
 
-        if (params.action === "LEND") {
-            return [
-                {
-                    identifier: MARKET_A,
-                    apr: 12,
-                    name: "lend-first",
-                    type: "merkl",
-                    tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
-                },
-                {
-                    identifier: MARKET_B,
-                    apr: 34,
-                    name: "lend-second",
-                    type: "merkl",
-                    tokens: [{ address: TOKEN_A.toUpperCase(), symbol: "TOKA" }],
-                },
-            ];
-        }
-
         return [
-            { identifier: TOKEN_A, apr: 5, name: "borrow-first", type: "merkl", tokens: [] },
-            { identifier: TOKEN_A.toUpperCase(), apr: 7, name: "borrow-second", type: "merkl", tokens: [] },
+            {
+                identifier: MARKET_A,
+                apr: 12,
+                name: "lend-first",
+                type: "merkl",
+                action: "LEND",
+                tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
+            },
+            {
+                identifier: MARKET_B,
+                apr: 34,
+                name: "lend-second",
+                type: "merkl",
+                action: "LEND",
+                tokens: [{ address: TOKEN_A.toUpperCase(), symbol: "TOKA" }],
+            },
+            {
+                identifier: TOKEN_A,
+                apr: 5,
+                name: "borrow-first",
+                type: "merkl",
+                action: "BORROW",
+                tokens: [],
+            },
+            {
+                identifier: TOKEN_A.toUpperCase(),
+                apr: 7,
+                name: "borrow-second",
+                type: "merkl",
+                action: "BORROW",
+                tokens: [],
+            },
         ];
     };
     (chain_config["monad-mainnet"] as any).chainId = 999_999;
@@ -869,8 +880,7 @@ test("Market.getAll forwards setup snapshot chainId to Merkl and aggregates dupl
 
     const token = markets[0]?.tokens[0] as any;
     assert.deepEqual(merklCalls, [
-        { action: "LEND", chainId: 143 },
-        { action: "BORROW", chainId: 143 },
+        { action: undefined, chainId: 143 },
     ]);
     assertDecimalString(token.incentiveSupplyApy, "0.46", "boot should attach summed supply incentive APY");
     assertDecimalString(token.incentiveBorrowApy, "0.12", "boot should attach summed borrow incentive APY");
@@ -892,117 +902,118 @@ test("Market.getAll consumes Merkl chain filtering through the real opportunity 
         requestedUrls.push(requestedUrl);
 
         const url = resolveMerklRequestUrl(requestedUrl);
-        const action = url.searchParams.get("action");
-        const body = action === "LEND"
-            ? [
-                {
-                    identifier: "monad-lend",
-                    apr: 10,
-                    name: "monad-lend",
-                    type: "merkl",
-                    action: "LEND",
-                    chain: { id: 143, name: "Monad" },
-                    chainId: 143,
-                    computeChainId: 143,
-                    distributionChainId: 143,
-                    tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
-                },
-                {
-                    identifier: TOKEN_A,
-                    apr: 5,
-                    name: "metadata-less-lend",
-                    type: "merkl",
-                    tokens: [],
-                },
-                {
-                    identifier: "wrong-chain-lend",
-                    apr: 100,
-                    name: "wrong-chain-lend",
-                    type: "merkl",
-                    chainId: 421614,
-                    tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
-                },
-                {
-                    identifier: "conflicting-lend",
-                    apr: 200,
-                    name: "conflicting-lend",
-                    type: "merkl",
-                    chain: { id: 143, name: "Monad" },
-                    distributionChainId: 421614,
-                    tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
-                },
-                {
-                    identifier: "malformed-chain-lend",
-                    apr: 300,
-                    name: "malformed-chain-lend",
-                    type: "merkl",
-                    chainId: "143",
-                    tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
-                },
-                {
-                    identifier: "wrong-action-lend",
-                    apr: 400,
-                    name: "wrong-action-lend",
-                    type: "merkl",
-                    action: "BORROW",
-                    chainId: 143,
-                    tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
-                },
-            ]
-            : [
-                {
-                    identifier: TOKEN_A,
-                    apr: 2,
-                    name: "monad-borrow",
-                    type: "merkl",
-                    action: "BORROW",
-                    chainId: 143,
-                    computeChainId: 143,
-                    distributionChainId: 143,
-                    tokens: [],
-                },
-                {
-                    identifier: TOKEN_A.toUpperCase(),
-                    apr: 3,
-                    name: "metadata-less-borrow",
-                    type: "merkl",
-                    tokens: [],
-                },
-                {
-                    identifier: TOKEN_A,
-                    apr: 100,
-                    name: "wrong-chain-borrow",
-                    type: "merkl",
-                    chainId: 1,
-                    tokens: [],
-                },
-                {
-                    identifier: TOKEN_A,
-                    apr: 200,
-                    name: "conflicting-borrow",
-                    type: "merkl",
-                    chainId: 143,
-                    computeChainId: 1,
-                    tokens: [],
-                },
-                {
-                    identifier: TOKEN_A,
-                    apr: 300,
-                    name: "malformed-chain-borrow",
-                    type: "merkl",
-                    distributionChainId: "143",
-                    tokens: [],
-                },
-                {
-                    identifier: TOKEN_A,
-                    apr: 400,
-                    name: "wrong-action-borrow",
-                    type: "merkl",
-                    action: "LEND",
-                    chainId: 143,
-                    tokens: [],
-                },
-            ];
+        assert.equal(url.searchParams.get("action"), null);
+        const body = [
+            {
+                identifier: "monad-lend",
+                apr: 10,
+                name: "monad-lend",
+                type: "merkl",
+                action: "LEND",
+                chain: { id: 143, name: "Monad" },
+                chainId: 143,
+                computeChainId: 143,
+                distributionChainId: 143,
+                tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
+            },
+            {
+                identifier: TOKEN_A,
+                apr: 5,
+                name: "metadata-less-lend",
+                type: "merkl",
+                tokens: [],
+            },
+            {
+                identifier: "wrong-chain-lend",
+                apr: 100,
+                name: "wrong-chain-lend",
+                type: "merkl",
+                chainId: 421614,
+                tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
+            },
+            {
+                identifier: "conflicting-lend",
+                apr: 200,
+                name: "conflicting-lend",
+                type: "merkl",
+                chain: { id: 143, name: "Monad" },
+                distributionChainId: 421614,
+                tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
+            },
+            {
+                identifier: "malformed-chain-lend",
+                apr: 300,
+                name: "malformed-chain-lend",
+                type: "merkl",
+                chainId: "143",
+                tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
+            },
+            {
+                identifier: "wrong-action-lend",
+                apr: 400,
+                name: "wrong-action-lend",
+                type: "merkl",
+                action: "BORROW",
+                chainId: 143,
+                tokens: [{ address: TOKEN_A, symbol: "TOKA" }],
+            },
+            {
+                identifier: TOKEN_A,
+                apr: 2,
+                name: "monad-borrow",
+                type: "merkl",
+                action: "BORROW",
+                chainId: 143,
+                computeChainId: 143,
+                distributionChainId: 143,
+                tokens: [],
+            },
+            {
+                identifier: TOKEN_A.toUpperCase(),
+                apr: 3,
+                name: "metadata-less-borrow",
+                type: "merkl",
+                action: "BORROW",
+                tokens: [],
+            },
+            {
+                identifier: TOKEN_A,
+                apr: 100,
+                name: "wrong-chain-borrow",
+                type: "merkl",
+                action: "BORROW",
+                chainId: 1,
+                tokens: [],
+            },
+            {
+                identifier: TOKEN_A,
+                apr: 200,
+                name: "conflicting-borrow",
+                type: "merkl",
+                action: "BORROW",
+                chainId: 143,
+                computeChainId: 1,
+                tokens: [],
+            },
+            {
+                identifier: TOKEN_A,
+                apr: 300,
+                name: "malformed-chain-borrow",
+                type: "merkl",
+                action: "BORROW",
+                distributionChainId: "143",
+                tokens: [],
+            },
+            {
+                identifier: "wrong-action-borrow",
+                apr: 400,
+                name: "wrong-action-borrow",
+                type: "merkl",
+                action: "LEND",
+                chainId: 143,
+                tokens: [],
+            },
+        ];
 
         return {
             ok: true,
@@ -1036,14 +1047,10 @@ test("Market.getAll consumes Merkl chain filtering through the real opportunity 
         createSetup() as any,
     );
 
-    const requestsByAction = new Map(
-        requestedUrls.map((request) => {
-            const url = resolveMerklRequestUrl(request);
-            return [url.searchParams.get("action"), url] as const;
-        }),
-    );
-    assert.equal(requestsByAction.get("LEND")?.searchParams.get("chainId"), "143");
-    assert.equal(requestsByAction.get("BORROW")?.searchParams.get("chainId"), "143");
+    assert.equal(requestedUrls.length, 1);
+    const merklRequestUrl = resolveMerklRequestUrl(requestedUrls[0] as string);
+    assert.equal(merklRequestUrl.searchParams.get("action"), null);
+    assert.equal(merklRequestUrl.searchParams.get("chainId"), "143");
 
     const token = markets[0]?.tokens[0] as any;
     assertDecimalString(token.incentiveSupplyApy, "0.15", "boot should exclude wrong/conflicting-chain lend APY");

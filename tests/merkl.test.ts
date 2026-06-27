@@ -75,12 +75,121 @@ test("fetchMerklOpportunities forwards action and chainId in the request URL", a
     assert.equal(proxyUrl.searchParams.get("url"), merklUrlString);
     assert.equal(
         merklUrlString,
-        "https://api.merkl.xyz/v4/opportunities?items=100&tokenTypes=TOKEN&mainProtocolId=curvance&action=LEND&chainId=421614",
+        "https://api.merkl.xyz/v4/opportunities?items=100&page=0&tokenTypes=TOKEN&mainProtocolId=curvance&action=LEND&chainId=421614",
     );
     const url = merklUrl;
+    assert.equal(url.searchParams.get("page"), "0");
     assert.equal(url.searchParams.get("mainProtocolId"), "curvance");
     assert.equal(url.searchParams.get("action"), "LEND");
     assert.equal(url.searchParams.get("chainId"), "421614");
+});
+
+test("fetchMerklOpportunities forwards HOLD action and trimmed search in the request URL", async (t) => {
+    const originalFetch = globalThis.fetch;
+    let requestedUrl: string | null = null;
+    const shareToken = "0xaD663aC84052b52BE4ed1b27BA416505e84a00Bf";
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+        requestedUrl =
+            typeof input === "string"
+                ? input
+                : input instanceof URL
+                    ? input.toString()
+                    : input.url;
+
+        return {
+            ok: true,
+            json: async () => [],
+        } as Response;
+    }) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    await fetchMerklOpportunities({ action: "HOLD", chainId: 143, search: ` ${shareToken} ` });
+
+    const { merklUrl } = assertProxiedMerklUrl(requestedUrl);
+    assert.equal(merklUrl.searchParams.get("mainProtocolId"), "curvance");
+    assert.equal(merklUrl.searchParams.get("action"), "HOLD");
+    assert.equal(merklUrl.searchParams.get("chainId"), "143");
+    assert.equal(merklUrl.searchParams.get("search"), shareToken);
+});
+
+test("fetchMerklOpportunities coalesces identical chain-wide setup requests", async (t) => {
+    const originalFetch = globalThis.fetch;
+    const requestedUrls: string[] = [];
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+        requestedUrls.push(
+            typeof input === "string"
+                ? input
+                : input instanceof URL
+                    ? input.toString()
+                    : input.url,
+        );
+
+        return {
+            ok: true,
+            json: async () => [
+                merklOpportunity({
+                    identifier: "coalesced-monad-row",
+                    chainId: 421614,
+                }),
+            ],
+        } as Response;
+    }) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    const [first, second] = await Promise.all([
+        fetchMerklOpportunities({ chainId: 421614 }),
+        fetchMerklOpportunities({ chainId: 421614 }),
+    ]);
+
+    assert.equal(requestedUrls.length, 1);
+    assert.deepEqual(first, second);
+    assert.equal(assertProxiedMerklUrl(requestedUrls[0] ?? null).merklUrl.searchParams.get("chainId"), "421614");
+});
+
+test("fetchMerklOpportunities paginates until Merkl returns a partial page", async (t) => {
+    const originalFetch = globalThis.fetch;
+    const requestedUrls: string[] = [];
+    const firstPage = Array.from({ length: 100 }, (_, index) =>
+        merklOpportunity({ identifier: `page-0-${index}`, chainId: 143 }),
+    );
+    const secondPage = [
+        merklOpportunity({ identifier: "page-1-0", chainId: 143 }),
+        merklOpportunity({ identifier: "page-1-1", chainId: 143 }),
+    ];
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+        const requestedUrl =
+            typeof input === "string"
+                ? input
+                : input instanceof URL
+                    ? input.toString()
+                    : input.url;
+        requestedUrls.push(requestedUrl);
+
+        return {
+            ok: true,
+            json: async () => requestedUrls.length === 1 ? firstPage : secondPage,
+        } as Response;
+    }) as typeof fetch;
+
+    t.after(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    const rows = await fetchMerklOpportunities({ chainId: 143 });
+
+    assert.equal(rows.length, 102);
+    assert.equal(requestedUrls.length, 2);
+    assert.equal(assertProxiedMerklUrl(requestedUrls[0] ?? null).merklUrl.searchParams.get("page"), "0");
+    assert.equal(assertProxiedMerklUrl(requestedUrls[1] ?? null).merklUrl.searchParams.get("page"), "1");
 });
 
 test("fetchMerklOpportunities degrades malformed successful responses to no opportunities", async (t) => {
