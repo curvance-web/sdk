@@ -14,6 +14,7 @@ const MARKET_B = "0x00000000000000000000000000000000000000b2";
 const TOKEN_A = "0x00000000000000000000000000000000000000c1";
 const TOKEN_B = "0x00000000000000000000000000000000000000c2";
 const TOKEN_C = "0x00000000000000000000000000000000000000c3";
+const TOKEN_D = "0x00000000000000000000000000000000000000c4";
 
 const originalFetchNativeYields = Api.fetchNativeYields;
 const originalFetchMerklOpportunities = merklModule.fetchMerklOpportunities;
@@ -122,6 +123,39 @@ function createUserMarket(marketAddress: string, tokenAddress: string, userAsset
     };
 }
 
+function withTokenRows<T extends { tokens: any[] }>(row: T, tokenAddresses: string[]): T {
+    return {
+        ...row,
+        tokens: tokenAddresses.map((address) => ({
+            ...row.tokens[0],
+            address: address as any,
+        })),
+    };
+}
+
+function createNamedStaticToken(
+    baseToken: ReturnType<typeof createStaticMarket>["tokens"][number],
+    address: string,
+    symbol: string,
+    isBorrowable: boolean,
+    debtCap: bigint,
+) {
+    return {
+        ...baseToken,
+        address: address as any,
+        name: `Curvance ${symbol}`,
+        symbol: `c${symbol}`,
+        asset: {
+            ...baseToken.asset,
+            address: address as any,
+            name: symbol,
+            symbol,
+        },
+        isBorrowable,
+        debtCap,
+    };
+}
+
 function createSetup(overrides: Record<string, any> = {}) {
     const chain = overrides.chain ?? "monad-mainnet";
     const chainConfig = chain_config[chain as keyof typeof chain_config];
@@ -214,6 +248,63 @@ test("Market.getAll joins dynamic and user payloads by address during boot", asy
     assert.equal(markets[1]?.cache.user.address, MARKET_B);
     assert.equal((markets[1]?.tokens[0] as any).cache.exchangeRate, 222n);
     assert.equal((markets[1]?.tokens[0] as any).cache.userAssetBalance, 22n);
+});
+
+test("Market.getAll exposes canonical directional market names from raw deploy metadata", async () => {
+    Api.fetchNativeYields = async () => [];
+    merklModule.fetchMerklOpportunities = async () => [];
+
+    const bidirectionalStatic = createStaticMarket(MARKET_A, TOKEN_A);
+    const bidirectionalBaseToken = bidirectionalStatic.tokens[0]!;
+    bidirectionalStatic.tokens = [
+        createNamedStaticToken(bidirectionalBaseToken, TOKEN_A, "WMON", true, 1000n),
+        createNamedStaticToken(bidirectionalBaseToken, TOKEN_B, "USDC", true, 1000n),
+    ];
+
+    const oneWayStatic = createStaticMarket(MARKET_B, TOKEN_C);
+    const oneWayBaseToken = oneWayStatic.tokens[0]!;
+    oneWayStatic.tokens = [
+        createNamedStaticToken(oneWayBaseToken, TOKEN_C, "earnAUSD", false, 0n),
+        createNamedStaticToken(oneWayBaseToken, TOKEN_D, "AUSD", true, 1000n),
+    ];
+
+    const reader = {
+        getAllMarketData: async () => ({
+            staticMarket: [bidirectionalStatic, oneWayStatic],
+            dynamicMarket: [
+                withTokenRows(createDynamicMarket(MARKET_A, TOKEN_A, 111n), [TOKEN_A, TOKEN_B]),
+                withTokenRows(createDynamicMarket(MARKET_B, TOKEN_C, 222n), [TOKEN_C, TOKEN_D]),
+            ],
+            userData: {
+                locks: [],
+                markets: [
+                    withTokenRows(createUserMarket(MARKET_A, TOKEN_A, 11n), [TOKEN_A, TOKEN_B]),
+                    withTokenRows(createUserMarket(MARKET_B, TOKEN_C, 22n), [TOKEN_C, TOKEN_D]),
+                ],
+            },
+        }),
+    } as any;
+
+    const markets = await Market.getAll(
+        reader,
+        {} as any,
+        {} as any,
+        null,
+        ACCOUNT as any,
+        {},
+        {},
+        createSetup({
+            contracts: {
+                markets: {
+                    "WMON | USDC": { address: MARKET_A, plugins: {} },
+                    "earnAUSD | AUSD": { address: MARKET_B, plugins: {} },
+                },
+            },
+        }) as any,
+    );
+
+    assert.deepEqual(markets.map((market) => market.name), ["WMON ⇄ USDC", "earnAUSD → AUSD"]);
+    assert.equal(markets.some((market) => market.name.includes("|")), false);
 });
 
 test("Market.getAll skips on-chain markets without SDK deployment metadata instead of throwing", async () => {

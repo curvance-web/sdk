@@ -757,6 +757,47 @@ export class Market {
         return index;
     }
 
+    private static hasBorrowCapacity(token: StaticMarketToken): boolean {
+        return token.isBorrowable && token.debtCap > 0n;
+    }
+
+    private static getDisplayTokenSymbol(token: StaticMarketToken | null | undefined): string {
+        return token?.asset?.symbol?.trim() || token?.symbol?.trim() || "";
+    }
+
+    private static formatDisplayMarketName(staticData: StaticMarketData, fallbackName: string): string {
+        if (!fallbackName.includes("|")) {
+            return fallbackName;
+        }
+
+        const tokens = staticData.tokens;
+        if (tokens.length < 2) {
+            return fallbackName;
+        }
+
+        const firstSymbol = this.getDisplayTokenSymbol(tokens[0]);
+        const secondSymbol = this.getDisplayTokenSymbol(tokens[1]);
+        const isBidirectional = tokens.length > 1 && tokens.every((token) => this.hasBorrowCapacity(token));
+
+        if (isBidirectional && firstSymbol && secondSymbol) {
+            return `${firstSymbol} ⇄ ${secondSymbol}`;
+        }
+
+        const collateralToken = tokens.find((token) => !this.hasBorrowCapacity(token)) ?? tokens[0];
+        const borrowToken =
+            tokens.find((token) => token.address !== collateralToken?.address && this.hasBorrowCapacity(token)) ??
+            tokens.find((token) => token.address !== collateralToken?.address) ??
+            null;
+        const collateralSymbol = this.getDisplayTokenSymbol(collateralToken);
+        const borrowSymbol = this.getDisplayTokenSymbol(borrowToken);
+
+        if (collateralSymbol && borrowSymbol) {
+            return `${collateralSymbol} → ${borrowSymbol}`;
+        }
+
+        return fallbackName;
+    }
+
     private static buildYieldIndex(yields: NativeYield[]): Map<string, NativeYield> {
         const index = new Map<string, NativeYield>();
 
@@ -1338,7 +1379,10 @@ export class Market {
                 staticData,
                 dynamicData,
                 userData,
-                deploy_data,
+                {
+                    ...deploy_data,
+                    name: this.formatDisplayMarketName(staticData, deploy_data.name),
+                },
                 oracle_manager,
                 reader,
                 resolvedSetup,
