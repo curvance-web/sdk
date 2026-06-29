@@ -55,6 +55,7 @@ function createStaticMarket(marketAddress: string, tokenAddress: string) {
             borrowPaused: false,
             collateralizationPaused: false,
             mintPaused: false,
+            redeemPaused: false,
             collateralCap: 0n,
             debtCap: 0n,
             isListed: true,

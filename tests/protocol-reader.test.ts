@@ -87,6 +87,7 @@ function createStaticMarket(
             borrowPaused: false,
             collateralizationPaused: false,
             mintPaused: false,
+            redeemPaused: false,
             collateralCap: 0n,
             debtCap: 0n,
             isListed: true,
@@ -138,6 +139,7 @@ function createRawStaticMarket(
             borrowPaused: token.borrowPaused,
             collateralizationPaused: token.collateralizationPaused,
             mintPaused: token.mintPaused,
+            redeemPaused: token.redeemPaused,
             collateralCap: token.collateralCap,
             debtCap: token.debtCap,
             isListed: token.isListed,
@@ -195,6 +197,17 @@ test("ProtocolReader ABI exposes targeted refresh methods", () => {
 
     assert.equal(functionNames.has("getMarketStates"), true);
     assert.equal(functionNames.has("getMarketSummaries"), true);
+
+    const staticMarketData = (protocolReaderAbi as any[]).find(
+        (item) => item.type === "function" && item.name === "getStaticMarketData",
+    );
+    const tokenTuple = staticMarketData.outputs[0].components.find(
+        (component: any) => component.name === "tokens",
+    );
+    assert.equal(
+        tokenTuple.components.some((component: any) => component.name === "redeemPaused"),
+        true,
+    );
 });
 
 test("public loads synthesize empty user state from static market data", async () => {
@@ -239,6 +252,21 @@ test("public loads synthesize empty user state from static market data", async (
     assert.equal(data.userData.markets[0]?.tokens[0]?.liquidationPrice, UINT256_MAX);
     assert.equal(data.userData.markets[1]?.address, MARKET_B);
     assert.equal(data.userData.markets[1]?.tokens[0]?.address, TOKEN_B);
+});
+
+test("getStaticMarketData normalizes redeemPaused token rows", async () => {
+    const reader = createReader();
+    const rawMarket = createRawStaticMarket();
+    rawMarket.tokens[0]!.redeemPaused = true;
+
+    setReaderKeys(reader);
+    reader.contract = {
+        getStaticMarketData: async () => [rawMarket],
+    } as any;
+
+    const data = await reader.getStaticMarketData();
+
+    assert.equal(data[0]?.tokens[0]?.redeemPaused, true);
 });
 
 test("getStaticMarketData caches static market data within the reader namespace", async () => {

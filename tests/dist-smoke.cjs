@@ -415,6 +415,7 @@ function createPackedBootStaticToken(packedSdk, cToken, symbol, asset) {
         borrowPaused: false,
         collateralizationPaused: false,
         mintPaused: false,
+        redeemPaused: false,
         collateralCap: 0n,
         debtCap: 0n,
         isListed: true,
