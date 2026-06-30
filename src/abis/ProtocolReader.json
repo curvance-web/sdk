@@ -1005,6 +1005,11 @@
                 "internalType": "bool"
               },
               {
+                "name": "redeemPaused",
+                "type": "bool",
+                "internalType": "bool"
+              },
+              {
                 "name": "isBorrowable",
                 "type": "bool",
                 "internalType": "bool"

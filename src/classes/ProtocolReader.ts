@@ -38,6 +38,7 @@ export interface StaticMarketToken {
     borrowPaused: boolean;
     collateralizationPaused: boolean;
     mintPaused: boolean;
+    redeemPaused: boolean;
     collateralCap: bigint;
     debtCap: bigint;
     isListed: boolean;
@@ -293,6 +294,7 @@ function normalizeStaticMarketData(data: any[]): StaticMarketData[] {
             borrowPaused: token.borrowPaused,
             collateralizationPaused: token.collateralizationPaused,
             mintPaused: token.mintPaused,
+            redeemPaused: token.redeemPaused,
             collateralCap: BigInt(token.collateralCap),
             debtCap: BigInt(token.debtCap),
             isListed: token.isListed,

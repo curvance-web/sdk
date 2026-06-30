@@ -530,6 +530,7 @@ export class CToken extends Calldata<ICToken> {
     get borrowPaused() { return this.cache.borrowPaused }
     get collateralizationPaused() { return this.cache.collateralizationPaused }
     get mintPaused() { return this.cache.mintPaused }
+    get redeemPaused() { return this.cache.redeemPaused }
     get marketManager() { return this.market; }
     get decimals() { return this.cache.decimals; }
     get symbol() { return this.cache.symbol; }
