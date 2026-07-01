@@ -82,6 +82,7 @@ type ReaderMethod<TArgs extends unknown[], TResult> = {
 };
 
 export const DEFAULT_REBALANCE_CHUNKS = 200n;
+const BPS_DECIMAL = new Decimal(10_000);
 
 export interface IOptimizerReader {
     getOptimizerAPY: ReaderMethod<[address], bigint>;
@@ -90,6 +91,7 @@ export interface IOptimizerReader {
     isBad: ReaderMethod<[address], address[]>;
     multiIsBadCheck: ReaderMethod<[address[]], address[][]>;
     optimalRebalance: ReaderMethod<[address, bigint, bigint], any>;
+    optimalRebalanceWithIncentives: ReaderMethod<[address, bigint, bigint, bigint[]], any>;
 }
 
 function normalizeReallocationAction(action: any): ReallocationAction {
@@ -174,6 +176,38 @@ function buildTokenIndex(markets: Market[]): Map<string, MarketTokenWithApy> {
     }
 
     return tokens;
+}
+
+function incentiveApyToBps(incentiveSupplyApy: Decimal.Value | undefined): bigint {
+    if (incentiveSupplyApy == undefined) {
+        return 0n;
+    }
+
+    const apy = new Decimal(incentiveSupplyApy);
+    if (!apy.isFinite() || apy.isNegative()) {
+        throw new Error(`OptimizerReader: incentiveSupplyApy must be a finite, non-negative decimal.`);
+    }
+
+    return BigInt(apy.mul(BPS_DECIMAL).floor().toFixed(0));
+}
+
+function buildMarketIncentiveAPYsBps(
+    data: OptimizerMarketData,
+    markets: Market[],
+): bigint[] {
+    const tokenIndex = buildTokenIndex(markets);
+
+    return data.markets.map((marketData) => {
+        const token = tokenIndex.get(marketData.address.toLowerCase());
+        if (token == undefined) {
+            throw new Error(
+                `OptimizerReader.optimalRebalanceWithMarketIncentives: approved market ${marketData.address} ` +
+                `is not present in the provided SDK markets.`,
+            );
+        }
+
+        return incentiveApyToBps(token.incentiveSupplyApy);
+    });
 }
 
 export class OptimizerReader {
@@ -286,5 +320,41 @@ export class OptimizerReader {
     ): Promise<{ actions: ReallocationAction[]; bounds: AllocationBound[] }> {
         const data = await staticCallOrCall(this.contract.optimalRebalance, optimizer, slippageBps, rebalanceChunks);
         return normalizeRebalanceResult(data);
+    }
+
+    async optimalRebalanceWithIncentiveBps(
+        optimizer: address,
+        marketIncentiveAPYsBps: bigint[],
+        slippageBps: bigint = 0n,
+        rebalanceChunks: bigint = DEFAULT_REBALANCE_CHUNKS,
+    ): Promise<{ actions: ReallocationAction[]; bounds: AllocationBound[] }> {
+        const data = await staticCallOrCall(
+            this.contract.optimalRebalanceWithIncentives,
+            optimizer,
+            slippageBps,
+            rebalanceChunks,
+            marketIncentiveAPYsBps,
+        );
+        return normalizeRebalanceResult(data);
+    }
+
+    async optimalRebalanceWithMarketIncentives(
+        optimizer: address,
+        markets: Market[] = getDefaultMarkets(),
+        slippageBps: bigint = 0n,
+        rebalanceChunks: bigint = DEFAULT_REBALANCE_CHUNKS,
+    ): Promise<{ actions: ReallocationAction[]; bounds: AllocationBound[] }> {
+        const [data] = await this.getOptimizerMarketData([optimizer]);
+        if (data == undefined) {
+            throw new Error(`OptimizerReader.optimalRebalanceWithMarketIncentives: no data returned for ${optimizer}.`);
+        }
+
+        const marketIncentiveAPYsBps = buildMarketIncentiveAPYsBps(data, markets);
+        return this.optimalRebalanceWithIncentiveBps(
+            optimizer,
+            marketIncentiveAPYsBps,
+            slippageBps,
+            rebalanceChunks,
+        );
     }
 }
