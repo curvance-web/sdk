@@ -328,6 +328,74 @@
   },
   {
     "type": "function",
+    "name": "optimalRebalanceWithIncentives",
+    "inputs": [
+      {
+        "name": "optimizer",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "slippageBps",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "rebalanceChunks",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "marketIncentiveAPYsBps",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "actions",
+        "type": "tuple[]",
+        "internalType": "struct LendingOptimizer.ReallocationAction[]",
+        "components": [
+          {
+            "name": "cToken",
+            "type": "address",
+            "internalType": "contract IBorrowableCToken"
+          },
+          {
+            "name": "assetsOrBps",
+            "type": "int256",
+            "internalType": "int256"
+          }
+        ]
+      },
+      {
+        "name": "bounds",
+        "type": "tuple[]",
+        "internalType": "struct LendingOptimizer.AllocationBound[]",
+        "components": [
+          {
+            "name": "cToken",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "minBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setStalenessMultiplier",
     "inputs": [
       {
@@ -370,6 +438,11 @@
       }
     ],
     "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "OptimizerReader__InvalidIncentiveData",
+    "inputs": []
   },
   {
     "type": "error",

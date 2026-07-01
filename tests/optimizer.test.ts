@@ -45,6 +45,7 @@ function optimizerReaderFixtureSkip(): string | undefined {
     const constructor = abi.find((fragment) => fragment.type === 'constructor');
     const getOptimizerMarketData = abi.find((fragment) => fragment.name === 'getOptimizerMarketData');
     const optimalRebalance = abi.find((fragment) => fragment.name === 'optimalRebalance');
+    const optimalRebalanceWithIncentives = abi.find((fragment) => fragment.name === 'optimalRebalanceWithIncentives');
     const optimizerDataFields = getOptimizerMarketData?.outputs?.[0]?.components ?? [];
     const marketDataFields = optimizerDataFields.find((field) => field.name === 'markets')?.components?.map((field) => field.name) ?? [];
 
@@ -79,12 +80,23 @@ function optimizerReaderFixtureSkip(): string | undefined {
         return 'OptimizerReader fixture is stale: optimalRebalance must accept rebalanceChunks.';
     }
 
+    if (
+        (optimalRebalanceWithIncentives?.inputs?.length ?? 0) !== 4 ||
+        optimalRebalanceWithIncentives?.inputs?.[3]?.name !== 'marketIncentiveAPYsBps'
+    ) {
+        return 'OptimizerReader fixture is stale: optimalRebalanceWithIncentives must accept marketIncentiveAPYsBps.';
+    }
+
     if (abi.some((fragment) => fragment.name === 'REBALANCE_CHUNKS')) {
         return 'OptimizerReader fixture is stale: REBALANCE_CHUNKS should no longer be exposed.';
     }
 
     if (!abi.some((fragment) => fragment.type === 'error' && fragment.name === 'OptimizerReader__InvalidRebalanceChunks')) {
         return 'OptimizerReader fixture is stale: missing OptimizerReader__InvalidRebalanceChunks error.';
+    }
+
+    if (!abi.some((fragment) => fragment.type === 'error' && fragment.name === 'OptimizerReader__InvalidIncentiveData')) {
+        return 'OptimizerReader fixture is stale: missing OptimizerReader__InvalidIncentiveData error.';
     }
 
     if (!OptimizerReaderArtifact.bytecode) {
