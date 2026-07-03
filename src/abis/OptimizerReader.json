@@ -30,6 +30,19 @@
   },
   {
     "type": "function",
+    "name": "MAX_INCENTIVE_APY_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "ORACLE_MANAGER",
     "inputs": [],
     "outputs": [
@@ -459,6 +472,22 @@
         "name": "cToken",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "OptimizerReader__InvalidIncentiveAPYBps",
+    "inputs": [
+      {
+        "name": "cToken",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "incentiveAPYBps",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },

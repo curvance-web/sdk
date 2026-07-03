@@ -46,6 +46,7 @@ function optimizerReaderFixtureSkip(): string | undefined {
     const getOptimizerMarketData = abi.find((fragment) => fragment.name === 'getOptimizerMarketData');
     const optimalRebalance = abi.find((fragment) => fragment.name === 'optimalRebalance');
     const optimalRebalanceWithIncentives = abi.find((fragment) => fragment.name === 'optimalRebalanceWithIncentives');
+    const maxIncentiveApyBps = abi.find((fragment) => fragment.name === 'MAX_INCENTIVE_APY_BPS');
     const optimizerDataFields = getOptimizerMarketData?.outputs?.[0]?.components ?? [];
     const marketDataFields = optimizerDataFields.find((field) => field.name === 'markets')?.components?.map((field) => field.name) ?? [];
     const incentiveFields = optimalRebalanceWithIncentives?.inputs?.[3]?.components?.map((field) => field.name) ?? [];
@@ -98,6 +99,13 @@ function optimizerReaderFixtureSkip(): string | undefined {
         return 'OptimizerReader fixture is stale: REBALANCE_CHUNKS should no longer be exposed.';
     }
 
+    if (
+        maxIncentiveApyBps?.stateMutability !== 'view' ||
+        (maxIncentiveApyBps?.outputs?.length ?? 0) !== 1
+    ) {
+        return 'OptimizerReader fixture is stale: missing MAX_INCENTIVE_APY_BPS getter.';
+    }
+
     if (!abi.some((fragment) => fragment.type === 'error' && fragment.name === 'OptimizerReader__InvalidRebalanceChunks')) {
         return 'OptimizerReader fixture is stale: missing OptimizerReader__InvalidRebalanceChunks error.';
     }
@@ -108,6 +116,10 @@ function optimizerReaderFixtureSkip(): string | undefined {
 
     if (!abi.some((fragment) => fragment.type === 'error' && fragment.name === 'OptimizerReader__InvalidIncentiveMarket')) {
         return 'OptimizerReader fixture is stale: missing OptimizerReader__InvalidIncentiveMarket error.';
+    }
+
+    if (!abi.some((fragment) => fragment.type === 'error' && fragment.name === 'OptimizerReader__InvalidIncentiveAPYBps')) {
+        return 'OptimizerReader fixture is stale: missing OptimizerReader__InvalidIncentiveAPYBps error.';
     }
 
     if (!abi.some((fragment) => fragment.type === 'error' && fragment.name === 'OptimizerReader__DuplicateIncentiveMarket')) {
@@ -487,6 +499,30 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
                 `Allocation bound for ${bound.cToken} exceeds 100%: ${bound.maxBps}`,
             );
         }
+    });
+
+    test('deployed reader accepts max incentive APY and rejects values above it', async () => {
+        const maxIncentiveApyBps: bigint = await readerContract.getFunction('MAX_INCENTIVE_APY_BPS').staticCall();
+        assert.strictEqual(maxIncentiveApyBps, 1_000n, 'reader incentive APY cap should be 10%');
+
+        await assert.doesNotReject(
+            () => readerContract.getFunction('optimalRebalanceWithIncentives').staticCall(
+                optimizerAddress,
+                500n,
+                200n,
+                [{ cToken: APPROVED_CTOKENS[0]!, incentiveAPYBps: maxIncentiveApyBps }],
+            ),
+        );
+
+        await assert.rejects(
+            () => readerContract.getFunction('optimalRebalanceWithIncentives').staticCall(
+                optimizerAddress,
+                500n,
+                200n,
+                [{ cToken: APPROVED_CTOKENS[0]!, incentiveAPYBps: maxIncentiveApyBps + 1n }],
+            ),
+            /OptimizerReader__InvalidIncentiveAPYBps|1001/,
+        );
     });
 
     test('SDK full-share redeem clears the depositor optimizer balance', async () => {

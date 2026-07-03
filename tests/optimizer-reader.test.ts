@@ -2,12 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import Decimal from "decimal.js";
 import { DEFAULT_REBALANCE_CHUNKS, OptimizerReader } from "../src/classes/OptimizerReader";
+import OptimizerReaderAbi from "../src/abis/OptimizerReader.json";
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const OptimizerReaderArtifact = require("./utils/OptimizerReader.json");
 
 const OPTIMIZER = "0x00000000000000000000000000000000000000aa";
 const CTOKEN_A = "0x00000000000000000000000000000000000000b1";
 const CTOKEN_B = "0x00000000000000000000000000000000000000b2";
 const CTOKEN_C = "0x00000000000000000000000000000000000000b3";
 const WAD = 10n ** 18n;
+
+type AbiFragment = {
+    type?: string;
+    name?: string;
+    outputs?: unknown[];
+    stateMutability?: string;
+};
 
 function createReader(): OptimizerReader {
     return Object.create(OptimizerReader.prototype) as OptimizerReader;
@@ -32,6 +42,25 @@ test("OptimizerReader exposes reader helpers", () => {
     assert.equal(reader.optimalRebalanceUpdated, undefined);
     assert.equal(reader.optimalDeposit, undefined);
     assert.equal(reader.optimalWithdrawal, undefined);
+});
+
+test("OptimizerReader ABI fixtures include the incentive APY cap and error", () => {
+    for (const abi of [
+        OptimizerReaderAbi as AbiFragment[],
+        OptimizerReaderArtifact.abi as AbiFragment[],
+    ]) {
+        const maxIncentiveApyBps = abi.find((fragment) => fragment.name === "MAX_INCENTIVE_APY_BPS");
+
+        assert.equal(maxIncentiveApyBps?.stateMutability, "view");
+        assert.equal(maxIncentiveApyBps?.outputs?.length, 1);
+        assert(
+            abi.some((fragment) => (
+                fragment.type === "error" &&
+                fragment.name === "OptimizerReader__InvalidIncentiveAPYBps"
+            )),
+            "OptimizerReader ABI should include the invalid incentive APY error",
+        );
+    }
 });
 
 test("getOptimizerAPY returns the raw WAD value from the contract", async () => {
@@ -348,6 +377,35 @@ test("optimalRebalanceWithTaggedMarketIncentives forwards explicit tagged incent
     });
 });
 
+test("optimalRebalanceWithTaggedMarketIncentives rejects incentives above the reader cap", async () => {
+    const reader = createReader();
+    let called = false;
+
+    reader.contract = {
+        optimalRebalanceWithIncentives: Object.assign(
+            async () => {
+                called = true;
+                throw new Error("unexpected contract call");
+            },
+            {
+                staticCall: async () => {
+                    called = true;
+                    throw new Error("unexpected contract staticCall");
+                },
+            },
+        ),
+    } as any;
+
+    await assert.rejects(
+        () => reader.optimalRebalanceWithTaggedMarketIncentives(
+            OPTIMIZER as any,
+            [{ cToken: CTOKEN_A as any, incentiveAPYBps: 1_001n }],
+        ),
+        /incentive APY for .* must be between 0 and 1000 BPS, received 1001/,
+    );
+    assert.equal(called, false);
+});
+
 test("optimalRebalanceWithMarketIncentives derives tagged BPS incentives from approved markets", async () => {
     const reader = createReader();
     let captured: {
@@ -529,7 +587,7 @@ test("getOptimizerMerklMarketIncentivesBps derives approved-market Merkl LEND in
     const opportunities = [
         {
             identifier: "lend-a",
-            apr: 10,
+            apr: 4,
             action: "LEND",
             tokens: [{ address: CTOKEN_A }],
         },
@@ -560,11 +618,45 @@ test("getOptimizerMerklMarketIncentivesBps derives approved-market Merkl LEND in
     });
 
     assert.deepEqual(marketIncentives, [
-        { cToken: CTOKEN_A, incentiveAPYBps: 1_500n },
+        { cToken: CTOKEN_A, incentiveAPYBps: 900n },
         { cToken: CTOKEN_B, incentiveAPYBps: 250n },
         { cToken: CTOKEN_C, incentiveAPYBps: 0n },
     ]);
-    assert.deepEqual(incentives, [1_500n, 250n, 0n]);
+    assert.deepEqual(incentives, [900n, 250n, 0n]);
+});
+
+test("getOptimizerMerklMarketIncentivesBps rejects Merkl incentives above the reader cap", async () => {
+    const reader = createReader();
+    reader.getOptimizerMarketData = async () => [{
+        address: OPTIMIZER as any,
+        asset: CTOKEN_A as any,
+        totalAssets: 1_000n,
+        markets: [{
+            address: CTOKEN_A as any,
+            allocatedAssets: 100n,
+            liquidity: 70n,
+            allocationCap: WAD,
+            allocationCapUtilizationBps: 1_000n,
+        }],
+        totalLiquidity: 70n,
+        sharePrice: WAD,
+        exchangeRateHighWatermark: WAD,
+        performanceFee: 0n,
+        numApprovedMarkets: 1n,
+        apy: 0n,
+    }];
+
+    await assert.rejects(
+        () => reader.getOptimizerMerklMarketIncentivesBps(OPTIMIZER as any, {
+            opportunities: [{
+                identifier: "lend-a",
+                apr: 10.01,
+                action: "LEND",
+                tokens: [{ address: CTOKEN_A }],
+            }],
+        }),
+        /incentive APY for .* must be between 0 and 1000 BPS, received 1001/,
+    );
 });
 
 test("getOptimizerMerklMarketIncentivesBps resolves chainId from the reader provider", async (t) => {

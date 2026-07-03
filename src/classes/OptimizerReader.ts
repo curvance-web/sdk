@@ -113,6 +113,7 @@ type ReaderMethod<TArgs extends unknown[], TResult> = {
 };
 
 export const DEFAULT_REBALANCE_CHUNKS = 200n;
+const MAX_OPTIMIZER_READER_INCENTIVE_APY_BPS = 1_000n;
 
 export interface IOptimizerReader {
     getOptimizerAPY: ReaderMethod<[address], bigint>;
@@ -235,7 +236,11 @@ function buildTaggedMarketIncentives(
 
     return data.markets.map((marketData, index) => ({
         cToken: marketData.address,
-        incentiveAPYBps: marketIncentiveAPYsBps[index] ?? 0n,
+        incentiveAPYBps: validateMarketIncentiveAPYBps(
+            marketData.address,
+            marketIncentiveAPYsBps[index] ?? 0n,
+            "OptimizerReader.optimalRebalanceWithMarketIncentives",
+        ),
     }));
 }
 
@@ -265,7 +270,40 @@ function buildTaggedMerklIncentives(
 
     return data.markets.map((marketData, index) => ({
         cToken: marketData.address,
-        incentiveAPYBps: marketIncentiveAPYsBps[index] ?? 0n,
+        incentiveAPYBps: validateMarketIncentiveAPYBps(
+            marketData.address,
+            marketIncentiveAPYsBps[index] ?? 0n,
+            "OptimizerReader.getOptimizerMerklMarketIncentivesBps",
+        ),
+    }));
+}
+
+function validateMarketIncentiveAPYBps(
+    cToken: address,
+    incentiveAPYBps: bigint,
+    context: string,
+): bigint {
+    if (incentiveAPYBps < 0n || incentiveAPYBps > MAX_OPTIMIZER_READER_INCENTIVE_APY_BPS) {
+        throw new Error(
+            `${context}: incentive APY for ${cToken} must be between 0 and ` +
+            `${MAX_OPTIMIZER_READER_INCENTIVE_APY_BPS.toString()} BPS, received ${incentiveAPYBps.toString()}.`,
+        );
+    }
+
+    return incentiveAPYBps;
+}
+
+function validateTaggedMarketIncentives(
+    marketIncentives: MarketIncentiveAPYBps[],
+    context: string,
+): MarketIncentiveAPYBps[] {
+    return marketIncentives.map((marketIncentive) => ({
+        cToken: marketIncentive.cToken,
+        incentiveAPYBps: validateMarketIncentiveAPYBps(
+            marketIncentive.cToken,
+            marketIncentive.incentiveAPYBps,
+            context,
+        ),
     }));
 }
 
@@ -387,12 +425,16 @@ export class OptimizerReader {
         slippageBps: bigint = 0n,
         rebalanceChunks: bigint = DEFAULT_REBALANCE_CHUNKS,
     ): Promise<{ actions: ReallocationAction[]; bounds: AllocationBound[] }> {
+        const validatedMarketIncentives = validateTaggedMarketIncentives(
+            marketIncentives,
+            "OptimizerReader.optimalRebalanceWithTaggedMarketIncentives",
+        );
         const data = await staticCallOrCall(
             this.contract.optimalRebalanceWithIncentives,
             optimizer,
             slippageBps,
             rebalanceChunks,
-            marketIncentives,
+            validatedMarketIncentives,
         );
         return normalizeRebalanceResult(data);
     }
