@@ -48,6 +48,7 @@ function optimizerReaderFixtureSkip(): string | undefined {
     const optimalRebalanceWithIncentives = abi.find((fragment) => fragment.name === 'optimalRebalanceWithIncentives');
     const optimizerDataFields = getOptimizerMarketData?.outputs?.[0]?.components ?? [];
     const marketDataFields = optimizerDataFields.find((field) => field.name === 'markets')?.components?.map((field) => field.name) ?? [];
+    const incentiveFields = optimalRebalanceWithIncentives?.inputs?.[3]?.components?.map((field) => field.name) ?? [];
 
     if ((constructor?.inputs?.length ?? 0) !== 2) {
         return 'OptimizerReader fixture is stale: expected constructor(ICentralRegistry,uint256).';
@@ -82,9 +83,15 @@ function optimizerReaderFixtureSkip(): string | undefined {
 
     if (
         (optimalRebalanceWithIncentives?.inputs?.length ?? 0) !== 4 ||
-        optimalRebalanceWithIncentives?.inputs?.[3]?.name !== 'marketIncentiveAPYsBps'
+        optimalRebalanceWithIncentives?.inputs?.[3]?.name !== 'marketIncentives' ||
+        !incentiveFields.includes('cToken') ||
+        !incentiveFields.includes('incentiveAPYBps')
     ) {
-        return 'OptimizerReader fixture is stale: optimalRebalanceWithIncentives must accept marketIncentiveAPYsBps.';
+        return 'OptimizerReader fixture is stale: optimalRebalanceWithIncentives must accept tagged incentive data.';
+    }
+
+    if (abi.some((fragment) => fragment.name === 'optimalRebalanceWithTaggedIncentives')) {
+        return 'OptimizerReader fixture is stale: optimalRebalanceWithTaggedIncentives should no longer be exposed.';
     }
 
     if (abi.some((fragment) => fragment.name === 'REBALANCE_CHUNKS')) {
@@ -97,6 +104,14 @@ function optimizerReaderFixtureSkip(): string | undefined {
 
     if (!abi.some((fragment) => fragment.type === 'error' && fragment.name === 'OptimizerReader__InvalidIncentiveData')) {
         return 'OptimizerReader fixture is stale: missing OptimizerReader__InvalidIncentiveData error.';
+    }
+
+    if (!abi.some((fragment) => fragment.type === 'error' && fragment.name === 'OptimizerReader__InvalidIncentiveMarket')) {
+        return 'OptimizerReader fixture is stale: missing OptimizerReader__InvalidIncentiveMarket error.';
+    }
+
+    if (!abi.some((fragment) => fragment.type === 'error' && fragment.name === 'OptimizerReader__DuplicateIncentiveMarket')) {
+        return 'OptimizerReader fixture is stale: missing OptimizerReader__DuplicateIncentiveMarket error.';
     }
 
     if (!OptimizerReaderArtifact.bytecode) {

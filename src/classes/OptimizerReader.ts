@@ -2,11 +2,31 @@ import { Contract } from "ethers";
 import Decimal from "decimal.js";
 import abi from '../abis/OptimizerReader.json'
 import { address, curvance_read_provider } from "../types";
-import { WAD_DECIMAL } from "../helpers";
+import {
+    decimalApyToBps,
+    getMerklDepositIncentiveBps,
+    WAD_DECIMAL,
+} from "../helpers";
+import type { MerklOpportunityLike } from "../helpers";
+import { fetchMerklOpportunities } from "../integrations/merkl";
 import type { Market, MarketToken } from "./Market";
 
 function resolveDefaultReadProvider(): curvance_read_provider | undefined {
     return (require("../setup") as typeof import("../setup")).setup_config?.readProvider;
+}
+
+function resolveDefaultChainId(): number | undefined {
+    return (require("../setup") as typeof import("../setup")).setup_config?.chainId;
+}
+
+async function resolveProviderChainId(provider: curvance_read_provider): Promise<number | undefined> {
+    const network = await provider.getNetwork();
+    const chainId = Number(network.chainId);
+    if (!Number.isSafeInteger(chainId) || chainId <= 0) {
+        throw new Error(`OptimizerReader: provider returned invalid chainId ${network.chainId.toString()}.`);
+    }
+
+    return chainId;
 }
 
 export interface OptimizerCTokenData {
@@ -52,6 +72,12 @@ export interface OptimizerAPYBreakdown {
     markets: OptimizerUnderlyingMarketAPY[];
 }
 
+export interface OptimizerMerklIncentiveOptions {
+    chainId?: number;
+    signal?: AbortSignal;
+    opportunities?: MerklOpportunityLike[];
+}
+
 export interface OptimizerUserData {
     address: address;
     shareBalance: bigint;
@@ -76,13 +102,17 @@ export interface AllocationBound {
     maxBps: bigint;
 }
 
+export interface MarketIncentiveAPYBps {
+    cToken: address;
+    incentiveAPYBps: bigint;
+}
+
 type ReaderMethod<TArgs extends unknown[], TResult> = {
     (...args: TArgs): Promise<TResult>;
     staticCall?: (...args: TArgs) => Promise<TResult>;
 };
 
 export const DEFAULT_REBALANCE_CHUNKS = 200n;
-const BPS_DECIMAL = new Decimal(10_000);
 
 export interface IOptimizerReader {
     getOptimizerAPY: ReaderMethod<[address], bigint>;
@@ -91,7 +121,7 @@ export interface IOptimizerReader {
     isBad: ReaderMethod<[address], address[]>;
     multiIsBadCheck: ReaderMethod<[address[]], address[][]>;
     optimalRebalance: ReaderMethod<[address, bigint, bigint], any>;
-    optimalRebalanceWithIncentives: ReaderMethod<[address, bigint, bigint, bigint[]], any>;
+    optimalRebalanceWithIncentives: ReaderMethod<[address, bigint, bigint, MarketIncentiveAPYBps[]], any>;
 }
 
 function normalizeReallocationAction(action: any): ReallocationAction {
@@ -178,19 +208,6 @@ function buildTokenIndex(markets: Market[]): Map<string, MarketTokenWithApy> {
     return tokens;
 }
 
-function incentiveApyToBps(incentiveSupplyApy: Decimal.Value | undefined): bigint {
-    if (incentiveSupplyApy == undefined) {
-        return 0n;
-    }
-
-    const apy = new Decimal(incentiveSupplyApy);
-    if (!apy.isFinite() || apy.isNegative()) {
-        throw new Error(`OptimizerReader: incentiveSupplyApy must be a finite, non-negative decimal.`);
-    }
-
-    return BigInt(apy.mul(BPS_DECIMAL).floor().toFixed(0));
-}
-
 function buildMarketIncentiveAPYsBps(
     data: OptimizerMarketData,
     markets: Market[],
@@ -206,8 +223,50 @@ function buildMarketIncentiveAPYsBps(
             );
         }
 
-        return incentiveApyToBps(token.incentiveSupplyApy);
+        return decimalApyToBps(token.incentiveSupplyApy);
     });
+}
+
+function buildTaggedMarketIncentives(
+    data: OptimizerMarketData,
+    markets: Market[],
+): MarketIncentiveAPYBps[] {
+    const marketIncentiveAPYsBps = buildMarketIncentiveAPYsBps(data, markets);
+
+    return data.markets.map((marketData, index) => ({
+        cToken: marketData.address,
+        incentiveAPYBps: marketIncentiveAPYsBps[index] ?? 0n,
+    }));
+}
+
+function filterMerklLendOpportunities(opportunities: MerklOpportunityLike[]): MerklOpportunityLike[] {
+    return opportunities.filter((opportunity) => (
+        opportunity.action == undefined ||
+        opportunity.action.toUpperCase() === "LEND"
+    ));
+}
+
+function buildMerklIncentiveAPYsBps(
+    data: OptimizerMarketData,
+    opportunities: MerklOpportunityLike[],
+): bigint[] {
+    const lendOpportunities = filterMerklLendOpportunities(opportunities);
+
+    return data.markets.map((marketData) => (
+        getMerklDepositIncentiveBps(marketData.address, lendOpportunities)
+    ));
+}
+
+function buildTaggedMerklIncentives(
+    data: OptimizerMarketData,
+    opportunities: MerklOpportunityLike[],
+): MarketIncentiveAPYBps[] {
+    const marketIncentiveAPYsBps = buildMerklIncentiveAPYsBps(data, opportunities);
+
+    return data.markets.map((marketData, index) => ({
+        cToken: marketData.address,
+        incentiveAPYBps: marketIncentiveAPYsBps[index] ?? 0n,
+    }));
 }
 
 export class OptimizerReader {
@@ -322,9 +381,9 @@ export class OptimizerReader {
         return normalizeRebalanceResult(data);
     }
 
-    async optimalRebalanceWithIncentiveBps(
+    async optimalRebalanceWithTaggedMarketIncentives(
         optimizer: address,
-        marketIncentiveAPYsBps: bigint[],
+        marketIncentives: MarketIncentiveAPYBps[],
         slippageBps: bigint = 0n,
         rebalanceChunks: bigint = DEFAULT_REBALANCE_CHUNKS,
     ): Promise<{ actions: ReallocationAction[]; bounds: AllocationBound[] }> {
@@ -333,9 +392,24 @@ export class OptimizerReader {
             optimizer,
             slippageBps,
             rebalanceChunks,
-            marketIncentiveAPYsBps,
+            marketIncentives,
         );
         return normalizeRebalanceResult(data);
+    }
+
+    async optimalRebalanceWithIncentives(
+        optimizer: address,
+        slippageBps: bigint = 0n,
+        rebalanceChunks: bigint = DEFAULT_REBALANCE_CHUNKS,
+        options: OptimizerMerklIncentiveOptions = {},
+    ): Promise<{ actions: ReallocationAction[]; bounds: AllocationBound[] }> {
+        const marketIncentives = await this.getOptimizerMerklMarketIncentivesBps(optimizer, options);
+        return this.optimalRebalanceWithTaggedMarketIncentives(
+            optimizer,
+            marketIncentives,
+            slippageBps,
+            rebalanceChunks,
+        );
     }
 
     async optimalRebalanceWithMarketIncentives(
@@ -349,12 +423,86 @@ export class OptimizerReader {
             throw new Error(`OptimizerReader.optimalRebalanceWithMarketIncentives: no data returned for ${optimizer}.`);
         }
 
-        const marketIncentiveAPYsBps = buildMarketIncentiveAPYsBps(data, markets);
-        return this.optimalRebalanceWithIncentiveBps(
+        const marketIncentives = buildTaggedMarketIncentives(data, markets);
+        return this.optimalRebalanceWithTaggedMarketIncentives(
             optimizer,
-            marketIncentiveAPYsBps,
+            marketIncentives,
             slippageBps,
             rebalanceChunks,
         );
+    }
+
+    async getOptimizerMerklMarketIncentivesBps(
+        optimizer: address,
+        options: OptimizerMerklIncentiveOptions = {},
+    ): Promise<MarketIncentiveAPYBps[]> {
+        const [data] = await this.getOptimizerMarketData([optimizer]);
+        if (data == undefined) {
+            throw new Error(`OptimizerReader.getOptimizerMerklMarketIncentivesBps: no data returned for ${optimizer}.`);
+        }
+
+        const opportunities = options.opportunities ?? await this.fetchMerklLendOpportunities(options);
+        return buildTaggedMerklIncentives(data, opportunities);
+    }
+
+    async getOptimizerMerklIncentiveAPYsBps(
+        optimizer: address,
+        options: OptimizerMerklIncentiveOptions = {},
+    ): Promise<bigint[]> {
+        const marketIncentives = await this.getOptimizerMerklMarketIncentivesBps(optimizer, options);
+        return marketIncentives.map((marketIncentive) => marketIncentive.incentiveAPYBps);
+    }
+
+    async optimalRebalanceWithMerklIncentives(
+        optimizer: address,
+        slippageBps: bigint = 0n,
+        rebalanceChunks: bigint = DEFAULT_REBALANCE_CHUNKS,
+        options: OptimizerMerklIncentiveOptions = {},
+    ): Promise<{ actions: ReallocationAction[]; bounds: AllocationBound[] }> {
+        return this.optimalRebalanceWithIncentives(
+            optimizer,
+            slippageBps,
+            rebalanceChunks,
+            options,
+        );
+    }
+
+    private async fetchMerklLendOpportunities(
+        options: OptimizerMerklIncentiveOptions,
+    ): Promise<MerklOpportunityLike[]> {
+        let chainId = options.chainId;
+        if (chainId == undefined) {
+            try {
+                chainId = await resolveProviderChainId(this.provider);
+            } catch (error) {
+                chainId = resolveDefaultChainId();
+                if (chainId == undefined) {
+                    throw error;
+                }
+            }
+        }
+        if (chainId == undefined) {
+            chainId = resolveDefaultChainId();
+        }
+        if (chainId == undefined) {
+            throw new Error(
+                `OptimizerReader.getOptimizerMerklMarketIncentivesBps: chainId is required. ` +
+                `Pass options.chainId, initialize setupChain(), or use a provider with getNetwork().`,
+            );
+        }
+
+        const params: {
+            action: "LEND";
+            chainId: number;
+            signal?: AbortSignal;
+        } = {
+            action: "LEND",
+            chainId,
+        };
+        if (options.signal != undefined) {
+            params.signal = options.signal;
+        }
+
+        return fetchMerklOpportunities(params);
     }
 }

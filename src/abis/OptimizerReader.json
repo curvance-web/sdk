@@ -346,9 +346,21 @@
         "internalType": "uint256"
       },
       {
-        "name": "marketIncentiveAPYsBps",
-        "type": "uint256[]",
-        "internalType": "uint256[]"
+        "name": "marketIncentives",
+        "type": "tuple[]",
+        "internalType": "struct OptimizerReader.MarketIncentiveAPYBps[]",
+        "components": [
+          {
+            "name": "cToken",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "incentiveAPYBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
       }
     ],
     "outputs": [
@@ -441,8 +453,30 @@
   },
   {
     "type": "error",
+    "name": "OptimizerReader__DuplicateIncentiveMarket",
+    "inputs": [
+      {
+        "name": "cToken",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "OptimizerReader__InvalidIncentiveData",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OptimizerReader__InvalidIncentiveMarket",
+    "inputs": [
+      {
+        "name": "cToken",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",
