@@ -310,6 +310,17 @@
         "PT-AUSD-8OCT2026": "0xA1Ef78a09f5d718E2459CC98298AD41bf26Ab07b",
         "AUSD": "0xA4dbce4883df78Ad6518738a3D383B827E1cc108"
       }
+    },
+    "High Yield AUSD Vault | AUSD": {
+      "address": "0x120E3ef143457F9F4d1E3eCDC448a5bb1092cE6a",
+      "tokens": {
+        "hyAUSD": "0xbaAD847D1Adcf143eE4Eb4DCFDd17dbB93d9cA30",
+        "AUSD": "0x4DEDa1d89f478fc8774C3DF4d8287F86F9c066E8"
+      },
+      "irms": {
+        "hyAUSD": "0xE2c0d4b23dEcFe536F6cb91060fb8bEd56bA7A93",
+        "AUSD": "0x1D35a197eFB02e0c23D31C77C3a072f852d6E442"
+      }
     }
   },
   "Optimizers": {
@@ -326,11 +337,12 @@
   "VaultAggregator-USDC-YZM": "0xae3E9D51f1384a86C44fa7958b61F92be23cb284",
   "VaultAggregator-AUSD-vUSD": "0xDa13c308E5bd054C5cfF7bC3Fa67cB7f8b2dFe3c",
   "VaultAggregator-accNUSD-AUSD": "0xd9b905207d53d521B265330a050F7993F60fEa42",
-  "ProtocolManagerMassPause-EC": "0xBB82Aee16936fB2232F3c0d700b6fc832D7Ead73",
-  "ProtocolManagerMassPause-RapidResponse": "0x89D2253b13c718d06B78fCcE3d973a520bD07803",
+  "VaultAggregator-AUSD-hyAUSD": "0x0159B4d597A388c4263b1F8E113b4005808132CF",
   "PendlePTAggregator-PT-AUSD-8OCT2026": "0x3ED78CA090d4B20aC043505A880A04B0f23B6134",
-  "ProtocolManager-RapidResponse-IRM": "0xC3a2974593BB729e5A62fE74a8ab091Fed5321A1",
-  "ProtocolManager-Avant-Pause-IRM": "0x7D89822C41191541D6A02AebC23f4F398D6E4441",
-  "ProtocolManager-Yuzu-Pause-IRM": "0x4DaD55E314CF2FbB8e65B2AAC7d6010cc1b6A012",
-  "ProtocolManager-Yuzu-Pause": "0xB68F32416471a6f7a5753BA9e5baE5710219C3A4"
+  "PendlePTAggregator-PT-earnAUSD-8OCT2026": "0x4Fc6c47e19DF74Fd36E910761358492e42ba3577",
+  "ProtocolManagerMassPause-RapidResponse": "0x89D2253b13c718d06B78fCcE3d973a520bD07803",
+  "ProtocolManagerMassPause-EC": "0xBB82Aee16936fB2232F3c0d700b6fc832D7Ead73",
+  "ProtocolManager-Avant": "0x7D89822C41191541D6A02AebC23f4F398D6E4441",
+  "ProtocolManager-IRM": "0xC3a2974593BB729e5A62fE74a8ab091Fed5321A1",
+  "ProtocolManager-Yuzu": "0x4DaD55E314CF2FbB8e65B2AAC7d6010cc1b6A012"
 }
