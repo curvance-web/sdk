@@ -318,6 +318,17 @@
         "AUSD": "0xA4dbce4883df78Ad6518738a3D383B827E1cc108"
       }
     },
+    "PT earnAUSD 8OCT2026 | AUSD": {
+      "address": "0xFADE6B86fED641c7840d9E4997666F30D2160210",
+      "tokens": {
+        "PT-earnAUSD-8OCT2026": "0x12046BFc04539D0Ac34912039ad266A5aA319b0D",
+        "AUSD": "0x9489dc59C3636649f271C9E2ad3C303fd41923b9"
+      },
+      "irms": {
+        "PT-earnAUSD-8OCT2026": "0x65c925A3dA32D44B323C7Ae806ac6dea5C6A1583",
+        "AUSD": "0xd93bE0439D98447F2493029F8D89994040ead6A3"
+      }
+    },
     "High Yield AUSD Vault | AUSD": {
       "address": "0x120E3ef143457F9F4d1E3eCDC448a5bb1092cE6a",
       "tokens": {
