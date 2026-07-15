@@ -9,9 +9,12 @@ import {
 import type { MerklOpportunity } from "../src/integrations/merkl";
 import {
     aggregateMerklAprByToken,
+    decimalApyToBps,
     getBorrowCost,
     getDepositApy,
+    getMerklBorrowIncentiveBps,
     getMerklBorrowIncentives,
+    getMerklDepositIncentiveBps,
     getMerklDepositIncentives,
     getNativeYield,
 } from "../src/helpers";
@@ -1254,6 +1257,10 @@ test("Merkl helper APYs match the shared rollup semantics used by market hydrati
     assert.equal(getMerklDepositIncentives(WMON, lendOpps).toString(), "0.15");
     assert.equal(getMerklDepositIncentives(USDC, lendOpps).toString(), "0.1");
     assert.equal(getMerklBorrowIncentives(WMON, borrowOpps).toString(), "0.1");
+    assert.equal(decimalApyToBps("0.0319"), 319n);
+    assert.equal(getMerklDepositIncentiveBps(WMON, lendOpps), 1_500n);
+    assert.equal(getMerklDepositIncentiveBps(USDC, lendOpps), 1_000n);
+    assert.equal(getMerklBorrowIncentiveBps(WMON, borrowOpps), 1_000n);
 
     const depositToken = {
         nativeYield: 0,
