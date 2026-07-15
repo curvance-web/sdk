@@ -341,6 +341,17 @@
         "hyAUSD": "0xE2c0d4b23dEcFe536F6cb91060fb8bEd56bA7A93",
         "AUSD": "0x1D35a197eFB02e0c23D31C77C3a072f852d6E442"
       }
+    },
+    "High Yield AUSD Vault | USDC": {
+      "address": "0x8AF3E980d2d50F8E97dcD7DBbD7cAa0d17605974",
+      "tokens": {
+        "hyAUSD": "0xc3DfC3CD69C97877720f5386f8d4742B0F147F28",
+        "USDC": "0x516dAd4b2b59650Fd1885459530a86c72936d4f2"
+      },
+      "irms": {
+        "hyAUSD": "0x27a0aAd571510e307f80BA03CD1252D1E0169eD0",
+        "USDC": "0xe88040C37a65815756b44da866B5f8516CBAf1AC"
+      }
     }
   },
   "Optimizers": {
