@@ -12,12 +12,35 @@ test.afterEach(() => {
     globalThis.clearTimeout = originalClearTimeout;
 });
 
-test("validateApiUrl rejects non-HTTPS URLs before fetch callers can use them", () => {
-    assert.equal(validateApiUrl("https://api.curvance.test"), "https://api.curvance.test");
-    assert.throws(
-        () => validateApiUrl("http://api.curvance.test"),
-        /api_url must use HTTPS/i,
-    );
+test("validateApiUrl allows HTTPS and explicit HTTP loopback endpoints", () => {
+    const allowedUrls = [
+        "https://api.curvance.test",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://[::1]:8080",
+    ];
+
+    for (const url of allowedUrls) {
+        assert.equal(validateApiUrl(url), url);
+    }
+});
+
+test("validateApiUrl rejects insecure remote and loopback-lookalike endpoints", () => {
+    const rejectedUrls = [
+        "http://api.curvance.test",
+        "http://localhost.example.com:8080",
+        "http://127.0.0.2:8080",
+    ];
+
+    for (const url of rejectedUrls) {
+        assert.throws(
+            () => validateApiUrl(url),
+            /api_url must use HTTPS/i,
+        );
+    }
+});
+
+test("validateApiUrl rejects malformed and unsupported-scheme URLs", () => {
     assert.throws(
         () => validateApiUrl("javascript:alert(1)"),
         /api_url must use HTTPS/i,

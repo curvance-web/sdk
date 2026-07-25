@@ -115,7 +115,8 @@ export async function fetchWithTimeout(
 
 /**
  * Validate that an API URL uses HTTPS and is well-formed.
- * Prevents SSRF when api_url is consumer-provided.
+ * Plain HTTP is allowed only for explicit loopback hosts so local development
+ * can run without weakening transport validation for remote endpoints.
  */
 export function validateApiUrl(url: string): string {
     if (!url || typeof url !== 'string') {
@@ -129,7 +130,15 @@ export function validateApiUrl(url: string): string {
         throw new Error(`Invalid api_url: "${url.slice(0, 100)}"`);
     }
 
-    if (parsed.protocol !== 'https:') {
+    const isLoopbackHttp =
+        parsed.protocol === 'http:' &&
+        (
+            parsed.hostname === 'localhost' ||
+            parsed.hostname === '127.0.0.1' ||
+            parsed.hostname === '[::1]'
+        );
+
+    if (parsed.protocol !== 'https:' && !isLoopbackHttp) {
         throw new Error(`api_url must use HTTPS, got ${parsed.protocol} in "${url.slice(0, 100)}"`);
     }
 
