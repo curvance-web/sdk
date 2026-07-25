@@ -259,7 +259,7 @@ test("Curvance API reward aliases are unambiguous across configured chains", () 
     );
 });
 
-test("external service aliases stay in chain config", () => {
+test("external service configuration stays in chain config and API2 uses numeric chain ids", () => {
     const apiSource = readRepoFile("src/classes/Api.ts");
     const marketSource = readRepoFile("src/classes/Market.ts");
     const monadChainSource = readRepoFile("src/chains/monad.ts");
@@ -268,10 +268,9 @@ test("external service aliases stay in chain config", () => {
 
     assert.match(apiSource, /resolveCurvanceApiServices/);
     assert.match(apiSource, /chain_config\[config\.chain\]\?\.services\.curvanceApi/);
-    assert.match(apiSource, /const rewardsSlug = resolveCurvanceApiServices\(resolvedConfig\)\.rewardsSlug;/);
-    assert.match(apiSource, /\/v1\/rewards\/active\/\$\{rewardsSlug\}/);
-    assert.match(apiSource, /services\.rewardChainAliases/);
     assert.match(apiSource, /resolveCurvanceApiServices\(resolvedConfig\)\.nativeYieldSlug/);
+    assert.match(apiSource, /`\$\{apiUrl\}\/asset\/\$\{chainId\}`/);
+    assert.doesNotMatch(apiSource, /\/v1\/rewards\/active|\/native_apy/);
     assert.match(marketSource, /setup\.services\.curvanceApi\.suppressedNativeYieldSymbols/);
     assert.doesNotMatch(apiSource, /normalized === "monad-mainnet"|normalized === "arb-sepolia"/);
     assert.doesNotMatch(apiSource, /chain == 'monad-mainnet'|\['monad'\]\.includes/);
