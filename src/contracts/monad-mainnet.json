@@ -352,6 +352,17 @@
         "hyAUSD": "0x27a0aAd571510e307f80BA03CD1252D1E0169eD0",
         "USDC": "0xe88040C37a65815756b44da866B5f8516CBAf1AC"
       }
+    },
+    "aguaUSDCgc | USDC": {
+      "address": "0x00308C908d2FdF700CbBFeFCDabcF5325bF5eD92",
+      "tokens": {
+        "aguaUSDCgc": "0xB071bAAad3392Cb6016276EE9C99aed23bEdEecc",
+        "USDC": "0x207340D15F4E3C63AE610429f34b87C73a5D55e5"
+      },
+      "irms": {
+        "aguaUSDCgc": "0x8E5812a6CA60534BA008016dA9D24F728Cde3eeF",
+        "USDC": "0x287c70c55670d8A6c47FBB9142CBce531663F128"
+      }
     }
   },
   "Optimizers": {
