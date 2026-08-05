@@ -11,6 +11,7 @@
   "ProtocolManager-RapidResponse-IRM": "0xC3a2974593BB729e5A62fE74a8ab091Fed5321A1",
   "ProtocolManager-Yuzu-IRM-Pause": "0x4DaD55E314CF2FbB8e65B2AAC7d6010cc1b6A012",
   "ProtocolManager-Yuzu-Pause": "0xB68F32416471a6f7a5753BA9e5baE5710219C3A4",
+  "ProtocolManager-Reservoir-IRM-Pause": "0x1Cfeaa998b271228c6f4E090B8E5A007a08C38Cc",
   "adaptors": {
     "ChainlinkAdaptor": "0x42B318abFDE82a43B3685eB65a5863B9367B22e1",
     "RedstoneClassicAdaptor": "0x4d48676f7B407A7715E84862dbA42b276B8851aE"
