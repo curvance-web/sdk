@@ -363,6 +363,20 @@
         "aguaUSDCgc": "0x8E5812a6CA60534BA008016dA9D24F728Cde3eeF",
         "USDC": "0x287c70c55670d8A6c47FBB9142CBce531663F128"
       }
+    },
+    "wsrUSD | USDC": {
+      "address": "0x27a4fC8aa36d0ae896C85E8a34e80Fa061E8b4c4",
+      "tokens": {
+        "wsrUSD": "0x78B4ddab63826C9021e7F75b1a8EE18bEc8012e6",
+        "USDC": "0x7f779f7F5316F6164dC5a25422A5ee51504B284A"
+      },
+      "irms": {
+        "wsrUSD": "0xAF7D2fc8fe51dD6BB40F4E32d13416b14320e297",
+        "USDC": "0xAd22787690DBBbBD70F8081F5293ee5a88Be4cec"
+      },
+      "plugins": {
+        "simplePositionManager": "0xf2ED8491Cc7Db3224c69e9647555575a6279DF75"
+      }
     }
   },
   "Optimizers": {
