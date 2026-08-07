@@ -355,6 +355,7 @@ async function tryAddGasBuffer(method: any, args: any[], bufferPercent: number, 
 
 export type MerklOpportunityLike = {
     apr: number;
+    action?: string;
     identifier: string;
     tokens: { address: string }[];
 };
@@ -460,6 +461,19 @@ export function getMerklTokenIncentiveApy(
     return aggregateMerklAprByToken(opportunities, mode).get(tokenKey) ?? new Decimal(0);
 }
 
+export function decimalApyToBps(apy: Decimal.Value | null | undefined): bigint {
+    if (apy == undefined) {
+        return 0n;
+    }
+
+    const decimal = new Decimal(apy);
+    if (!decimal.isFinite() || decimal.isNegative()) {
+        throw new Error(`APY must be a finite, non-negative decimal.`);
+    }
+
+    return BigInt(decimal.mul(BPS_DECIMAL).floor().toFixed(0));
+}
+
 /**
  * Returns the native yield for a token — the rate provided by the asset issuer.
  * When `nativeApy` is nonzero it already includes the interest component,
@@ -506,6 +520,13 @@ export function getMerklDepositIncentives(
     return getMerklTokenIncentiveApy(tokenAddress, opportunities, "deposit");
 }
 
+export function getMerklDepositIncentiveBps(
+    tokenAddress: string,
+    opportunities: MerklOpportunityLike[] | undefined,
+): bigint {
+    return decimalApyToBps(getMerklDepositIncentives(tokenAddress, opportunities));
+}
+
 /**
  * Returns the Merkl incentive APY for a *borrow* token.
  * Matches opportunities whose `identifier` equals the given address.
@@ -515,6 +536,13 @@ export function getMerklBorrowIncentives(
     opportunities: MerklOpportunityLike[] | undefined,
 ): Decimal {
     return getMerklTokenIncentiveApy(tokenAddress, opportunities, "borrow");
+}
+
+export function getMerklBorrowIncentiveBps(
+    tokenAddress: string,
+    opportunities: MerklOpportunityLike[] | undefined,
+): bigint {
+    return decimalApyToBps(getMerklBorrowIncentives(tokenAddress, opportunities));
 }
 
 /**
