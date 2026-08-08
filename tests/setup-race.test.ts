@@ -553,7 +553,7 @@ test("setupChain boots arb-sepolia through Market.getAll with chain-scoped enric
     );
 });
 
-test("setupChain filters wrong-chain reward metadata before market enrichment", async (t) => {
+test("setupChain hydrates API2 asset points while keeping removed milestones empty", async (t) => {
     const correctMilestone = {
         market: MONAD_MARKET,
         tvl: 123,
@@ -641,29 +641,22 @@ test("setupChain filters wrong-chain reward metadata before market enrichment", 
             };
         },
         fetch: async (url) => {
-            if (url === "https://api.monad-rewards.example/v1/rewards/active/monad-mainnet") {
+            if (url === "https://api.monad-rewards.example/asset/143") {
                 return {
                     ok: true,
-                    json: async () => ({
-                        milestones: [
-                            wrongChainGlobalMilestone,
-                            correctGlobalMilestone,
-                            correctMilestone,
-                            wrongChainMilestone,
+                    json: async () => [{
+                        chain_id: 143,
+                        token: MONAD_WRAPPED_NATIVE,
+                        symbol: "WMON",
+                        token_image: "wmon.svg",
+                        market_address: MONAD_MARKET,
+                        vault: false,
+                        percent_native_apy: 0,
+                        points: [
+                            { type: "legacy", rate: 1, image: "stars-rewards" },
+                            { type: "monad", rate: 2, image: "stars-rewards" },
                         ],
-                        incentives: [
-                            legacyIncentive,
-                            correctIncentive,
-                            wrongChainIncentive,
-                        ],
-                    }),
-                };
-            }
-
-            if (url === "https://api.monad-rewards.example/v1/monad/native_apy") {
-                return {
-                    ok: true,
-                    json: async () => ({ native_apy: [] }),
+                    }],
                 };
             }
 
@@ -678,18 +671,15 @@ test("setupChain filters wrong-chain reward metadata before market enrichment", 
     const market = result.markets[0];
 
     assert.ok(market);
-    assert.equal(market.milestone, correctMilestone);
-    assert.equal(market.milestone?.multiplier, 2);
-    assert.equal(result.global_milestone, correctGlobalMilestone);
-    assert.equal(result.global_milestone?.multiplier, 3);
+    assert.equal(market.milestone, null);
+    assert.equal(result.global_milestone, null);
     assert.deepEqual(
         market.incentives.map((incentive) => incentive.description),
-        ["legacy no-chain incentive", "monad incentive"],
+        ["legacy", "monad"],
     );
-    assert.deepEqual(new Set(harness.externalFetchCalls), new Set([
-        "https://api.monad-rewards.example/v1/rewards/active/monad-mainnet",
-        "https://api.monad-rewards.example/v1/monad/native_apy",
-    ]));
+    assert.deepEqual(harness.externalFetchCalls, [
+        "https://api.monad-rewards.example/asset/143",
+    ]);
 });
 
 test("setupChain hydrates Merkl APY through the real chain-filtered opportunity fetch", async (t) => {
@@ -913,10 +903,10 @@ test("setupChain keeps market token DEX routes bound after a later chain boot mo
             throw new Error(`Unexpected setup boot reader context: ${context.batchKey}`);
         },
         fetch: async (url) => {
-            assert.equal(url, "https://api.monad-e2e.example/v1/monad/native_apy");
+            assert.equal(url, "https://api.monad-e2e.example/asset/143");
             return {
                 ok: true,
-                json: async () => ({ native_apy: [] }),
+                json: async () => [],
             };
         },
     });
@@ -1012,7 +1002,7 @@ test("setupChain keeps market token DEX routes bound after a later chain boot mo
         { action: undefined, chainId: 143 },
         { action: undefined, chainId: 421614 },
     ]);
-    assert.deepEqual(harness.externalFetchCalls, ["https://api.monad-e2e.example/v1/monad/native_apy"]);
+    assert.deepEqual(harness.externalFetchCalls, ["https://api.monad-e2e.example/asset/143"]);
 });
 
 test("setupChain exposes a deterministic Monad route matrix from setup assets and deployed plugins", async (t) => {
@@ -4127,10 +4117,19 @@ test("explicit native-yield API calls keep older setup snapshots bound after a l
             throw new Error(`Unexpected setup boot reader context: ${context.batchKey}`);
         },
         fetch: async (url) => {
-            assert.equal(url, "https://api.monad-native.example/v1/monad/native_apy");
+            assert.equal(url, "https://api.monad-native.example/asset/143");
             return {
                 ok: true,
-                json: async () => ({ native_apy: [{ symbol: "WMON", apy: 3.14 }] }),
+                json: async () => [{
+                    chain_id: 143,
+                    token: MONAD_WRAPPED_NATIVE,
+                    symbol: "WMON",
+                    token_image: "wmon.svg",
+                    market_address: MONAD_MARKET,
+                    vault: false,
+                    percent_native_apy: 3.14,
+                    points: [],
+                }],
             };
         },
     });
@@ -4146,7 +4145,7 @@ test("explicit native-yield API calls keep older setup snapshots bound after a l
 
     assert.equal(setup_config.chain, "arb-sepolia");
     assert.equal(all_markets, arbResult.markets);
-    assert.deepEqual(harness.externalFetchCalls, ["https://api.monad-native.example/v1/monad/native_apy"]);
+    assert.deepEqual(harness.externalFetchCalls, ["https://api.monad-native.example/asset/143"]);
 
     const olderMonadWmon = monadResult.markets[0]!.tokens.find(
         (token) => token.address.toLowerCase() === MONAD_WMON_CTOKEN.toLowerCase(),
@@ -4167,15 +4166,13 @@ test("explicit native-yield API calls keep older setup snapshots bound after a l
     assert.deepEqual(explicitArbYields, []);
     assert.deepEqual(currentDefaultYields, []);
     assert.deepEqual(harness.externalFetchCalls, [
-        "https://api.monad-native.example/v1/monad/native_apy",
-        "https://api.monad-native.example/v1/monad/native_apy",
+        "https://api.monad-native.example/asset/143",
     ]);
     assert.equal(setup_config.chain, "arb-sepolia");
     assert.equal(all_markets, arbResult.markets);
 });
 
-test("explicit rewards API calls keep older setup reward slugs after chain config moves", async (t) => {
-    const originalMonadRewardsSlug = chain_config["monad-mainnet"].services.curvanceApi.rewardsSlug;
+test("explicit API2 asset calls keep using their setup snapshot after the active chain moves", async (t) => {
     const harness = installSetupChainBootHarness(t, {
         rewards: false,
         marketData: (context) => {
@@ -4220,24 +4217,17 @@ test("explicit rewards API calls keep older setup reward slugs after chain confi
             throw new Error(`Unexpected setup boot reader context: ${context.batchKey}`);
         },
         fetch: async (url) => {
-            if (url === "https://api.monad-rewards-slug.example/v1/rewards/active/monad-mainnet") {
+            if (url === "https://api.monad-rewards-slug.example/asset/143") {
                 return {
                     ok: true,
-                    json: async () => ({ milestones: [], incentives: [] }),
+                    json: async () => [],
                 };
             }
 
-            if (url === "https://api.monad-rewards-slug.example/v1/monad/native_apy") {
+            if (url === "https://api.arb-rewards-slug.example/asset/421614") {
                 return {
                     ok: true,
-                    json: async () => ({ native_apy: [] }),
-                };
-            }
-
-            if (url === "https://api.arb-rewards-slug.example/v1/rewards/active/arb-sepolia") {
-                return {
-                    ok: true,
-                    json: async () => ({ milestones: [], incentives: [] }),
+                    json: async () => [],
                 };
             }
 
@@ -4259,22 +4249,14 @@ test("explicit rewards API calls keep older setup reward slugs after chain confi
         readProvider: createDecimalsReadProvider(421614n) as any,
     });
 
-    (chain_config["monad-mainnet"].services.curvanceApi as any).rewardsSlug = "moved-monad";
-    t.after(() => {
-        (chain_config["monad-mainnet"].services.curvanceApi as any).rewardsSlug = originalMonadRewardsSlug;
-    });
-
     await Api.getRewards(monadResult.setupConfigSnapshot);
     await Api.getRewards(arbResult.setupConfigSnapshot);
 
     assert.equal(setup_config.chain, "arb-sepolia");
     assert.equal(all_markets, arbResult.markets);
     assert.deepEqual(harness.externalFetchCalls, [
-        "https://api.monad-rewards-slug.example/v1/rewards/active/monad-mainnet",
-        "https://api.monad-rewards-slug.example/v1/monad/native_apy",
-        "https://api.arb-rewards-slug.example/v1/rewards/active/arb-sepolia",
-        "https://api.monad-rewards-slug.example/v1/rewards/active/monad-mainnet",
-        "https://api.arb-rewards-slug.example/v1/rewards/active/arb-sepolia",
+        "https://api.monad-rewards-slug.example/asset/143",
+        "https://api.arb-rewards-slug.example/asset/421614",
     ]);
 });
 
