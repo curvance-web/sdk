@@ -260,7 +260,7 @@ export function setupChain(
 export async function setupChain(
     chain: ChainRpcPrefix,
     provider: curvance_provider | null = null,
-    api_url: string = "https://api.curvance.com",
+    api_url: string = "https://api2.curvance.com",
     options: SetupChainOptions = {},
 ) {
     if(!(chain in chain_config)) {

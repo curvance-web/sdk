@@ -29,7 +29,7 @@ const FORK_SKIP = MISSING_ENV.length === 0
     ? undefined
     : `Dual-fork env not configured: set ${MISSING_ENV.join(", ")} in .env.`;
 
-const TEST_API_URL = process.env.TEST_API_URL ?? "https://api.curvance.com";
+const TEST_API_URL = process.env.TEST_API_URL ?? "https://api2.curvance.com";
 const LOCAL_HOST = "127.0.0.1";
 const MONAD_CHAIN_ID = 143n;
 const ARB_CHAIN_ID = 421614n;

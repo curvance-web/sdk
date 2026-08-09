@@ -11,6 +11,7 @@
   "ProtocolManager-RapidResponse-IRM": "0xC3a2974593BB729e5A62fE74a8ab091Fed5321A1",
   "ProtocolManager-Yuzu-IRM-Pause": "0x4DaD55E314CF2FbB8e65B2AAC7d6010cc1b6A012",
   "ProtocolManager-Yuzu-Pause": "0xB68F32416471a6f7a5753BA9e5baE5710219C3A4",
+  "ProtocolManager-Reservoir-IRM-Pause": "0x1Cfeaa998b271228c6f4E090B8E5A007a08C38Cc",
   "adaptors": {
     "ChainlinkAdaptor": "0x42B318abFDE82a43B3685eB65a5863B9367B22e1",
     "RedstoneClassicAdaptor": "0x4d48676f7B407A7715E84862dbA42b276B8851aE"
@@ -351,6 +352,31 @@
       "irms": {
         "hyAUSD": "0x27a0aAd571510e307f80BA03CD1252D1E0169eD0",
         "USDC": "0xe88040C37a65815756b44da866B5f8516CBAf1AC"
+      }
+    },
+    "aguaUSDCgc | USDC": {
+      "address": "0x00308C908d2FdF700CbBFeFCDabcF5325bF5eD92",
+      "tokens": {
+        "aguaUSDCgc": "0xB071bAAad3392Cb6016276EE9C99aed23bEdEecc",
+        "USDC": "0x207340D15F4E3C63AE610429f34b87C73a5D55e5"
+      },
+      "irms": {
+        "aguaUSDCgc": "0x8E5812a6CA60534BA008016dA9D24F728Cde3eeF",
+        "USDC": "0x287c70c55670d8A6c47FBB9142CBce531663F128"
+      }
+    },
+    "wsrUSD | USDC": {
+      "address": "0x27a4fC8aa36d0ae896C85E8a34e80Fa061E8b4c4",
+      "tokens": {
+        "wsrUSD": "0x78B4ddab63826C9021e7F75b1a8EE18bEc8012e6",
+        "USDC": "0x7f779f7F5316F6164dC5a25422A5ee51504B284A"
+      },
+      "irms": {
+        "wsrUSD": "0xAF7D2fc8fe51dD6BB40F4E32d13416b14320e297",
+        "USDC": "0xAd22787690DBBbBD70F8081F5293ee5a88Be4cec"
+      },
+      "plugins": {
+        "simplePositionManager": "0xf2ED8491Cc7Db3224c69e9647555575a6279DF75"
       }
     }
   },

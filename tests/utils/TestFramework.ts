@@ -3,7 +3,7 @@ import { getTestSetup, NonceManagerSigner, setNativeBalance } from "./helper";
 import { address, BorrowableCToken, ChainRpcPrefix, curvance_signer, ERC20, Market, setupChain } from "../../src";
 import Decimal from "decimal.js";
 
-const DEFUALT_API_URL = "https://api.curvance.com";
+const DEFUALT_API_URL = "https://api2.curvance.com";
 export class TestFramework {
     private_key: string;
     provider: JsonRpcProvider;

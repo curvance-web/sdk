@@ -47,7 +47,7 @@ const { chain, chainId, setupConfigSnapshot, markets, reader, dexAgg, global_mil
 setupChain(
     chain: ChainRpcPrefix,
     provider: curvance_provider | null = null,   // signer (wallet) OR read-only provider; null → SDK default
-    api_url: string = "https://api.curvance.com",
+    api_url: string = "https://api2.curvance.com",
     options: {
         feePolicy?: FeePolicy;                    // default is setup-resolved; Kyber chains require checker-compatible policy
         account?: address | null;                 // user address for user-specific reads without a signer

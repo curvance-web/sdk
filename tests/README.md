@@ -135,7 +135,7 @@ If the required env for a fork-backed suite is not set, that suite skips and pri
 - `TEST_CHAIN`
   - defaults to `monad-mainnet`
 - `TEST_API_URL`
-  - defaults to `https://api.curvance.com`
+  - defaults to `https://api2.curvance.com`
 
 ### Not required for `fork-integration.ts`
 
