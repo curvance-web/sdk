@@ -54,7 +54,6 @@ export const chain_rpc_config = {
         // Access-Control-Allow-Origin for requests from curvance.com origins.
         primary: "https://monad-rpc.huginn.tech",
         fallbacks: [
-            "https://gm.monad.at.htw.tech",
             "https://monad-mainnet.drpc.org",
             "https://rpc3.monad.xyz",
             "https://rpc1.monad.xyz",
