@@ -96,6 +96,7 @@ Runs:
 - `tests/optimizer.test.ts`
 - `tests/leverage.test.ts`
 - `tests/zap.test.ts`
+- `tests/zap-repay-fork.ts`
 - `tests/dual-fork-switch.test.ts`
 
 What it proves:
@@ -104,6 +105,9 @@ What it proves:
 - `getMarketStates([market])` matches live cache after a real write
 - `refreshActiveUserMarkets()` only refreshes the markets that actually became active
 - legacy fork flows still work against deployed Monad market state
+- SimpleZapper exact-input and projected repay-all plans execute against the
+  deployed Monad zapper, including exact-input ERC20 swaps, same-token refunds,
+  and native-to-debt Kyber routing
 - lending optimizer deployment/reader/rebalance behavior still works when its checked-in artifacts match the go-forward contract shape
 - SDK-level chain switching works across simultaneous Monad and Arbitrum Sepolia forks in one process
 

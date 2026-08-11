@@ -282,23 +282,49 @@ export class TestFramework {
     }
 
     async getMarket(findMarketName: string): Promise<[Market, BorrowableCToken, BorrowableCToken]> {
-        let market: Market | undefined;
-        let tokenA: BorrowableCToken | undefined;
-        let tokenB: BorrowableCToken | undefined;
+        const exactMarket = this.curvance.markets.find(
+            (candidate) => candidate.name === findMarketName,
+        );
+        if(exactMarket != undefined) {
+            return [
+                exactMarket,
+                exactMarket.tokens[0] as BorrowableCToken,
+                exactMarket.tokens[1] as BorrowableCToken,
+            ];
+        }
 
-        for(const curvance_market of this.curvance.markets) {
-            if(curvance_market.name == findMarketName) {
-                market = curvance_market;
-                tokenA = curvance_market.tokens[0] as BorrowableCToken;
-                tokenB = curvance_market.tokens[1] as BorrowableCToken;
-                break;
+        // Older fork tests use deployment-manifest labels (`TOKEN_A | TOKEN_B`),
+        // while the SDK now derives directional display names from live market
+        // configuration (`TOKEN_A → TOKEN_B` or `TOKEN_A ⇄ TOKEN_B`). Resolve
+        // those legacy labels by their stable ordered token symbols.
+        const requestedSymbols = findMarketName
+            .split('|')
+            .map((symbol) => symbol.trim())
+            .filter(Boolean);
+        if(requestedSymbols.length === 2) {
+            const matchingMarkets = this.curvance.markets.filter((candidate) => {
+                const symbols = candidate.tokens.map((token) => token.getAsset(true).symbol);
+                return (
+                    symbols.length === 2 &&
+                    symbols[0] === requestedSymbols[0] &&
+                    symbols[1] === requestedSymbols[1]
+                );
+            });
+            if(matchingMarkets.length > 1) {
+                throw new Error(
+                    `Market ${findMarketName} is ambiguous across ${matchingMarkets.length} live markets`,
+                );
+            }
+            if(matchingMarkets.length === 1) {
+                const market = matchingMarkets[0]!;
+                return [
+                    market,
+                    market.tokens[0] as BorrowableCToken,
+                    market.tokens[1] as BorrowableCToken,
+                ];
             }
         }
 
-        if(market == undefined || tokenA == undefined || tokenB == undefined) {
-            throw new Error(`Market ${findMarketName} not found in curvance markets`);
-        }
-
-        return [ market, tokenA, tokenB ];
+        throw new Error(`Market ${findMarketName} not found in curvance markets`);
     }
 }

@@ -80,6 +80,7 @@ test("test:fork includes every env-backed fork test file", () => {
         "optimizer-zap.test.ts",
         "leverage.test.ts",
         "zap.test.ts",
+        "zap-repay-fork.ts",
         "dual-fork-switch.test.ts",
     ];
 

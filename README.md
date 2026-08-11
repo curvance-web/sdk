@@ -313,6 +313,61 @@ await borrowToken.fetchDebt(inUSD)
 await borrowToken.debtBalance(account)
 ```
 
+### Zap & Repay (`BorrowableCToken` only)
+
+Zap repayment uses the configured SimpleZapper to accept another ERC20 or the
+native gas token, swap it into the debt asset, and repay in one transaction.
+The quote result is an immutable, short-lived plan that separates expected
+output from the guaranteed minimum output.
+
+```ts
+import Decimal from "decimal.js"
+import { NATIVE_ADDRESS } from "curvance"
+
+// Exact-input: spend exactly 2 MON and repay however much USDC the route returns.
+const plan = await borrowToken.quoteRepayWithSwap(
+    NATIVE_ADDRESS,
+    new Decimal(2),
+    new Decimal(0.01), // 1% slippage
+)
+
+if (!(await borrowToken.isRepayWithSwapApproved(plan))) {
+    const approval = await borrowToken.approveRepayWithSwap(plan)
+    await approval?.wait()
+}
+await borrowToken.repayWithSwap(plan)
+```
+
+`Repay all` is target-driven: the SDK projects debt through the plan deadline,
+adds a refundable interest/rounding margin, and iteratively sizes an exact-input
+route until `minimumOutput >= repayAssets`.
+
+```ts
+const repayAllPlan = await borrowToken.quoteRepayAllWithSwap(
+    paymentTokenAddress,
+    new Decimal(0.005), // 0.5% slippage
+    {
+        validForSeconds: 100n,
+        debtBufferBps: 1n,
+    },
+)
+
+const approval = await borrowToken.approveRepayAllWithSwap(repayAllPlan)
+await approval?.wait()
+
+const simulation = await borrowToken.simulateRepayAllWithSwap(repayAllPlan)
+if (!simulation.success) throw new Error(simulation.error)
+await borrowToken.repayAllWithSwap(repayAllPlan)
+```
+
+Execution re-reads projected debt, rejects plans near expiry, checks input-token
+allowance, and simulates before broadcast. Native input requires no ERC20
+approval. Repayment itself does not require cToken delegate approval. Any debt
+asset produced beyond the live debt is returned to the payer by SimpleZapper.
+Because the deployed contract repays as much as possible rather than exposing a
+strict repay-all flag, the SDK's short lifetime, buffered projection, refresh,
+and simulation are the enforcement boundary for the current deployment.
+
 ### Interest rate model
 
 ```ts
