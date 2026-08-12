@@ -779,9 +779,11 @@ export class BorrowableCToken extends CToken {
             candidate = largerCandidate > candidate ? largerCandidate : candidate + 1n;
         }
 
-        throw new Error(
+        throw new DexQuoteError(
+            "no-route",
             `Could not find a repay-all swap whose minimum output covers ${repayAssets} ` +
             `within ${maxQuoteIterations} quotes.`,
+            { provider: "Curvance SDK", retryable: true },
         );
     }
 

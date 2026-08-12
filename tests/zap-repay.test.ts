@@ -885,7 +885,11 @@ describe("BorrowableCToken repay-with-swap planning", () => {
                 Decimal("0.005"),
                 { initialInputAmount: Decimal(1), maxQuoteIterations: 2 },
             ),
-            /Could not find a repay-all swap.*within 2 quotes/i,
+            (error: unknown) =>
+                error instanceof DexQuoteError &&
+                error.code === "no-route" &&
+                error.retryable &&
+                /Could not find a repay-all swap.*within 2 quotes/i.test(error.message),
         );
         assert.equal(harness.dexCalls.length, 2);
         assert.equal(harness.dexBuildCalls.length, 0);
