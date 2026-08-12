@@ -495,7 +495,7 @@ test("Kyber current-router calldata validation fails closed in source", () => {
     assert.match(source, /const validatedFeeReceiver = feeReceiver == undefined[\s\S]*?validateAddress\(feeReceiver, 'KyberSwap feeReceiver'\);/);
     assert.match(
         source,
-        /validateSwapCalldata\(build_data\.data\.data,\s*\{[\s\S]*tokenIn: validatedTokenIn,[\s\S]*tokenOut: validatedTokenOut,[\s\S]*amount,[\s\S]*recipient: validatedWallet,[\s\S]*minReturnAmount: min_out,[\s\S]*feeBps: feeBps \?\? 0n,[\s\S]*feeReceiver: validatedFeeReceiver,[\s\S]*\}\);/,
+        /validateSwapCalldata\((?:build_data|buildData)\.data\.data,\s*\{[\s\S]*tokenIn: validatedTokenIn,[\s\S]*tokenOut: validatedTokenOut,[\s\S]*amount,[\s\S]*recipient: validatedWallet,[\s\S]*minReturnAmount: min_out,[\s\S]*feeBps: feeBps \?\? 0n,[\s\S]*feeReceiver: validatedFeeReceiver,[\s\S]*\}\);/,
     );
     assert.doesNotMatch(source, /console\.warn/);
     assert.match(validator, /validateEqualAddress\(desc\.srcToken,\s*expected\.tokenIn,\s*'srcToken'\);/);

@@ -3,13 +3,14 @@ import { address, bytes, curvance_read_provider, Percentage, TokenInput, USD, US
 import { CToken, ICToken, ZapperInstructions } from "./CToken";
 import { DynamicMarketToken, StaticMarketToken, UserMarketToken } from "./ProtocolReader";
 import { Market } from "./Market";
-import { BPS, ChangeRate, contractSetup, getRateSeconds, NATIVE_ADDRESS, SECONDS_PER_YEAR, WAD } from "../helpers";
+import { BPS, ChangeRate, contractSetup, EMPTY_ADDRESS, getRateSeconds, NATIVE_ADDRESS, SECONDS_PER_YEAR, WAD } from "../helpers";
 import borrowable_ctoken_abi from '../abis/BorrowableCToken.json';
 import irm_abi from '../abis/IDynamicIRM.json';
 import Decimal from "decimal.js";
 import FormatConverter from "./FormatConverter";
 import { ERC20 } from "./ERC20";
-import type { Swap, SwapAndRepayQuote, Zapper } from "./Zapper";
+import type { PreparedSwapAndRepayQuote, Swap, SwapAndRepayQuote, Zapper } from "./Zapper";
+import { DexQuoteError } from "./DexAggregators/IDexAgg";
 import { validateSlippageBps } from "../validation";
 
 const REPAY_DEBT_BUFFER_TIME = 100n;
@@ -18,18 +19,28 @@ export const REPAY_WITH_SWAP = {
     DEFAULT_VALID_FOR_SECONDS: 100n,
     MAX_VALID_FOR_SECONDS: 600n,
     DEFAULT_MIN_SUBMIT_WINDOW_SECONDS: 15n,
+    DEFAULT_PLANNING_TIMEOUT_MS: 12_000,
+    MAX_PLANNING_TIMEOUT_MS: 12_000,
+    DEFAULT_ROUTE_VALID_FOR_SECONDS: 10n,
+    DEFAULT_ROUTE_MIN_SUBMIT_WINDOW_SECONDS: 2n,
     DEFAULT_DEBT_BUFFER_BPS: 1n,
-    DEFAULT_MAX_QUOTE_ITERATIONS: 8,
-    MAX_QUOTE_ITERATIONS: 16,
+    /** Extra preview coverage for small Kyber route-summary/build output drift. */
+    REPAY_ALL_ROUTE_BUILD_BUFFER_BPS: 1n,
+    DEFAULT_MAX_QUOTE_ITERATIONS: 3,
+    MAX_QUOTE_ITERATIONS: 3,
 } as const;
 
 export interface RepayWithSwapOptions {
     /** Account whose debt will be repaid. Defaults to the connected signer. */
     receiver?: address;
-    /** Lifetime of the quote/interest projection, measured from chain time. */
+    /** Lifetime of the debt/interest projection, measured from chain time. */
     validForSeconds?: bigint;
     /** Minimum remaining lifetime required before the SDK will submit. */
     minSubmitWindowSeconds?: bigint;
+    /** Hard wall-clock budget for the complete quote-planning operation. */
+    planningTimeoutMs?: number;
+    /** Cancels quote planning plus in-flight route requests, retries, and calldata building. */
+    signal?: AbortSignal;
 }
 
 export interface RepayAllWithSwapOptions extends RepayWithSwapOptions {
@@ -65,8 +76,13 @@ export interface RepayWithSwapPlan {
     readonly feeBps: bigint;
     readonly feeReceiver: address | undefined;
     readonly quotedAt: bigint;
+    /** Debt projection deadline. `validUntil` remains its compatibility alias. */
+    readonly debtProjectionUntil: bigint;
     readonly validUntil: bigint;
     readonly minSubmitWindowSeconds: bigint;
+    readonly routeQuotedAt: bigint;
+    readonly routeValidUntil: bigint;
+    readonly routeMinSubmitWindowSeconds: bigint;
     readonly quoteIterations: number;
     readonly swapAction: Swap;
     readonly calldata: bytes;
@@ -346,37 +362,40 @@ export class BorrowableCToken extends CToken {
         slippage: Percentage,
         options: RepayWithSwapOptions = {},
     ): Promise<RepayWithSwapPlan> {
-        const context = await this.getRepayWithSwapContext(options);
-        const inputDecimals = await this.getRepayWithSwapInputDecimals(inputToken);
-        const inputAmountRaw = FormatConverter.decimalToBigInt(inputAmount, inputDecimals);
-        if (inputAmountRaw <= 0n) {
-            throw new Error("Zap repay input amount must be greater than zero.");
-        }
+        return this.runRepayWithSwapPlanning(options, async (signal) => {
+            const context = await this.getRepayWithSwapContext(options);
+            const inputDecimals = await this.getRepayWithSwapInputDecimals(inputToken);
+            const inputAmountRaw = FormatConverter.decimalToBigInt(inputAmount, inputDecimals);
+            if (inputAmountRaw <= 0n) {
+                throw new Error("Zap repay input amount must be greater than zero.");
+            }
 
-        const quote = await context.zapper.quoteSwapAndRepay(
-            this,
-            inputToken,
-            inputAmountRaw,
-            context.slippageBps(slippage),
-        );
-        if (quote.minimumOutput <= 0n) {
-            throw new Error("Zap repay quote returned zero guaranteed output.");
-        }
+            const quote = await context.zapper.quoteSwapAndRepay(
+                this,
+                inputToken,
+                inputAmountRaw,
+                context.slippageBps(slippage),
+                { signal },
+            );
+            if (quote.minimumOutput <= 0n) {
+                throw new Error("Zap repay quote returned zero guaranteed output.");
+            }
 
-        const projectedDebt = await this.fetchProjectedDebtFor(
-            context.receiver,
-            context.validUntil,
-        );
-        this.assertOutstandingProjectedDebt(projectedDebt, context.receiver);
+            const projectedDebt = await this.fetchProjectedDebtFor(
+                context.receiver,
+                context.validUntil,
+            );
+            this.assertOutstandingProjectedDebt(projectedDebt, context.receiver);
 
-        return this.buildRepayWithSwapPlan({
-            mode: "exact-input",
-            context,
-            inputDecimals,
-            projectedDebt,
-            repayAssets: quote.minimumOutput,
-            quote,
-            quoteIterations: 1,
+            return this.buildRepayWithSwapPlan({
+                mode: "exact-input",
+                context,
+                inputDecimals,
+                projectedDebt,
+                repayAssets: quote.minimumOutput,
+                quote,
+                quoteIterations: 1,
+            });
         });
     }
 
@@ -390,58 +409,61 @@ export class BorrowableCToken extends CToken {
         slippage: Percentage,
         options: RepayAllWithSwapOptions = {},
     ): Promise<RepayWithSwapPlan> {
-        const context = await this.getRepayWithSwapContext(options);
-        const inputDecimals = await this.getRepayWithSwapInputDecimals(inputToken);
-        const projectedDebt = await this.fetchProjectedDebtFor(
-            context.receiver,
-            context.validUntil,
-        );
-        this.assertOutstandingProjectedDebt(projectedDebt, context.receiver);
-
-        const debtBufferBps = options.debtBufferBps ?? REPAY_WITH_SWAP.DEFAULT_DEBT_BUFFER_BPS;
-        if (debtBufferBps < 0n || debtBufferBps >= BPS) {
-            throw new Error(`Repay-all debt buffer must be in [0, ${BPS}), got ${debtBufferBps}`);
-        }
-        // The BPS margin absorbs rate/utilization drift; the extra base unit
-        // protects the floor from integer rounding at the projection boundary.
-        const repayAssets = ceilDiv(projectedDebt * (BPS + debtBufferBps), BPS) + 1n;
-        const maxQuoteIterations = options.maxQuoteIterations
-            ?? REPAY_WITH_SWAP.DEFAULT_MAX_QUOTE_ITERATIONS;
-        if (
-            !Number.isInteger(maxQuoteIterations) ||
-            maxQuoteIterations <= 0 ||
-            maxQuoteIterations > REPAY_WITH_SWAP.MAX_QUOTE_ITERATIONS
-        ) {
-            throw new Error(
-                `Repay-all maxQuoteIterations must be an integer in [1, ${REPAY_WITH_SWAP.MAX_QUOTE_ITERATIONS}], ` +
-                `got ${maxQuoteIterations}`,
+        return this.runRepayWithSwapPlanning(options, async (signal) => {
+            const context = await this.getRepayWithSwapContext(options);
+            const inputDecimals = await this.getRepayWithSwapInputDecimals(inputToken);
+            const projectedDebt = await this.fetchProjectedDebtFor(
+                context.receiver,
+                context.validUntil,
             );
-        }
+            this.assertOutstandingProjectedDebt(projectedDebt, context.receiver);
 
-        const initialInputAmount = options.initialInputAmount == undefined
-            ? await this.estimateRepayAllInputAmount(inputToken, inputDecimals, repayAssets)
-            : FormatConverter.decimalToBigInt(options.initialInputAmount, inputDecimals);
-        if (initialInputAmount <= 0n) {
-            throw new Error("Repay-all initial input amount must be greater than zero.");
-        }
+            const debtBufferBps = options.debtBufferBps ?? REPAY_WITH_SWAP.DEFAULT_DEBT_BUFFER_BPS;
+            if (debtBufferBps < 0n || debtBufferBps >= BPS) {
+                throw new Error(`Repay-all debt buffer must be in [0, ${BPS}), got ${debtBufferBps}`);
+            }
+            // The BPS margin absorbs rate/utilization drift; the extra base unit
+            // protects the floor from integer rounding at the projection boundary.
+            const repayAssets = ceilDiv(projectedDebt * (BPS + debtBufferBps), BPS) + 1n;
+            const maxQuoteIterations = options.maxQuoteIterations
+                ?? REPAY_WITH_SWAP.DEFAULT_MAX_QUOTE_ITERATIONS;
+            if (
+                !Number.isInteger(maxQuoteIterations) ||
+                maxQuoteIterations <= 0 ||
+                maxQuoteIterations > REPAY_WITH_SWAP.MAX_QUOTE_ITERATIONS
+            ) {
+                throw new Error(
+                    `Repay-all maxQuoteIterations must be an integer in [1, ${REPAY_WITH_SWAP.MAX_QUOTE_ITERATIONS}], ` +
+                    `got ${maxQuoteIterations}`,
+                );
+            }
 
-        const solved = await this.solveRepayAllInput({
-            zapper: context.zapper,
-            inputToken,
-            initialInputAmount,
-            repayAssets,
-            slippageBps: context.slippageBps(slippage),
-            maxQuoteIterations,
-        });
+            const initialInputAmount = options.initialInputAmount == undefined
+                ? await this.estimateRepayAllInputAmount(inputToken, inputDecimals, repayAssets)
+                : FormatConverter.decimalToBigInt(options.initialInputAmount, inputDecimals);
+            if (initialInputAmount <= 0n) {
+                throw new Error("Repay-all initial input amount must be greater than zero.");
+            }
 
-        return this.buildRepayWithSwapPlan({
-            mode: "repay-all",
-            context,
-            inputDecimals,
-            projectedDebt,
-            repayAssets,
-            quote: solved.quote,
-            quoteIterations: solved.iterations,
+            const solved = await this.solveRepayAllInput({
+                zapper: context.zapper,
+                inputToken,
+                initialInputAmount,
+                repayAssets,
+                slippageBps: context.slippageBps(slippage),
+                maxQuoteIterations,
+                signal,
+            });
+
+            return this.buildRepayWithSwapPlan({
+                mode: "repay-all",
+                context,
+                inputDecimals,
+                projectedDebt,
+                repayAssets,
+                quote: solved.quote,
+                quoteIterations: solved.iterations,
+            });
         });
     }
 
@@ -519,6 +541,68 @@ export class BorrowableCToken extends CToken {
     async repayAllWithSwap(plan: RepayWithSwapPlan): Promise<TransactionResponse> {
         this.assertRepayAllPlan(plan);
         return this.repayWithSwap(plan);
+    }
+
+    private async runRepayWithSwapPlanning<T>(
+        options: RepayWithSwapOptions,
+        operation: (signal: AbortSignal) => Promise<T>,
+    ): Promise<T> {
+        const timeoutMs = options.planningTimeoutMs ?? REPAY_WITH_SWAP.DEFAULT_PLANNING_TIMEOUT_MS;
+        if (
+            !Number.isInteger(timeoutMs) ||
+            timeoutMs <= 0 ||
+            timeoutMs > REPAY_WITH_SWAP.MAX_PLANNING_TIMEOUT_MS
+        ) {
+            throw new Error(
+                `Zap repay planning timeout must be an integer in [1, ${REPAY_WITH_SWAP.MAX_PLANNING_TIMEOUT_MS}] ms, ` +
+                `got ${timeoutMs}`,
+            );
+        }
+
+        if (options.signal?.aborted) {
+            throw new DexQuoteError(
+                "aborted",
+                "Zap repay quote planning was cancelled.",
+                { provider: "Curvance SDK", cause: options.signal.reason },
+            );
+        }
+
+        const controller = new AbortController();
+        let settled = false;
+        let rejectBoundary: ((error: DexQuoteError) => void) | undefined;
+        const boundary = new Promise<never>((_resolve, reject) => {
+            rejectBoundary = reject;
+        });
+        const rejectOnce = (error: DexQuoteError) => {
+            if (settled) return;
+            controller.abort(error);
+            rejectBoundary?.(error);
+        };
+        const onExternalAbort = () => rejectOnce(new DexQuoteError(
+            "aborted",
+            "Zap repay quote planning was cancelled.",
+            { provider: "Curvance SDK", cause: options.signal?.reason },
+        ));
+
+        if (options.signal?.aborted) {
+            onExternalAbort();
+        } else {
+            options.signal?.addEventListener("abort", onExternalAbort, { once: true });
+        }
+        const timeout = setTimeout(() => rejectOnce(new DexQuoteError(
+            "timeout",
+            `Zap repay quote planning exceeded its ${timeoutMs}ms deadline.`,
+            { provider: "Curvance SDK", retryable: true },
+        )), timeoutMs);
+
+        try {
+            return await Promise.race([operation(controller.signal), boundary]);
+        } finally {
+            settled = true;
+            clearTimeout(timeout);
+            options.signal?.removeEventListener("abort", onExternalAbort);
+            if (!controller.signal.aborted) controller.abort();
+        }
     }
 
     private async getRepayWithSwapContext(options: RepayWithSwapOptions) {
@@ -641,6 +725,7 @@ export class BorrowableCToken extends CToken {
         repayAssets,
         slippageBps,
         maxQuoteIterations,
+        signal,
     }: {
         zapper: Zapper;
         inputToken: address;
@@ -648,45 +733,59 @@ export class BorrowableCToken extends CToken {
         repayAssets: bigint;
         slippageBps: bigint;
         maxQuoteIterations: number;
+        signal: AbortSignal;
     }): Promise<{ quote: SwapAndRepayQuote; iterations: number }> {
         let candidate = initialInputAmount;
-        let best: SwapAndRepayQuote | undefined;
+        const retryBudget = { remaining: 1 };
+        const bufferedRouteFloor = ceilDiv(
+            repayAssets * (BPS + REPAY_WITH_SWAP.REPAY_ALL_ROUTE_BUILD_BUFFER_BPS),
+            BPS,
+        );
 
         for (let iteration = 1; iteration <= maxQuoteIterations; iteration++) {
-            const quote = await zapper.quoteSwapAndRepay(
+            if (signal.aborted) {
+                throw new DexQuoteError(
+                    "aborted",
+                    "Repay-all route sizing was cancelled.",
+                    { provider: "Curvance SDK", cause: signal.reason },
+                );
+            }
+            const prepared: PreparedSwapAndRepayQuote = await zapper.prepareSwapAndRepay(
                 this,
                 inputToken,
                 candidate,
                 slippageBps,
+                { signal, retryBudget },
             );
-            if (quote.minimumOutput <= 0n) {
+            if (prepared.minimumOutput <= 0n) {
                 throw new Error("Repay-all quote returned zero guaranteed output.");
             }
+            const sizingFloor = prepared.swapInputToken.toLowerCase() === prepared.outputToken.toLowerCase()
+                ? repayAssets
+                : bufferedRouteFloor;
 
-            if (quote.minimumOutput >= repayAssets) {
-                best = quote;
-                const smallerCandidate = ceilDiv(candidate * repayAssets, quote.minimumOutput);
-                if (smallerCandidate >= candidate || candidate - smallerCandidate <= 1n) {
-                    return { quote, iterations: iteration };
+            if (prepared.minimumOutput >= sizingFloor) {
+                const quote = await prepared.build({ signal, retryBudget });
+                if (quote.minimumOutput < repayAssets) {
+                    throw new Error(
+                        `KyberSwap built minimum output ${quote.minimumOutput} no longer covers ` +
+                        `repay-all floor ${repayAssets}; re-quote before submitting.`,
+                    );
                 }
-                candidate = smallerCandidate;
-                continue;
+                return { quote, iterations: iteration };
             }
 
-            const largerCandidate = ceilDiv(candidate * repayAssets, quote.minimumOutput);
+            const largerCandidate = ceilDiv(candidate * sizingFloor, prepared.minimumOutput);
             candidate = largerCandidate > candidate ? largerCandidate : candidate + 1n;
         }
 
-        if (best != undefined) {
-            return { quote: best, iterations: maxQuoteIterations };
-        }
         throw new Error(
             `Could not find a repay-all swap whose minimum output covers ${repayAssets} ` +
             `within ${maxQuoteIterations} quotes.`,
         );
     }
 
-    private buildRepayWithSwapPlan({
+    private async buildRepayWithSwapPlan({
         mode,
         context,
         inputDecimals,
@@ -702,13 +801,27 @@ export class BorrowableCToken extends CToken {
         repayAssets: bigint;
         quote: SwapAndRepayQuote;
         quoteIterations: number;
-    }): RepayWithSwapPlan {
+    }): Promise<RepayWithSwapPlan> {
         const calldata = context.zapper.getSwapAndRepayCalldataFromQuote(
             this,
             quote,
             repayAssets,
             context.receiver,
         );
+        const usesExternalRoute = quote.action.target.toLowerCase() !== EMPTY_ADDRESS.toLowerCase();
+        // Debt projection freshness starts before planning, while external-route
+        // freshness starts only after final calldata exists. This prevents a slow
+        // Kyber preview/build from returning a plan whose submit window is already
+        // exhausted without weakening the short execution-time route boundary.
+        const routeQuotedAt = usesExternalRoute
+            ? await this.getRepayWithSwapChainTimestamp()
+            : context.quotedAt;
+        const routeValidUntil = usesExternalRoute
+            ? routeQuotedAt + REPAY_WITH_SWAP.DEFAULT_ROUTE_VALID_FOR_SECONDS
+            : context.validUntil;
+        const routeMinSubmitWindowSeconds = usesExternalRoute
+            ? REPAY_WITH_SWAP.DEFAULT_ROUTE_MIN_SUBMIT_WINDOW_SECONDS
+            : context.minSubmitWindowSeconds;
         const plan: RepayWithSwapPlan = {
             kind: "curvance-repay-with-swap-plan",
             mode,
@@ -731,8 +844,12 @@ export class BorrowableCToken extends CToken {
             feeBps: quote.feeBps,
             feeReceiver: quote.feeReceiver,
             quotedAt: context.quotedAt,
+            debtProjectionUntil: context.validUntil,
             validUntil: context.validUntil,
             minSubmitWindowSeconds: context.minSubmitWindowSeconds,
+            routeQuotedAt,
+            routeValidUntil,
+            routeMinSubmitWindowSeconds,
             quoteIterations,
             swapAction: Object.freeze({ ...quote.action }),
             calldata,
@@ -785,8 +902,13 @@ export class BorrowableCToken extends CToken {
         if (
             plan.projectedDebt <= 0n ||
             plan.quotedAt >= plan.validUntil ||
+            plan.debtProjectionUntil !== plan.validUntil ||
             plan.minSubmitWindowSeconds < 0n ||
-            plan.minSubmitWindowSeconds >= plan.validUntil - plan.quotedAt
+            plan.minSubmitWindowSeconds >= plan.validUntil - plan.quotedAt ||
+            plan.routeQuotedAt < plan.quotedAt ||
+            plan.routeQuotedAt >= plan.routeValidUntil ||
+            plan.routeMinSubmitWindowSeconds < 0n ||
+            plan.routeMinSubmitWindowSeconds >= plan.routeValidUntil - plan.routeQuotedAt
         ) {
             throw new Error("Zap repay plan has invalid debt projection or timing bounds.");
         }
@@ -838,9 +960,14 @@ export class BorrowableCToken extends CToken {
     private async preflightRepayWithSwap(plan: RepayWithSwapPlan) {
         this.assertRepayWithSwapPlanBinding(plan);
         const now = await this.getRepayWithSwapChainTimestamp();
+        if (now + plan.routeMinSubmitWindowSeconds > plan.routeValidUntil) {
+            throw new Error(
+                `Zap repay swap route is expired or too close to expiry; re-quote before submitting.`,
+            );
+        }
         if (now + plan.minSubmitWindowSeconds > plan.validUntil) {
             throw new Error(
-                `Zap repay plan is expired or too close to expiry; re-quote before submitting.`,
+                `Zap repay debt projection is expired or too close to expiry; re-quote before submitting.`,
             );
         }
 

@@ -7,7 +7,7 @@ import abi from '../abis/SimpleZapper.json';
 import { Zappers } from "./Market";
 import { type SetupConfigSnapshot } from "../setup";
 import type IDexAgg from "./DexAggregators/IDexAgg";
-import type { Quote } from "./DexAggregators/IDexAgg";
+import type { DexQuoteOptions, PreparedQuote, Quote } from "./DexAggregators/IDexAgg";
 import { validateSlippageBps } from "../validation";
 
 export interface Swap {
@@ -59,6 +59,21 @@ export interface SwapAndRepayQuote {
     feeReceiver: address | undefined;
     action: Swap;
     quote: Quote;
+}
+
+/** GET-only swap preview that can build its calldata exactly once after sizing. */
+export interface PreparedSwapAndRepayQuote {
+    inputToken: address;
+    swapInputToken: address;
+    outputToken: address;
+    inputAmount: bigint;
+    minimumOutput: bigint;
+    expectedOutput: bigint;
+    slippageBps: bigint;
+    depositAsWrappedNative: boolean;
+    feeBps: bigint;
+    feeReceiver: address | undefined;
+    build(options?: DexQuoteOptions): Promise<SwapAndRepayQuote>;
 }
 
 export class Zapper extends Calldata<IZapper> {
@@ -118,16 +133,17 @@ export class Zapper extends Calldata<IZapper> {
     }
 
     /**
-     * Quotes an exact-input swap into `ctoken`'s debt asset. This method does
-     * not impose a repayment floor so repay-all solvers can inspect and resize
-     * quotes that initially under-deliver.
+     * Previews an exact-input swap into `ctoken`'s debt asset. Aggregators with
+     * two-phase support only fetch route summaries here; calldata is built by
+     * the returned `build` function after repay-all sizing has converged.
      */
-    async quoteSwapAndRepay(
+    async prepareSwapAndRepay(
         ctoken: CToken,
         inputToken: address,
         amount: bigint,
         slippage: bigint,
-    ): Promise<SwapAndRepayQuote> {
+        options: DexQuoteOptions = {},
+    ): Promise<PreparedSwapAndRepayQuote> {
         this.assertCTokenBelongsToSetup(ctoken);
         validateSlippageBps(slippage, "swapAndRepay quote");
         if (amount <= 0n) {
@@ -156,7 +172,7 @@ export class Zapper extends Calldata<IZapper> {
                 out: amount,
             };
 
-            return {
+            const prepared: PreparedSwapAndRepayQuote = {
                 inputToken,
                 swapInputToken,
                 outputToken,
@@ -167,9 +183,22 @@ export class Zapper extends Calldata<IZapper> {
                 depositAsWrappedNative,
                 feeBps: 0n,
                 feeReceiver: undefined,
-                action,
-                quote,
+                build: async () => ({
+                    inputToken,
+                    swapInputToken,
+                    outputToken,
+                    inputAmount: amount,
+                    minimumOutput: amount,
+                    expectedOutput: amount,
+                    slippageBps: slippage,
+                    depositAsWrappedNative,
+                    feeBps: 0n,
+                    feeReceiver: undefined,
+                    action,
+                    quote,
+                }),
             };
+            return prepared;
         }
 
         const feeBps = this.setup.feePolicy.getFeeBps({
@@ -181,7 +210,7 @@ export class Zapper extends Calldata<IZapper> {
             targetLeverage: null,
         });
         const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
-        const quote = await this.dexAgg.quote(
+        const quoteArgs = [
             this.address,
             swapInputToken,
             outputToken,
@@ -189,38 +218,95 @@ export class Zapper extends Calldata<IZapper> {
             slippage,
             feeBps,
             feeReceiver,
-        );
-        if (quote.min_out <= 0n) {
+        ] as const;
+        let preparedQuote: PreparedQuote;
+        if (this.dexAgg.prepareQuote != undefined) {
+            preparedQuote = await this.dexAgg.prepareQuote(...quoteArgs, options);
+        } else {
+            const quote = await this.dexAgg.quote(...quoteArgs);
+            preparedQuote = {
+                min_out: quote.min_out,
+                out: quote.out,
+                build: async () => quote,
+            };
+        }
+
+        if (preparedQuote.min_out <= 0n) {
             throw new Error("swapAndRepay quote returned zero guaranteed output");
         }
-        if (quote.out < quote.min_out) {
+        if (preparedQuote.out < preparedQuote.min_out) {
             throw new Error(
-                `swapAndRepay expected output ${quote.out} is below minimum output ${quote.min_out}`,
+                `swapAndRepay expected output ${preparedQuote.out} is below minimum output ${preparedQuote.min_out}`,
             );
         }
-        const action: Swap = {
-            inputToken: isNative ? NATIVE_ADDRESS : inputToken,
-            inputAmount: amount,
-            outputToken,
-            target: quote.to,
-            slippage: toContractSwapSlippage(slippage, feeBps),
-            call: quote.calldata,
-        };
 
         return {
             inputToken,
             swapInputToken,
             outputToken,
             inputAmount: amount,
-            minimumOutput: quote.min_out,
-            expectedOutput: quote.out,
+            minimumOutput: preparedQuote.min_out,
+            expectedOutput: preparedQuote.out,
             slippageBps: slippage,
             depositAsWrappedNative,
             feeBps,
             feeReceiver,
-            action,
-            quote,
+            build: async (buildOptions: DexQuoteOptions = {}) => {
+                const signal = buildOptions.signal ?? options.signal;
+                const quote = await preparedQuote.build(
+                    signal == undefined ? buildOptions : { ...buildOptions, signal },
+                );
+                if (quote.min_out <= 0n) {
+                    throw new Error("swapAndRepay quote returned zero guaranteed output");
+                }
+                if (quote.out < quote.min_out) {
+                    throw new Error(
+                        `swapAndRepay expected output ${quote.out} is below minimum output ${quote.min_out}`,
+                    );
+                }
+                const action: Swap = {
+                    inputToken: isNative ? NATIVE_ADDRESS : inputToken,
+                    inputAmount: amount,
+                    outputToken,
+                    target: quote.to,
+                    slippage: toContractSwapSlippage(slippage, feeBps),
+                    call: quote.calldata,
+                };
+
+                return {
+                    inputToken,
+                    swapInputToken,
+                    outputToken,
+                    inputAmount: amount,
+                    minimumOutput: quote.min_out,
+                    expectedOutput: quote.out,
+                    slippageBps: slippage,
+                    depositAsWrappedNative,
+                    feeBps,
+                    feeReceiver,
+                    action,
+                    quote,
+                };
+            },
         };
+    }
+
+    /** Fully builds an exact-input quote for callers that do not need two-phase sizing. */
+    async quoteSwapAndRepay(
+        ctoken: CToken,
+        inputToken: address,
+        amount: bigint,
+        slippage: bigint,
+        options: DexQuoteOptions = {},
+    ): Promise<SwapAndRepayQuote> {
+        const prepared = await this.prepareSwapAndRepay(
+            ctoken,
+            inputToken,
+            amount,
+            slippage,
+            options,
+        );
+        return prepared.build(options);
     }
 
     getSwapAndRepayCalldataFromQuote(

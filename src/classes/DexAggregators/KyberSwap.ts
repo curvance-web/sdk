@@ -1,6 +1,13 @@
 import { address, bytes, curvance_read_provider } from "../../types";
 import { ZapToken } from "../CToken";
-import IDexAgg, { DexAggContext } from "./IDexAgg";
+import IDexAgg, {
+    DexQuoteError,
+    type DexAggContext,
+    type DexQuoteOptions,
+    type DexQuoteRetryBudget,
+    type PreparedQuote,
+    type Quote,
+} from "./IDexAgg";
 import { Swap } from "../Zapper";
 import { all_markets, setup_config } from "../../setup";
 import { BPS, EMPTY_ADDRESS, toContractSwapSlippage } from "../../helpers";
@@ -23,6 +30,9 @@ const REQUIRED_FLAGS = 0x280n;
 const CHECKER_FEE_BPS = 4n;
 const SOURCE_AMOUNT_FEE_TOLERANCE_BPS = 2n;
 const KYBER_SWAP_SELECTOR = '0xe21fd0e9';
+const KYBER_REQUEST_TIMEOUT_MS = 5_000;
+const KYBER_MAX_REQUEST_ATTEMPTS = 2;
+const KYBER_DEFAULT_RETRY_DELAY_MS = 250;
 
 /** ABI type string for KyberSwap MetaAggregationRouterV2's SwapExecutionParams struct. */
 const SWAP_PARAMS_TYPE =
@@ -413,7 +423,176 @@ export class KyberSwap implements IDexAgg {
         return quote.min_out;
     }
 
-    async quote(wallet: string, tokenIn: string, tokenOut: string, amount: bigint, slippage: bigint, feeBps?: bigint, feeReceiver?: address) {
+    private abortError(stage: string): DexQuoteError {
+        return new DexQuoteError(
+            "aborted",
+            `KyberSwap ${stage} was cancelled.`,
+            { provider: "KyberSwap" },
+        );
+    }
+
+    private normalizeRequestError(error: unknown, stage: string, signal?: AbortSignal): DexQuoteError {
+        if (error instanceof DexQuoteError) {
+            return error;
+        }
+        if (signal?.aborted) {
+            return this.abortError(stage);
+        }
+        if ((error as { name?: string } | undefined)?.name === "AbortError") {
+            return new DexQuoteError(
+                "timeout",
+                `KyberSwap ${stage} request timed out.`,
+                { provider: "KyberSwap", retryable: true, cause: error },
+            );
+        }
+        return new DexQuoteError(
+            "unavailable",
+            `KyberSwap ${stage} request failed: ${(error as Error | undefined)?.message ?? String(error)}`,
+            { provider: "KyberSwap", retryable: true, cause: error },
+        );
+    }
+
+    private async readErrorDetail(response: Response): Promise<string> {
+        let detail = `${response.status} ${response.statusText}`;
+        try {
+            const body = await response.json() as Partial<KyperSwapErrorResponse>;
+            const requestId = body.requestId ? `[${body.requestId}]: ` : "";
+            const code = body.code == undefined ? "" : ` (code: ${body.code})`;
+            detail = `${requestId}${body.message ?? detail}${code}`;
+        } catch { /* non-JSON error body (for example an HTML 502 page) */ }
+        return detail;
+    }
+
+    private getRetryAfterMs(response: Response): number {
+        const value = response.headers?.get?.("Retry-After");
+        if (!value) return KYBER_DEFAULT_RETRY_DELAY_MS;
+
+        const seconds = Number(value);
+        if (Number.isFinite(seconds) && seconds >= 0) {
+            return Math.ceil(seconds * 1_000);
+        }
+        const dateMs = Date.parse(value);
+        return Number.isFinite(dateMs) ? Math.max(0, dateMs - Date.now()) : KYBER_DEFAULT_RETRY_DELAY_MS;
+    }
+
+    private async waitForRetry(delayMs: number, signal: AbortSignal | undefined, stage: string): Promise<void> {
+        if (signal?.aborted) throw this.abortError(stage);
+        if (delayMs <= 0) return;
+
+        await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => {
+                signal?.removeEventListener("abort", onAbort);
+                resolve();
+            }, delayMs);
+            const onAbort = () => {
+                clearTimeout(timer);
+                reject(this.abortError(stage));
+            };
+            signal?.addEventListener("abort", onAbort, { once: true });
+        });
+    }
+
+    private async requestJson<T>(
+        url: string,
+        init: RequestInit,
+        stage: "quote" | "build",
+        retryBudget: DexQuoteRetryBudget,
+        signal?: AbortSignal,
+    ): Promise<T> {
+        for (let attempt = 1; attempt <= KYBER_MAX_REQUEST_ATTEMPTS; attempt++) {
+            if (signal?.aborted) throw this.abortError(stage);
+
+            let retryAfterMs = KYBER_DEFAULT_RETRY_DELAY_MS;
+            let requestError: DexQuoteError;
+            try {
+                const requestInit: RequestInit = signal == undefined
+                    ? init
+                    : { ...init, signal };
+                const response = await fetchWithTimeout(url, requestInit, KYBER_REQUEST_TIMEOUT_MS);
+                if (!response.ok) {
+                    const detail = await this.readErrorDetail(response);
+                    retryAfterMs = this.getRetryAfterMs(response);
+                    const status = response.status;
+                    const isNoRoute = status >= 400 && status < 500 && status !== 408 && status !== 429 &&
+                        /route|liquidity|not found|no path/i.test(detail);
+                    if (status === 429) {
+                        requestError = new DexQuoteError(
+                            "rate-limited",
+                            `KyberSwap ${stage} was rate limited: ${detail}`,
+                            { provider: "KyberSwap", retryable: true, status },
+                        );
+                    } else if (status === 408) {
+                        requestError = new DexQuoteError(
+                            "timeout",
+                            `KyberSwap ${stage} timed out: ${detail}`,
+                            { provider: "KyberSwap", retryable: true, status },
+                        );
+                    } else if (status >= 500) {
+                        requestError = new DexQuoteError(
+                            "unavailable",
+                            `KyberSwap ${stage} is unavailable: ${detail}`,
+                            { provider: "KyberSwap", retryable: true, status },
+                        );
+                    } else if (isNoRoute) {
+                        requestError = new DexQuoteError(
+                            "no-route",
+                            `KyberSwap could not find a route: ${detail}`,
+                            { provider: "KyberSwap", status },
+                        );
+                    } else {
+                        requestError = new DexQuoteError(
+                            "http",
+                            `KyberSwap ${stage} failed: ${detail}`,
+                            { provider: "KyberSwap", status },
+                        );
+                    }
+                } else {
+                    try {
+                        return await response.json() as T;
+                    } catch (error) {
+                        throw new DexQuoteError(
+                            "malformed-response",
+                            `KyberSwap ${stage} returned malformed JSON.`,
+                            { provider: "KyberSwap", cause: error },
+                        );
+                    }
+                }
+            } catch (error) {
+                requestError = this.normalizeRequestError(error, stage, signal);
+            }
+
+            if (
+                !requestError.retryable ||
+                attempt === KYBER_MAX_REQUEST_ATTEMPTS ||
+                retryBudget.remaining <= 0
+            ) {
+                throw requestError;
+            }
+            retryBudget.remaining--;
+            await this.waitForRetry(retryAfterMs, signal, stage);
+        }
+
+        throw new DexQuoteError("unavailable", `KyberSwap ${stage} failed.`, { provider: "KyberSwap" });
+    }
+
+    private malformed(stage: "quote" | "build", error: unknown): DexQuoteError {
+        return new DexQuoteError(
+            "malformed-response",
+            `KyberSwap ${stage} response was malformed: ${(error as Error | undefined)?.message ?? String(error)}`,
+            { provider: "KyberSwap", cause: error },
+        );
+    }
+
+    async prepareQuote(
+        wallet: string,
+        tokenIn: string,
+        tokenOut: string,
+        amount: bigint,
+        slippage: bigint,
+        feeBps?: bigint,
+        feeReceiver?: address,
+        options: DexQuoteOptions = {},
+    ): Promise<PreparedQuote> {
         validateSlippageBps(slippage, 'KyberSwap quote');
         if (amount <= 0n) {
             throw new Error(`KyberSwap quote amount must be positive, got ${amount}`);
@@ -425,6 +604,10 @@ export class KyberSwap implements IDexAgg {
             ? undefined
             : validateAddress(feeReceiver, 'KyberSwap feeReceiver');
         validateCheckerFeePolicy(this.dao, feeBps, validatedFeeReceiver);
+        const retryBudget = options.retryBudget ?? { remaining: 1 };
+        if (!Number.isInteger(retryBudget.remaining) || retryBudget.remaining < 0 || retryBudget.remaining > 1) {
+            throw new Error(`KyberSwap retry budget must be 0 or 1, got ${retryBudget.remaining}`);
+        }
 
         const params = new URLSearchParams({
             tokenIn: validatedTokenIn,
@@ -443,77 +626,122 @@ export class KyberSwap implements IDexAgg {
             params.set('feeReceiver', validatedFeeReceiver!);
         }
 
-        const quote_response = await fetchWithTimeout(`${this.api}/api/v1/routes?${params.toString()}`, {
+        const quote = await this.requestJson<KyberSwapQuoteResponse>(`${this.api}/api/v1/routes?${params.toString()}`, {
             method: 'GET',
             headers: {
                 'X-Client-Id': this.client_id,
                 'Content-Type': 'application/json'
             }
-        });
-        if (!quote_response.ok) {
-            let detail = `${quote_response.status} ${quote_response.statusText}`;
-            try {
-                const body = await quote_response.json() as KyperSwapErrorResponse;
-                detail = `[${body.requestId}]: ${body.message} (code: ${body.code})`;
-            } catch { /* non-JSON error body (e.g. HTML 502 page) */ }
-            throw new Error(`KyberSwap quote failed: ${detail}`);
+        }, "quote", retryBudget, options.signal);
+
+        let routeSummary: KyberSwapQuoteResponse["data"]["routeSummary"];
+        let previewAmountOut: bigint;
+        try {
+            routeSummary = quote.data.routeSummary;
+            if (routeSummary == null || typeof routeSummary !== "object") {
+                throw new Error("missing routeSummary");
+            }
+            validateEqualAddress(routeSummary.tokenIn, validatedTokenIn, "route tokenIn");
+            validateEqualAddress(routeSummary.tokenOut, validatedTokenOut, "route tokenOut");
+            const routeAmountIn = safeBigInt(routeSummary.amountIn, "KyberSwap route amountIn");
+            if (routeAmountIn !== amount) {
+                throw new Error(`KyberSwap route amountIn=${routeAmountIn}, expected ${amount}`);
+            }
+            previewAmountOut = safeBigInt(routeSummary.amountOut, "KyberSwap route amountOut");
+            if (previewAmountOut === 0n) {
+                throw new DexQuoteError(
+                    "no-route",
+                    "KyberSwap could not find a route with positive output.",
+                    { provider: "KyberSwap" },
+                );
+            }
+            validateRouterAddress(quote.data.routerAddress, this.router, "KyberSwap");
+        } catch (error) {
+            if (error instanceof DexQuoteError) throw error;
+            throw this.malformed("quote", error);
         }
-        const quote = await quote_response.json() as KyberSwapQuoteResponse;
 
-        const build_response = await fetchWithTimeout(`${this.api}/api/v1/route/build`, {
-            method: 'POST',
-            headers: {
-                'X-Client-Id': this.client_id,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                routeSummary: quote.data.routeSummary,
-                origin: validatedWallet,
-                sender: validatedWallet,
-                recipient: validatedWallet,
-                slippageTolerance: Number(slippage),
-                referral: this.dao
-            })
-        });
-        if (!build_response.ok) {
-            let detail = `${build_response.status} ${build_response.statusText}`;
-            try {
-                const body = await build_response.json() as KyperSwapErrorResponse;
-                detail = `[${body.requestId}]: ${body.message} (code: ${body.code})`;
-            } catch { /* non-JSON error body */ }
-            throw new Error(`KyberSwap build failed: ${detail}`);
-        }
-        const build_data = await build_response.json() as KyperSwapBuildResponse;
-
-        const amountOut = safeBigInt(build_data.data.amountOut, 'KyberSwap amountOut');
-        const transactionValue = safeBigInt(build_data.data.transactionValue, 'KyberSwap transactionValue');
-        if (transactionValue !== 0n) {
-            throw new Error(`KyberSwap quote transactionValue=${transactionValue}, expected 0`);
-        }
-        const min_out = amountOut * (BPS - slippage) / BPS;
-
-        // Case-insensitive router comparison via validateRouterAddress — also
-        // enforces address format/checksum.
-        const validatedRouter = validateRouterAddress(build_data.data.routerAddress, this.router, 'KyberSwap');
-
-        // Validate that the API actually embedded the fee params we requested.
-        // Without this, a misconfigured API response silently reverts on-chain.
-        validateSwapCalldata(build_data.data.data, {
-            tokenIn: validatedTokenIn,
-            tokenOut: validatedTokenOut,
-            amount,
-            recipient: validatedWallet,
-            minReturnAmount: min_out,
-            feeBps: feeBps ?? 0n,
-            feeReceiver: validatedFeeReceiver,
-        });
-
+        const previewMinOut = previewAmountOut * (BPS - slippage) / BPS;
         return {
-            to: validatedRouter,
-            calldata: build_data.data.data as bytes,
-            min_out: min_out,
-            out: amountOut,
-            raw: build_data
-        }
+            min_out: previewMinOut,
+            out: previewAmountOut,
+            build: async (buildOptions: DexQuoteOptions = {}): Promise<Quote> => {
+                const signal = buildOptions.signal ?? options.signal;
+                const buildData = await this.requestJson<KyperSwapBuildResponse>(`${this.api}/api/v1/route/build`, {
+                    method: 'POST',
+                    headers: {
+                        'X-Client-Id': this.client_id,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        routeSummary,
+                        origin: validatedWallet,
+                        sender: validatedWallet,
+                        recipient: validatedWallet,
+                        slippageTolerance: Number(slippage),
+                        referral: this.dao
+                    })
+                }, "build", retryBudget, signal);
+
+                try {
+                    const amountOut = safeBigInt(buildData.data.amountOut, 'KyberSwap amountOut');
+                    if (amountOut === 0n) {
+                        throw new DexQuoteError(
+                            "no-route",
+                            "KyberSwap build returned zero output.",
+                            { provider: "KyberSwap" },
+                        );
+                    }
+                    const transactionValue = safeBigInt(buildData.data.transactionValue, 'KyberSwap transactionValue');
+                    if (transactionValue !== 0n) {
+                        throw new Error(`KyberSwap quote transactionValue=${transactionValue}, expected 0`);
+                    }
+                    const min_out = amountOut * (BPS - slippage) / BPS;
+                    const validatedRouter = validateRouterAddress(buildData.data.routerAddress, this.router, 'KyberSwap');
+
+                    validateSwapCalldata(buildData.data.data, {
+                        tokenIn: validatedTokenIn,
+                        tokenOut: validatedTokenOut,
+                        amount,
+                        recipient: validatedWallet,
+                        minReturnAmount: min_out,
+                        feeBps: feeBps ?? 0n,
+                        feeReceiver: validatedFeeReceiver,
+                    });
+
+                    return {
+                        to: validatedRouter,
+                        calldata: buildData.data.data as bytes,
+                        min_out,
+                        out: amountOut,
+                        raw: buildData,
+                    };
+                } catch (error) {
+                    if (error instanceof DexQuoteError) throw error;
+                    throw this.malformed("build", error);
+                }
+            },
+        };
+    }
+
+    async quote(
+        wallet: string,
+        tokenIn: string,
+        tokenOut: string,
+        amount: bigint,
+        slippage: bigint,
+        feeBps?: bigint,
+        feeReceiver?: address,
+    ): Promise<Quote> {
+        const prepared = await this.prepareQuote(
+            wallet,
+            tokenIn,
+            tokenOut,
+            amount,
+            slippage,
+            feeBps,
+            feeReceiver,
+        );
+        return prepared.build();
     }
 }

@@ -5,6 +5,7 @@ import { Wallet } from "ethers";
 import {
     BorrowableCToken,
     CToken,
+    DexQuoteError,
     NATIVE_ADDRESS,
     REPAY_WITH_SWAP,
     Zapper,
@@ -63,11 +64,41 @@ function createDex(
         min: amount * 9n / 5n,
         out: amount * 2n,
     }),
+    buildQuoteFn: (amount: bigint) => { min: bigint; out: bigint } = quoteFn,
 ) {
     const calls: QuoteCall[] = [];
+    const buildCalls: QuoteCall[] = [];
+    const prepareQuote = async (
+        wallet: string,
+        tokenIn: string,
+        tokenOut: string,
+        amount: bigint,
+        slippage: bigint,
+        feeBps?: bigint,
+        feeReceiver?: address,
+    ) => {
+        const call = { wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver };
+        calls.push(call);
+        const result = quoteFn(amount);
+        return {
+            min_out: result.min,
+            out: result.out,
+            async build() {
+                buildCalls.push(call);
+                const built = buildQuoteFn(amount);
+                return {
+                    to: ROUTER,
+                    calldata: "0x1234" as const,
+                    min_out: built.min,
+                    out: built.out,
+                };
+            },
+        };
+    };
     const dexAgg = {
         dao: RECEIVER,
         router: ROUTER,
+        prepareQuote,
         async quote(
             wallet: string,
             tokenIn: string,
@@ -77,17 +108,18 @@ function createDex(
             feeBps?: bigint,
             feeReceiver?: address,
         ) {
-            calls.push({ wallet, tokenIn, tokenOut, amount, slippage, feeBps, feeReceiver });
-            const result = quoteFn(amount);
-            return {
-                to: ROUTER,
-                calldata: "0x1234" as const,
-                min_out: result.min,
-                out: result.out,
-            };
+            return (await prepareQuote(
+                wallet,
+                tokenIn,
+                tokenOut,
+                amount,
+                slippage,
+                feeBps,
+                feeReceiver,
+            )).build();
         },
     };
-    return { dexAgg, calls };
+    return { dexAgg, calls, buildCalls };
 }
 
 function createCToken(setup: any, debtToken: address = DEBT_TOKEN) {
@@ -342,10 +374,12 @@ function createBorrowableHarness({
     projectedDebt = 1_000n,
     allowance = 2n ** 255n,
     quoteFn,
+    buildQuoteFn,
 }: {
     projectedDebt?: bigint;
     allowance?: bigint;
     quoteFn?: (amount: bigint) => { min: bigint; out: bigint };
+    buildQuoteFn?: (amount: bigint) => { min: bigint; out: bigint };
 } = {}) {
     let chainTimestamp = 1_700_000_000n;
     let currentProjectedDebt = projectedDebt;
@@ -355,7 +389,7 @@ function createBorrowableHarness({
     const approvals: Array<{ spender: address; amount: Decimal | null }> = [];
     const simulations: Array<{ calldata: string; overrides: any }> = [];
     const submissions: Array<{ calldata: string; overrides: any; receiver: address }> = [];
-    const dex = createDex(quoteFn);
+    const dex = createDex(quoteFn, buildQuoteFn);
     const setup = createSetup(dex.dexAgg);
     const token = Object.create(BorrowableCToken.prototype) as BorrowableCToken;
 
@@ -412,7 +446,9 @@ function createBorrowableHarness({
 
     return {
         token,
+        dexAgg: dex.dexAgg,
         dexCalls: dex.calls,
+        dexBuildCalls: dex.buildCalls,
         debtReads,
         approvals,
         simulations,
@@ -448,10 +484,41 @@ describe("BorrowableCToken repay-with-swap planning", () => {
         assert.equal(plan.projectedDebt, 1_000n);
         assert.equal(plan.quotedAt, 1_700_000_000n);
         assert.equal(plan.validUntil, 1_700_000_100n);
+        assert.equal(plan.debtProjectionUntil, plan.validUntil);
+        assert.equal(plan.routeQuotedAt, 1_700_000_000n);
+        assert.equal(plan.routeValidUntil, 1_700_000_010n);
+        assert.equal(plan.routeMinSubmitWindowSeconds, 2n);
         assert.equal(plan.slippageBps, 50n);
         assert.equal(plan.contractSlippage, toContractSwapSlippage(50n, 4n));
         assert.equal(plan.value, 0n);
         assert.equal(Object.isFrozen(plan), true);
+    });
+
+    test("starts route freshness after slow route construction completes", async () => {
+        const harness = createBorrowableHarness();
+        const prepareQuote = harness.dexAgg.prepareQuote.bind(harness.dexAgg);
+        harness.dexAgg.prepareQuote = async (...args: any[]) => {
+            const prepared = await (prepareQuote as any)(...args);
+            const build = prepared.build.bind(prepared);
+            return {
+                ...prepared,
+                build: async (...buildArgs: any[]) => {
+                    harness.setTimestamp(1_700_000_009n);
+                    return (build as any)(...buildArgs);
+                },
+            };
+        };
+
+        const plan = await harness.token.quoteRepayWithSwap(
+            INPUT_TOKEN,
+            Decimal(10),
+            Decimal("0.005"),
+        );
+
+        assert.equal(plan.routeQuotedAt, 1_700_000_009n);
+        assert.equal(plan.routeValidUntil, plan.routeQuotedAt + 10n);
+        const simulation = await harness.token.simulateRepayWithSwap(plan);
+        assert.equal(simulation.success, true);
     });
 
     test("repay-all projects to deadline, buffers debt, and rescales until min output covers it", async () => {
@@ -470,6 +537,7 @@ describe("BorrowableCToken repay-with-swap planning", () => {
         assert.equal(plan.minimumOutput, 1_004n);
         assert.equal(plan.quoteIterations, 2);
         assert.deepEqual(harness.dexCalls.map((call) => call.amount), [501n, 558n]);
+        assert.deepEqual(harness.dexBuildCalls.map((call) => call.amount), [558n]);
         assert.deepEqual(harness.debtReads, [{
             receiver: RECEIVER,
             timestamp: 1_700_000_100n,
@@ -644,7 +712,7 @@ describe("BorrowableCToken repay-with-swap planning", () => {
         assert.equal(plan.inputAmount, 2n);
     });
 
-    test("returns the last safe oversized quote when a smaller optimization quote under-delivers", async () => {
+    test("accepts the first safe route and builds calldata once without optimizing downward", async () => {
         const harness = createBorrowableHarness({
             quoteFn: (amount) => amount >= 600n
                 ? { min: 1_200n, out: 1_200n }
@@ -658,8 +726,152 @@ describe("BorrowableCToken repay-with-swap planning", () => {
 
         assert.equal(plan.inputAmount, 600n);
         assert.equal(plan.minimumOutput, 1_200n);
-        assert.equal(plan.quoteIterations, 2);
-        assert.deepEqual(harness.dexCalls.map((call) => call.amount), [600n, 501n]);
+        assert.equal(plan.quoteIterations, 1);
+        assert.deepEqual(harness.dexCalls.map((call) => call.amount), [600n]);
+        assert.deepEqual(harness.dexBuildCalls.map((call) => call.amount), [600n]);
+    });
+
+    test("sizes a preview cushion before the single build to absorb small Kyber output drift", async () => {
+        const harness = createBorrowableHarness({
+            quoteFn: (amount) => amount === 600n
+                ? { min: 1_002n, out: 1_010n }
+                : { min: 1_004n, out: 1_012n },
+            buildQuoteFn: () => ({ min: 1_002n, out: 1_010n }),
+        });
+
+        const plan = await harness.token.quoteRepayAllWithSwap(
+            INPUT_TOKEN,
+            Decimal("0.005"),
+            { initialInputAmount: Decimal(600), maxQuoteIterations: 2 },
+        );
+
+        assert.equal(REPAY_WITH_SWAP.REPAY_ALL_ROUTE_BUILD_BUFFER_BPS, 1n);
+        assert.equal(plan.repayAssets, 1_002n);
+        assert.equal(plan.minimumOutput, 1_002n);
+        assert.equal(plan.inputAmount, 601n);
+        assert.deepEqual(harness.dexCalls.map((call) => call.amount), [600n, 601n]);
+        assert.deepEqual(harness.dexBuildCalls.map((call) => call.amount), [601n]);
+    });
+
+    test("fails closed when the final calldata build falls below the repay-all floor", async () => {
+        const harness = createBorrowableHarness({
+            quoteFn: () => ({ min: 1_200n, out: 1_250n }),
+            buildQuoteFn: () => ({ min: 900n, out: 950n }),
+        });
+
+        await assert.rejects(
+            () => harness.token.quoteRepayAllWithSwap(
+                INPUT_TOKEN,
+                Decimal("0.005"),
+                { initialInputAmount: Decimal(600) },
+            ),
+            /built minimum output 900 no longer covers repay-all floor/i,
+        );
+        assert.equal(harness.dexCalls.length, 1);
+        assert.equal(harness.dexBuildCalls.length, 1);
+    });
+
+    test("enforces one hard planning deadline across a hanging route request", async () => {
+        const harness = createBorrowableHarness();
+        (harness.dexAgg as any).prepareQuote = async (...args: any[]) => {
+            const options = args[7] as { signal: AbortSignal };
+            return new Promise((_resolve, reject) => {
+                options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+            });
+        };
+
+        const startedAt = Date.now();
+        await assert.rejects(
+            () => harness.token.quoteRepayAllWithSwap(
+                INPUT_TOKEN,
+                Decimal("0.005"),
+                { initialInputAmount: Decimal(600), planningTimeoutMs: 20 },
+            ),
+            (error: unknown) => error instanceof DexQuoteError && error.code === "timeout",
+        );
+        assert.ok(Date.now() - startedAt < 500);
+    });
+
+    test("enforces the same hard deadline when GET succeeds but calldata build hangs", async () => {
+        const harness = createBorrowableHarness();
+        let buildCalls = 0;
+        (harness.dexAgg as any).prepareQuote = async () => ({
+            min_out: 1_200n,
+            out: 1_250n,
+            build: async ({ signal }: { signal: AbortSignal }) => {
+                buildCalls++;
+                return new Promise((_resolve, reject) => {
+                    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+                });
+            },
+        });
+
+        await assert.rejects(
+            () => harness.token.quoteRepayAllWithSwap(
+                INPUT_TOKEN,
+                Decimal("0.005"),
+                { initialInputAmount: Decimal(600), planningTimeoutMs: 20 },
+            ),
+            (error: unknown) => error instanceof DexQuoteError && error.code === "timeout",
+        );
+        assert.equal(buildCalls, 1);
+    });
+
+    test("does not reset the global deadline between repay-all sizing iterations", async () => {
+        const harness = createBorrowableHarness();
+        let previews = 0;
+        (harness.dexAgg as any).prepareQuote = async (...args: any[]) => {
+            previews++;
+            if (previews === 1) {
+                return {
+                    min_out: 500n,
+                    out: 550n,
+                    build: async () => { throw new Error("under-floor preview must not build"); },
+                };
+            }
+            const signal = (args[7] as { signal: AbortSignal }).signal;
+            return new Promise((_resolve, reject) => {
+                signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+            });
+        };
+
+        await assert.rejects(
+            () => harness.token.quoteRepayAllWithSwap(
+                INPUT_TOKEN,
+                Decimal("0.005"),
+                { initialInputAmount: Decimal(600), planningTimeoutMs: 20 },
+            ),
+            (error: unknown) => error instanceof DexQuoteError && error.code === "timeout",
+        );
+        assert.equal(previews, 2);
+    });
+
+    test("propagates caller cancellation through the whole repay-all solver", async () => {
+        const harness = createBorrowableHarness();
+        let receivedSignal: AbortSignal | undefined;
+        let markRouteStarted: (() => void) | undefined;
+        const routeStarted = new Promise<void>((resolve) => { markRouteStarted = resolve; });
+        (harness.dexAgg as any).prepareQuote = async (...args: any[]) => {
+            receivedSignal = (args[7] as { signal: AbortSignal }).signal;
+            markRouteStarted?.();
+            return new Promise((_resolve, reject) => {
+                receivedSignal?.addEventListener("abort", () => reject(receivedSignal?.reason), { once: true });
+            });
+        };
+        const controller = new AbortController();
+        const planning = harness.token.quoteRepayAllWithSwap(
+            INPUT_TOKEN,
+            Decimal("0.005"),
+            { initialInputAmount: Decimal(600), signal: controller.signal },
+        );
+        await routeStarted;
+        controller.abort("superseded");
+
+        await assert.rejects(
+            () => planning,
+            (error: unknown) => error instanceof DexQuoteError && error.code === "aborted",
+        );
+        assert.equal(receivedSignal?.aborted, true);
     });
 
     test("fails closed when positive quotes never cover the repay-all floor", async () => {
@@ -676,6 +888,23 @@ describe("BorrowableCToken repay-with-swap planning", () => {
             /Could not find a repay-all swap.*within 2 quotes/i,
         );
         assert.equal(harness.dexCalls.length, 2);
+        assert.equal(harness.dexBuildCalls.length, 0);
+    });
+
+    test("uses no more than three sizing previews by default", async () => {
+        const harness = createBorrowableHarness({ quoteFn: () => ({ min: 1n, out: 1n }) });
+
+        await assert.rejects(
+            () => harness.token.quoteRepayAllWithSwap(
+                INPUT_TOKEN,
+                Decimal("0.005"),
+                { initialInputAmount: Decimal(1) },
+            ),
+            /within 3 quotes/i,
+        );
+        assert.equal(REPAY_WITH_SWAP.DEFAULT_MAX_QUOTE_ITERATIONS, 3);
+        assert.equal(harness.dexCalls.length, 3);
+        assert.equal(harness.dexBuildCalls.length, 0);
     });
 
     test("fails clearly when chain time, a Simple Zapper, or outstanding debt is unavailable", async () => {
@@ -948,11 +1177,11 @@ describe("BorrowableCToken repay-with-swap execution", () => {
         assert.match(growth.error ?? "", /Projected debt increased.*re-quote/i);
     });
 
-    test("accepts exact expiry-window, debt-floor, and allowance boundaries", async () => {
+    test("accepts the exact route expiry-window, debt-floor, and allowance boundaries", async () => {
         const harness = createBorrowableHarness({ allowance: 0n });
         const plan = await buildPlan(harness);
         harness.setAllowance(plan.inputAmount);
-        harness.setTimestamp(plan.validUntil - plan.minSubmitWindowSeconds);
+        harness.setTimestamp(plan.routeValidUntil - plan.routeMinSubmitWindowSeconds);
         harness.setProjectedDebt(plan.repayAssets);
 
         const result = await harness.token.simulateRepayAllWithSwap(plan);

@@ -184,25 +184,41 @@ describe("Zap repay on Monad fork", { skip: FORK_SKIP }, () => {
         const { cUSDC } = await openUsdcDebt();
         const debtBefore = await cUSDC.debtBalance(framework.account);
 
+        const initialPlan = await cUSDC.quoteRepayAllWithSwap(
+            NATIVE_ADDRESS,
+            Decimal("0.01"),
+            {
+                validForSeconds: 300n,
+                debtBufferBps: 2n,
+                maxQuoteIterations: 3,
+            },
+        );
+
+        assert.equal(initialPlan.inputToken.toLowerCase(), NATIVE_ADDRESS.toLowerCase());
+        assert.ok(initialPlan.projectedDebt >= debtBefore, "Projected debt must include current debt");
+        assert.ok(initialPlan.minimumOutput >= initialPlan.repayAssets, "Guaranteed output must cover repay-all floor");
+        assert.ok(initialPlan.expectedOutput >= initialPlan.minimumOutput, "Expected output must cover guaranteed output");
+        assert.ok(initialPlan.inputAmount > 0n, "Solver must produce positive native input");
+        assert.equal(initialPlan.value, initialPlan.inputAmount);
+        assert.equal(await cUSDC.isRepayAllWithSwapApproved(initialPlan), true);
+
+        await fastForwardTime(framework.provider, 30);
+        const debtAfterAccrual = await cUSDC.debtBalance(framework.account);
+        assert.ok(debtAfterAccrual >= debtBefore, "Debt must not decrease while interest accrues");
+
+        // The debt projection remains long-lived, but the Kyber route does not.
+        // Refresh exactly as the app does before execution after a delay/approval.
         const plan = await cUSDC.quoteRepayAllWithSwap(
             NATIVE_ADDRESS,
             Decimal("0.01"),
             {
                 validForSeconds: 300n,
                 debtBufferBps: 2n,
-                maxQuoteIterations: 8,
+                maxQuoteIterations: 3,
             },
         );
-
-        assert.equal(plan.inputToken.toLowerCase(), NATIVE_ADDRESS.toLowerCase());
-        assert.ok(plan.projectedDebt >= debtBefore, "Projected debt must include current debt");
-        assert.ok(plan.minimumOutput >= plan.repayAssets, "Guaranteed output must cover repay-all floor");
-        assert.ok(plan.expectedOutput >= plan.minimumOutput, "Expected output must cover guaranteed output");
-        assert.ok(plan.inputAmount > 0n, "Solver must produce positive native input");
-        assert.equal(plan.value, plan.inputAmount);
-        assert.equal(await cUSDC.isRepayAllWithSwapApproved(plan), true);
-
-        await fastForwardTime(framework.provider, 30);
+        assert.ok(plan.routeQuotedAt > initialPlan.routeQuotedAt, "Refreshed route must use fresh chain time");
+        assert.ok(plan.projectedDebt >= debtAfterAccrual, "Refreshed plan must include accrued debt");
         const simulation = await cUSDC.simulateRepayAllWithSwap(plan);
         assert.deepEqual(simulation, { success: true });
 
