@@ -23,7 +23,7 @@ export const REPAY_WITH_SWAP = {
     MAX_PLANNING_TIMEOUT_MS: 12_000,
     DEFAULT_ROUTE_VALID_FOR_SECONDS: 10n,
     DEFAULT_ROUTE_MIN_SUBMIT_WINDOW_SECONDS: 2n,
-    DEFAULT_DEBT_BUFFER_BPS: 1n,
+    DEFAULT_DEBT_BUFFER_BPS: 0n,
     /** Extra preview coverage for small Kyber route-summary/build output drift. */
     REPAY_ALL_ROUTE_BUILD_BUFFER_BPS: 1n,
     DEFAULT_MAX_QUOTE_ITERATIONS: 3,
@@ -44,7 +44,7 @@ export interface RepayWithSwapOptions {
 }
 
 export interface RepayAllWithSwapOptions extends RepayWithSwapOptions {
-    /** Additional refundable debt-asset coverage above projected debt. */
+    /** Optional refundable debt-asset coverage above projected debt. Defaults to zero. */
     debtBufferBps?: bigint;
     /** Maximum exact-input quote/rescale attempts. */
     maxQuoteIterations?: number;
@@ -422,8 +422,9 @@ export class BorrowableCToken extends CToken {
             if (debtBufferBps < 0n || debtBufferBps >= BPS) {
                 throw new Error(`Repay-all debt buffer must be in [0, ${BPS}), got ${debtBufferBps}`);
             }
-            // The BPS margin absorbs rate/utilization drift; the extra base unit
-            // protects the floor from integer rounding at the projection boundary.
+            // Debt is already projected through the plan deadline. Keep only the
+            // extra base unit by default to protect the floor from integer rounding;
+            // callers may still opt into an additional BPS margin when needed.
             const repayAssets = ceilDiv(projectedDebt * (BPS + debtBufferBps), BPS) + 1n;
             const maxQuoteIterations = options.maxQuoteIterations
                 ?? REPAY_WITH_SWAP.DEFAULT_MAX_QUOTE_ITERATIONS;

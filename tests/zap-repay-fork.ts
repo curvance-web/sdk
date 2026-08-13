@@ -188,7 +188,7 @@ describe("Zap repay on Monad fork", { skip: FORK_SKIP }, () => {
 
         assert.equal(plan.mode, "repay-all");
         assert.ok(plan.projectedDebt >= debtBefore, "Projected debt must include current debt");
-        assert.ok(plan.repayAssets > plan.projectedDebt, "Repay-all floor must include debt margin");
+        assert.ok(plan.repayAssets > plan.projectedDebt, "Repay-all floor must include the rounding guard");
         assert.equal(plan.minimumOutput, plan.inputAmount, "Same-token route should be a no-op");
         assert.equal(plan.quoteIterations, 1);
 
@@ -252,7 +252,6 @@ describe("Zap repay on Monad fork", { skip: FORK_SKIP }, () => {
             inputAsset.address,
             {
                 validForSeconds: 300n,
-                debtBufferBps: 2n,
                 maxQuoteIterations: 3,
             },
         );
@@ -273,7 +272,6 @@ describe("Zap repay on Monad fork", { skip: FORK_SKIP }, () => {
             inputAsset.address,
             {
                 validForSeconds: 300n,
-                debtBufferBps: 2n,
                 maxQuoteIterations: 3,
             },
         );
@@ -312,7 +310,6 @@ describe("Zap repay on Monad fork", { skip: FORK_SKIP }, () => {
             NATIVE_ADDRESS,
             {
                 validForSeconds: 300n,
-                debtBufferBps: 2n,
                 maxQuoteIterations: 3,
             },
         );
@@ -336,7 +333,6 @@ describe("Zap repay on Monad fork", { skip: FORK_SKIP }, () => {
             NATIVE_ADDRESS,
             {
                 validForSeconds: 300n,
-                debtBufferBps: 2n,
                 maxQuoteIterations: 3,
             },
         );

@@ -339,8 +339,8 @@ await borrowToken.repayWithSwap(plan)
 ```
 
 `Repay all` is target-driven: the SDK projects debt through the plan deadline,
-adds a refundable interest/rounding margin, and iteratively sizes an exact-input
-route until `minimumOutput >= repayAssets`.
+adds a one-base-unit rounding guard, and iteratively sizes an exact-input route
+until `minimumOutput >= repayAssets`.
 
 ```ts
 const repayAllPlan = await borrowToken.quoteRepayAllWithSwap(
@@ -348,7 +348,6 @@ const repayAllPlan = await borrowToken.quoteRepayAllWithSwap(
     new Decimal(0.005), // 0.5% slippage
     {
         validForSeconds: 100n,
-        debtBufferBps: 1n,
     },
 )
 

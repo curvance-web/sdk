@@ -521,7 +521,7 @@ describe("BorrowableCToken repay-with-swap planning", () => {
         assert.equal(simulation.success, true);
     });
 
-    test("repay-all projects to deadline, buffers debt, and rescales until min output covers it", async () => {
+    test("repay-all projects to deadline, adds a rounding guard, and rescales until min output covers it", async () => {
         const harness = createBorrowableHarness();
         const plan = await harness.token.quoteRepayAllWithSwap(
             INPUT_TOKEN,
@@ -531,13 +531,14 @@ describe("BorrowableCToken repay-with-swap planning", () => {
 
         assert.equal(plan.mode, "repay-all");
         assert.equal(plan.projectedDebt, 1_000n);
-        assert.equal(plan.repayAssets, 1_002n);
+        assert.equal(REPAY_WITH_SWAP.DEFAULT_DEBT_BUFFER_BPS, 0n);
+        assert.equal(plan.repayAssets, 1_001n);
         assert.ok(plan.minimumOutput >= plan.repayAssets);
-        assert.equal(plan.inputAmount, 559n);
-        assert.equal(plan.minimumOutput, 1_006n);
+        assert.equal(plan.inputAmount, 558n);
+        assert.equal(plan.minimumOutput, 1_004n);
         assert.equal(plan.quoteIterations, 2);
-        assert.deepEqual(harness.dexCalls.map((call) => call.amount), [501n, 559n]);
-        assert.deepEqual(harness.dexBuildCalls.map((call) => call.amount), [559n]);
+        assert.deepEqual(harness.dexCalls.map((call) => call.amount), [501n, 558n]);
+        assert.deepEqual(harness.dexBuildCalls.map((call) => call.amount), [558n]);
         assert.deepEqual(harness.debtReads, [{
             receiver: RECEIVER,
             timestamp: 1_700_000_100n,
@@ -560,7 +561,7 @@ describe("BorrowableCToken repay-with-swap planning", () => {
         assert.equal(harness.dexCalls[0]?.amount, 600n);
     });
 
-    test("same-debt-token repay-all is a one-quote no-op and still includes interest margin", async () => {
+    test("same-debt-token repay-all is a one-quote no-op with projected interest and a rounding guard", async () => {
         const harness = createBorrowableHarness();
         const plan = await harness.token.quoteRepayAllWithSwap(
             DEBT_TOKEN,
@@ -568,8 +569,8 @@ describe("BorrowableCToken repay-with-swap planning", () => {
         );
 
         assert.equal(harness.dexCalls.length, 0);
-        assert.equal(plan.inputAmount, 1_002n);
-        assert.equal(plan.minimumOutput, 1_002n);
+        assert.equal(plan.inputAmount, 1_001n);
+        assert.equal(plan.minimumOutput, 1_001n);
         assert.equal(plan.swapAction.target, "0x0000000000000000000000000000000000000000");
         assert.equal(plan.quoteIterations, 1);
     });
@@ -733,6 +734,7 @@ describe("BorrowableCToken repay-with-swap planning", () => {
 
     test("sizes a preview cushion before the single build to absorb small Kyber output drift", async () => {
         const harness = createBorrowableHarness({
+            projectedDebt: 1_001n,
             quoteFn: (amount) => amount === 600n
                 ? { min: 1_002n, out: 1_010n }
                 : { min: 1_004n, out: 1_012n },
@@ -755,6 +757,7 @@ describe("BorrowableCToken repay-with-swap planning", () => {
 
     test("adds a convergence cushion when an exact proportional resize would remain one unit short", async () => {
         const harness = createBorrowableHarness({
+            projectedDebt: 1_001n,
             quoteFn: (amount) => {
                 if (amount === 501n) return { min: 901n, out: 910n };
                 if (amount === 558n) return { min: 1_002n, out: 1_010n };
