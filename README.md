@@ -930,9 +930,11 @@ Run before every SDK `npm publish`:
    no duplicate fallbacks, policy fields within sane ranges).
 
 2. **Fork gate green, or explicitly classified as pending.** `npm run test:fork`
-   is the live fork/write gate. If it skips because `TEST_RPC`, deployer keys,
-   or a generated fixture are missing, the SDK can be called
-   deterministic/package covered, but not fork-covered.
+   is the broad live fork/write suite. If it skips because `TEST_RPC`, deployer
+   keys, or a generated fixture are missing, the SDK can be called
+   deterministic/package covered, but not fork-covered. Zap-and-repay changes
+   additionally require `npm run test:zap-repay-fork`; this focused gate fails
+   when `TEST_RPC` is absent instead of allowing Node's skipped suite to exit 0.
 
 3. **Package artifact smoke green.**
 
@@ -965,6 +967,9 @@ Run before every SDK `npm publish`:
 - `test:fork` must execute against a local Anvil-compatible fork before calling
   the SDK fork-covered. A command that exits 0 after skip messages is not live
   fork proof.
+- `test:zap-repay-fork` is the non-skipping release gate for repay-with-swap.
+  It requires `TEST_RPC` and only exits 0 after the focused fork suite actually
+  executes its same-token, ERC20, native, partial, and repay-all write paths.
 - App build, app Cypress/Vitest, and app RPC-origin probes are downstream
   adoption checks. Run them after publishing or linking the packed SDK into the
   app repo; they are not part of the SDK-only publish gate.

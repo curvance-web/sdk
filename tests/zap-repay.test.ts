@@ -533,11 +533,11 @@ describe("BorrowableCToken repay-with-swap planning", () => {
         assert.equal(plan.projectedDebt, 1_000n);
         assert.equal(plan.repayAssets, 1_002n);
         assert.ok(plan.minimumOutput >= plan.repayAssets);
-        assert.equal(plan.inputAmount, 558n);
-        assert.equal(plan.minimumOutput, 1_004n);
+        assert.equal(plan.inputAmount, 559n);
+        assert.equal(plan.minimumOutput, 1_006n);
         assert.equal(plan.quoteIterations, 2);
-        assert.deepEqual(harness.dexCalls.map((call) => call.amount), [501n, 558n]);
-        assert.deepEqual(harness.dexBuildCalls.map((call) => call.amount), [558n]);
+        assert.deepEqual(harness.dexCalls.map((call) => call.amount), [501n, 559n]);
+        assert.deepEqual(harness.dexBuildCalls.map((call) => call.amount), [559n]);
         assert.deepEqual(harness.debtReads, [{
             receiver: RECEIVER,
             timestamp: 1_700_000_100n,
@@ -748,9 +748,29 @@ describe("BorrowableCToken repay-with-swap planning", () => {
         assert.equal(REPAY_WITH_SWAP.REPAY_ALL_ROUTE_BUILD_BUFFER_BPS, 1n);
         assert.equal(plan.repayAssets, 1_002n);
         assert.equal(plan.minimumOutput, 1_002n);
-        assert.equal(plan.inputAmount, 601n);
-        assert.deepEqual(harness.dexCalls.map((call) => call.amount), [600n, 601n]);
-        assert.deepEqual(harness.dexBuildCalls.map((call) => call.amount), [601n]);
+        assert.equal(plan.inputAmount, 602n);
+        assert.deepEqual(harness.dexCalls.map((call) => call.amount), [600n, 602n]);
+        assert.deepEqual(harness.dexBuildCalls.map((call) => call.amount), [602n]);
+    });
+
+    test("adds a convergence cushion when an exact proportional resize would remain one unit short", async () => {
+        const harness = createBorrowableHarness({
+            quoteFn: (amount) => {
+                if (amount === 501n) return { min: 901n, out: 910n };
+                if (amount === 558n) return { min: 1_002n, out: 1_010n };
+                return { min: 1_004n, out: 1_012n };
+            },
+        });
+
+        const plan = await harness.token.quoteRepayAllWithSwap(
+            INPUT_TOKEN,
+            Decimal("0.005"),
+            { maxQuoteIterations: 2 },
+        );
+
+        assert.equal(plan.inputAmount, 559n);
+        assert.equal(plan.quoteIterations, 2);
+        assert.deepEqual(harness.dexCalls.map((call) => call.amount), [501n, 559n]);
     });
 
     test("fails closed when the final calldata build falls below the repay-all floor", async () => {

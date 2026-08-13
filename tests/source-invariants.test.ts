@@ -90,6 +90,25 @@ test("test:fork includes every env-backed fork test file", () => {
     assert.deepEqual(missing, []);
 });
 
+test("zap repay fork gate fails closed instead of passing through a skipped suite", () => {
+    const packageJson = JSON.parse(readRepoFile("package.json"));
+    const gateScript = readRepoFile("tests/run-zap-repay-fork-gate.cjs");
+    const forkTest = readRepoFile("tests/zap-repay-fork.ts");
+
+    assert.equal(
+        packageJson.scripts["test:zap-repay-fork"],
+        "node tests/run-zap-repay-fork-gate.cjs",
+    );
+    assert.match(gateScript, /require\("dotenv"\)\.config/);
+    assert.match(gateScript, /if \(!rpcUrl\)/);
+    assert.match(gateScript, /CURVANCE_REQUIRE_ZAP_REPAY_FORK: "1"/);
+    assert.match(gateScript, /tests\/zap-repay-fork\.ts/);
+    assert.match(gateScript, /expectedCases/);
+    assert.match(gateScript, /# skipped 0/);
+    assert.match(forkTest, /REQUIRE_FORK_ENV && !HAS_FORK_ENV/);
+    assert.match(forkTest, /refusing to report a skipped suite as passing/);
+});
+
 test("package lifecycle rebuilds dist before pack and publish", () => {
     const packageJson = JSON.parse(readRepoFile("package.json"));
     const distSmokeSource = readRepoFile("tests/dist-smoke.cjs");

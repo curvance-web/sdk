@@ -775,7 +775,19 @@ export class BorrowableCToken extends CToken {
                 return { quote, iterations: iteration };
             }
 
-            const largerCandidate = ceilDiv(candidate * sizingFloor, prepared.minimumOutput);
+            // A perfectly proportional resize can still quote one unit below
+            // the target after integer rounding or a small route reprice,
+            // wasting one of the deliberately bounded solver iterations. Aim
+            // one route-build buffer above the acceptance floor so the next
+            // preview converges without increasing the quote-count ceiling.
+            const rescaleTarget = ceilDiv(
+                sizingFloor * (BPS + REPAY_WITH_SWAP.REPAY_ALL_ROUTE_BUILD_BUFFER_BPS),
+                BPS,
+            );
+            const largerCandidate = ceilDiv(
+                candidate * rescaleTarget,
+                prepared.minimumOutput,
+            );
             candidate = largerCandidate > candidate ? largerCandidate : candidate + 1n;
         }
 
