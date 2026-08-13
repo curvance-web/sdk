@@ -2408,8 +2408,8 @@ async function main() {
         );
         assert.deepEqual(
             packedArbFetchUrls.map((url) => getProxiedMerklUrl(url).searchParams.get("chainId")),
-            ["421614", "421614"],
-            "packed Arbitrum real boot should only make chain-scoped Merkl opportunity requests",
+            ["421614"],
+            "packed Arbitrum real boot should make one coalesced, chain-scoped Merkl opportunity request",
         );
     } finally {
         packedSdk.Api.getRewards = originalPackedArbGetRewards;

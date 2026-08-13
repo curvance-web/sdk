@@ -30,6 +30,19 @@
   },
   {
     "type": "function",
+    "name": "MAX_INCENTIVE_APY_BPS",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "ORACLE_MANAGER",
     "inputs": [],
     "outputs": [
@@ -281,6 +294,23 @@
         "name": "rebalanceChunks",
         "type": "uint256",
         "internalType": "uint256"
+      },
+      {
+        "name": "marketIncentives",
+        "type": "tuple[]",
+        "internalType": "struct OptimizerReader.MarketIncentiveAPYBps[]",
+        "components": [
+          {
+            "name": "cToken",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "incentiveAPYBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
       }
     ],
     "outputs": [
@@ -370,6 +400,21 @@
       }
     ],
     "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "OptimizerReader__DuplicateIncentiveMarket",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OptimizerReader__InvalidIncentiveAPYBps",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "OptimizerReader__InvalidIncentiveMarket",
+    "inputs": []
   },
   {
     "type": "error",
