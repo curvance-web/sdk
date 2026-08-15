@@ -12,7 +12,7 @@ import type { ChainRpcPrefix, address } from "../src";
 import { TestFramework } from "./utils/TestFramework";
 
 const TEST_CHAIN = (process.env.TEST_CHAIN ?? "monad-mainnet") as ChainRpcPrefix;
-const TEST_API_URL = process.env.TEST_API_URL ?? "https://api.curvance.com";
+const TEST_API_URL = process.env.TEST_API_URL ?? "https://api2.curvance.com";
 const PREFERRED_MARKET = "WMON | USDC";
 const DEPOSIT_AMOUNT = Decimal(250);
 const HAS_FORK_ENV = Boolean(process.env.TEST_RPC);

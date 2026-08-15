@@ -25,23 +25,26 @@ export type MilestoneResponse = {
 export type Milestones = { [key: string]: MilestoneResponse };
 export type Incentives = { [key: string]: Array<IncentiveResponse> };
 type ApiRequestConfig = Pick<SetupConfigSnapshot, "chain" | "api_url"> & {
+    chainId?: SetupConfigSnapshot["chainId"];
     services?: SetupConfigSnapshot["services"];
 };
 
-function isRewardsResponse(
-    value: unknown,
-): value is { milestones: Array<MilestoneResponse>; incentives: Array<IncentiveResponse> } {
-    if (typeof value !== "object" || value == null) {
-        return false;
-    }
+export type AssetPointResponse = {
+    type: string;
+    image: string;
+    rate: number;
+};
 
-    const maybeRewards = value as {
-        milestones?: unknown;
-        incentives?: unknown;
-    };
-
-    return Array.isArray(maybeRewards.milestones) && Array.isArray(maybeRewards.incentives);
-}
+export type AssetResponse = {
+    chain_id: number;
+    token: address;
+    symbol: string;
+    token_image: string;
+    market_address?: address;
+    vault: boolean;
+    percent_native_apy: number;
+    points: AssetPointResponse[];
+};
 
 function isFiniteNumber(value: unknown): value is number {
     return typeof value === "number" && Number.isFinite(value);
@@ -51,54 +54,43 @@ function isNonNegativeFiniteNumber(value: unknown): value is number {
     return isFiniteNumber(value) && value >= 0;
 }
 
-function isPositiveFiniteNumber(value: unknown): value is number {
-    return isFiniteNumber(value) && value > 0;
-}
-
 function isNonEmptyString(value: unknown): value is string {
     return typeof value === "string" && value.trim().length > 0;
 }
 
-function isMilestoneResponse(value: unknown): value is MilestoneResponse {
+function isAssetPointResponse(value: unknown): value is AssetPointResponse {
     if (typeof value !== "object" || value == null) {
         return false;
     }
 
-    const row = value as Partial<Record<keyof MilestoneResponse, unknown>>;
+    const row = value as Partial<Record<keyof AssetPointResponse, unknown>>;
     return (
-        isNonEmptyString(row.market) &&
-        isNonNegativeFiniteNumber(row.tvl) &&
-        isNonNegativeFiniteNumber(row.multiplier) &&
-        isNonNegativeFiniteNumber(row.fail_multiplier) &&
-        isNonEmptyString(row.chain_network) &&
-        isNonEmptyString(row.start_date) &&
-        isNonEmptyString(row.end_date) &&
-        isPositiveFiniteNumber(row.duration_in_days)
+        isNonEmptyString(row.type) &&
+        isNonEmptyString(row.image) &&
+        isNonNegativeFiniteNumber(row.rate)
     );
 }
 
-function isIncentiveResponse(value: unknown): value is IncentiveResponse {
+function isAssetResponse(value: unknown): value is AssetResponse {
     if (typeof value !== "object" || value == null) {
         return false;
     }
 
-    const row = value as Partial<Record<keyof IncentiveResponse, unknown>>;
+    const row = value as Partial<Record<keyof AssetResponse, unknown>>;
     return (
-        isNonEmptyString(row.market) &&
-        isNonEmptyString(row.type) &&
-        isNonNegativeFiniteNumber(row.rate) &&
-        isNonEmptyString(row.description) &&
-        isNonEmptyString(row.image) &&
-        (row.chain_network == undefined || isNonEmptyString(row.chain_network))
+        isFiniteNumber(row.chain_id) &&
+        isNonEmptyString(row.token) &&
+        isNonEmptyString(row.symbol) &&
+        isNonEmptyString(row.token_image) &&
+        (row.market_address == undefined || isNonEmptyString(row.market_address)) &&
+        typeof row.vault === "boolean" &&
+        isNonNegativeFiniteNumber(row.percent_native_apy) &&
+        Array.isArray(row.points)
     );
 }
 
 function normalizeMarketKey(market: string): string {
     return market.toLowerCase();
-}
-
-function normalizeChainNetwork(chain: string): string {
-    return chain.trim().toLowerCase().replace(/[\s_]+/g, "-");
 }
 
 function resolveCurvanceApiServices(config: ApiRequestConfig) {
@@ -107,28 +99,6 @@ function resolveCurvanceApiServices(config: ApiRequestConfig) {
         throw new Error(`Chain configuration for ${config.chain} is missing Curvance API services.`);
     }
     return services;
-}
-
-function acceptedMilestoneChainNetworks(config: ApiRequestConfig): Set<string> {
-    const { chain } = config;
-    const normalized = normalizeChainNetwork(chain);
-    const aliases = new Set([normalized]);
-    const services = resolveCurvanceApiServices(config);
-
-    for (const alias of services.rewardChainAliases) {
-        aliases.add(normalizeChainNetwork(alias));
-    }
-
-    return aliases;
-}
-
-function isNativeYieldRow(value: unknown): value is { symbol: string; apy: number } {
-    if (typeof value !== "object" || value == null) {
-        return false;
-    }
-
-    const row = value as { symbol?: unknown; apy?: unknown };
-    return typeof row.symbol === "string" && isNonNegativeFiniteNumber(row.apy);
 }
 
 function resolveDefaultSetupConfig(context: string): SetupConfigSnapshot {
@@ -151,6 +121,12 @@ function resolveValidatedApiUrl(config: ApiRequestConfig, context: string): stri
     }
 }
 
+function resolveChainId(config: ApiRequestConfig): number {
+    return config.chainId ?? chain_config[config.chain].chainId;
+}
+
+const assetRequests = new WeakMap<object, Promise<AssetResponse[]>>();
+
 export class Api {
     private url: string;
     
@@ -158,99 +134,109 @@ export class Api {
         this.url = resolveValidatedApiUrl(config ?? resolveDefaultSetupConfig("Api"), "Api");
     }
 
-    static async fetchNativeYields(config?: ApiRequestConfig): Promise<{ symbol: string, apy: number }[]> {
-        const resolvedConfig = config ?? resolveDefaultSetupConfig("Api.fetchNativeYields");
-        const { api_url } = resolvedConfig;
-        const nativeYieldSlug = resolveCurvanceApiServices(resolvedConfig).nativeYieldSlug;
-
-        if(nativeYieldSlug == null) {
-            return [];
+    static async fetchAssets(config?: ApiRequestConfig): Promise<AssetResponse[]> {
+        const resolvedConfig = config ?? resolveDefaultSetupConfig("Api.fetchAssets");
+        const apiUrl = resolveValidatedApiUrl(resolvedConfig, "Api.fetchAssets").replace(/\/+$/, "");
+        const chainId = resolveChainId(resolvedConfig);
+        const cached = assetRequests.get(resolvedConfig);
+        if (cached != undefined) {
+            return cached;
         }
 
-        if(api_url == null) {
-            console.error("You must have an API URL setup to fetch native yields.");
-            return [];
-        }
+        const request = (async () => {
+            try {
+                const response = await fetchWithTimeout(`${apiUrl}/asset/${chainId}`);
+                if (!response.ok) {
+                    throw new Error(`Assets request failed: ${response.status} ${response.statusText}`);
+                }
 
-        const validatedApiUrl = resolveValidatedApiUrl(resolvedConfig, "Api.fetchNativeYields");
-        try {
-            const res = await fetchWithTimeout(`${validatedApiUrl}/v1/${nativeYieldSlug}/native_apy`);
-            if (!res.ok) {
-                throw new Error(`Native yields request failed: ${res.status} ${res.statusText}`);
-            }
+                const payload = await response.json();
+                if (!Array.isArray(payload)) {
+                    throw new Error("Invalid assets response structure");
+                }
 
-            const yields = await res.json() as {
-                "native_apy": {
-                    symbol: string,
-                    apy: number
-                }[]
-            };
-
-            // Add validation
-            if (!yields || !yields.native_apy || !Array.isArray(yields.native_apy)) {
-                console.error("Invalid API response structure for native yields");
+                return payload
+                    .filter(isAssetResponse)
+                    .map(asset => ({
+                        ...asset,
+                        points: asset.points.filter(isAssetPointResponse),
+                    }));
+            } catch(error) {
+                console.error("Failed to fetch asset metadata from API:", error);
                 return [];
             }
+        })();
 
-            return yields.native_apy.filter(isNativeYieldRow);
-        } catch (error) {
-            console.error("Error fetching native yields:", error);
+        assetRequests.set(resolvedConfig, request);
+        return request;
+    }
+
+    static async fetchNativeYields(config?: ApiRequestConfig): Promise<{ symbol: string, apy: number }[]> {
+        const resolvedConfig = config ?? resolveDefaultSetupConfig("Api.fetchNativeYields");
+        if (resolveCurvanceApiServices(resolvedConfig).nativeYieldSlug == null) {
             return [];
         }
+        const assets = await Api.fetchAssets(resolvedConfig);
+        const yieldsBySymbol = new Map<string, { symbol: string; apy: number }>();
+
+        for (const asset of assets) {
+            const key = asset.symbol.toUpperCase();
+            const existing = yieldsBySymbol.get(key);
+            if (existing == undefined) {
+                yieldsBySymbol.set(key, {
+                    symbol: asset.symbol,
+                    apy: asset.percent_native_apy,
+                });
+                continue;
+            }
+
+            if (existing.apy !== asset.percent_native_apy) {
+                console.warn(
+                    `Conflicting native APY values for ${asset.symbol}; ` +
+                    `using ${existing.apy} and ignoring ${asset.percent_native_apy}.`
+                );
+            }
+        }
+
+        return [...yieldsBySymbol.values()];
     }
 
     static async getRewards(config?: ApiRequestConfig) {
         const resolvedConfig = config ?? resolveDefaultSetupConfig("Api.getRewards");
-        const rewardsSlug = resolveCurvanceApiServices(resolvedConfig).rewardsSlug;
-        const apiUrl = resolveValidatedApiUrl(resolvedConfig, "Api.getRewards");
+        const assets = await Api.fetchAssets(resolvedConfig);
+        const milestones: Milestones = {};
+        const incentives: Incentives = {};
+        const seenByMarket = new Map<string, Set<string>>();
 
-        let milestones: Milestones = {};
-        let incentives: Incentives = {};
-
-        let rewards;
-        try {
-            const response = await fetchWithTimeout(`${apiUrl}/v1/rewards/active/${rewardsSlug}`);
-            if (!response.ok) {
-                throw new Error(`Rewards request failed: ${response.status} ${response.statusText}`);
-            }
-
-            const payload = await response.json();
-            if (!isRewardsResponse(payload)) {
-                throw new Error("Invalid rewards response structure");
-            }
-
-            rewards = payload;
-        } catch(e) {
-            console.error("Failed to fetch rewards data from API:", e);
-            rewards = {
-                milestones: [],
-                incentives: []
-            };
-        }
-
-        const milestoneChainNetworks = acceptedMilestoneChainNetworks(resolvedConfig);
-        for(const milestone of rewards.milestones.filter(isMilestoneResponse)) {
-            if (!milestoneChainNetworks.has(normalizeChainNetwork(milestone.chain_network))) {
+        for (const asset of assets) {
+            if (asset.market_address == undefined) {
                 continue;
             }
 
-            milestones[normalizeMarketKey(milestone.market)] = milestone;
-        }
+            const market = normalizeMarketKey(asset.market_address);
+            const marketIncentives = incentives[market] ?? [];
+            const seen = seenByMarket.get(market) ?? new Set<string>();
 
-        for(const incentive of rewards.incentives.filter(isIncentiveResponse)) {
-            if (
-                incentive.chain_network != undefined &&
-                !milestoneChainNetworks.has(normalizeChainNetwork(incentive.chain_network))
-            ) {
-                continue;
+            for (const point of asset.points) {
+                const identity = `${point.type}\u0000${point.image}\u0000${point.rate}`;
+                if (seen.has(identity)) {
+                    continue;
+                }
+
+                seen.add(identity);
+                marketIncentives.push({
+                    market: asset.market_address,
+                    type: point.type,
+                    rate: point.rate,
+                    description: point.type,
+                    image: point.image,
+                });
             }
 
-            const market = normalizeMarketKey(incentive.market);
-            if(!(market in incentives)) {
-                incentives[market] = [];
+            if (marketIncentives.length > 0) {
+                incentives[market] = marketIncentives;
+                seenByMarket.set(market, seen);
             }
-
-            incentives[market]!.push(incentive);
         }
 
         return { milestones, incentives };
