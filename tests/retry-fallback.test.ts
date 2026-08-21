@@ -625,6 +625,38 @@ test("unknown errors on primary fall through to fallback", async (t) => {
     );
 });
 
+test("BAD_DATA transaction reads fall through despite a nested INVALID_ARGUMENT cause", async (t) => {
+    const harness = new TransportHarness(t);
+    const recoveredTransaction = { hash: `0x${"ab".repeat(32)}` };
+    const wrapped = harness.wrapReadProvider(
+        RetryableProvider,
+        {
+            label: "primary",
+            methods: {
+                getTransaction: fail(
+                    "invalid value for value.nonce (invalid numeric value, code=INVALID_ARGUMENT), code=BAD_DATA",
+                    { code: "BAD_DATA" },
+                ),
+            },
+        },
+        {
+            fallbacks: [
+                {
+                    label: "fallback",
+                    methods: {
+                        getTransaction: ok(recoveredTransaction),
+                    },
+                },
+            ],
+        },
+    );
+
+    const transaction = await wrapped.getTransaction(recoveredTransaction.hash);
+
+    assert.equal(transaction, recoveredTransaction);
+    assert.deepEqual(harness.callLabels(), ["primary", "fallback"]);
+});
+
 test("unknown errors on a fallback advance to the next fallback", async (t) => {
     const harness = new TransportHarness(t);
     const wrapped = harness.wrapReadProvider(

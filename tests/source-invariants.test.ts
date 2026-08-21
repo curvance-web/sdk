@@ -80,6 +80,7 @@ test("test:fork includes every env-backed fork test file", () => {
         "optimizer-zap.test.ts",
         "leverage.test.ts",
         "zap.test.ts",
+        "zap-repay-fork.ts",
         "dual-fork-switch.test.ts",
     ];
 
@@ -87,6 +88,25 @@ test("test:fork includes every env-backed fork test file", () => {
         .filter((file) => !forkScript.includes(`tests/${file}`));
 
     assert.deepEqual(missing, []);
+});
+
+test("zap repay fork gate fails closed instead of passing through a skipped suite", () => {
+    const packageJson = JSON.parse(readRepoFile("package.json"));
+    const gateScript = readRepoFile("tests/run-zap-repay-fork-gate.cjs");
+    const forkTest = readRepoFile("tests/zap-repay-fork.ts");
+
+    assert.equal(
+        packageJson.scripts["test:zap-repay-fork"],
+        "node tests/run-zap-repay-fork-gate.cjs",
+    );
+    assert.match(gateScript, /require\("dotenv"\)\.config/);
+    assert.match(gateScript, /if \(!rpcUrl\)/);
+    assert.match(gateScript, /CURVANCE_REQUIRE_ZAP_REPAY_FORK: "1"/);
+    assert.match(gateScript, /tests\/zap-repay-fork\.ts/);
+    assert.match(gateScript, /expectedCases/);
+    assert.match(gateScript, /# skipped 0/);
+    assert.match(forkTest, /REQUIRE_FORK_ENV && !HAS_FORK_ENV/);
+    assert.match(forkTest, /refusing to report a skipped suite as passing/);
 });
 
 test("package lifecycle rebuilds dist before pack and publish", () => {
@@ -493,7 +513,7 @@ test("Kyber current-router calldata validation fails closed in source", () => {
     assert.match(source, /const validatedFeeReceiver = feeReceiver == undefined[\s\S]*?validateAddress\(feeReceiver, 'KyberSwap feeReceiver'\);/);
     assert.match(
         source,
-        /validateSwapCalldata\(build_data\.data\.data,\s*\{[\s\S]*tokenIn: validatedTokenIn,[\s\S]*tokenOut: validatedTokenOut,[\s\S]*amount,[\s\S]*recipient: validatedWallet,[\s\S]*minReturnAmount: min_out,[\s\S]*feeBps: feeBps \?\? 0n,[\s\S]*feeReceiver: validatedFeeReceiver,[\s\S]*\}\);/,
+        /validateSwapCalldata\((?:build_data|buildData)\.data\.data,\s*\{[\s\S]*tokenIn: validatedTokenIn,[\s\S]*tokenOut: validatedTokenOut,[\s\S]*amount,[\s\S]*recipient: validatedWallet,[\s\S]*minReturnAmount: min_out,[\s\S]*feeBps: feeBps \?\? 0n,[\s\S]*feeReceiver: validatedFeeReceiver,[\s\S]*\}\);/,
     );
     assert.doesNotMatch(source, /console\.warn/);
     assert.match(validator, /validateEqualAddress\(desc\.srcToken,\s*expected\.tokenIn,\s*'srcToken'\);/);

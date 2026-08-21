@@ -313,6 +313,60 @@ await borrowToken.fetchDebt(inUSD)
 await borrowToken.debtBalance(account)
 ```
 
+### Zap & Repay (`BorrowableCToken` only)
+
+Zap repayment uses the configured SimpleZapper to accept another ERC20 or the
+native gas token, swap it into the debt asset, and repay in one transaction.
+The quote result is an immutable, short-lived plan that separates expected
+output from the guaranteed minimum output.
+
+```ts
+import Decimal from "decimal.js"
+import { NATIVE_ADDRESS } from "curvance"
+
+// Exact-input: spend exactly 2 MON and repay however much USDC the route returns.
+const plan = await borrowToken.quoteRepayWithSwap(
+    NATIVE_ADDRESS,
+    new Decimal(2),
+    new Decimal(0.01), // 1% slippage
+)
+
+if (!(await borrowToken.isRepayWithSwapApproved(plan))) {
+    const approval = await borrowToken.approveRepayWithSwap(plan)
+    await approval?.wait()
+}
+await borrowToken.repayWithSwap(plan)
+```
+
+`Repay all` is target-driven: the SDK projects debt through the plan deadline,
+adds a one-base-unit rounding guard, and iteratively sizes an exact-input route
+until `minimumOutput >= repayAssets`.
+
+```ts
+const repayAllPlan = await borrowToken.quoteRepayAllWithSwap(
+    paymentTokenAddress,
+    new Decimal(0.005), // 0.5% slippage
+    {
+        validForSeconds: 100n,
+    },
+)
+
+const approval = await borrowToken.approveRepayAllWithSwap(repayAllPlan)
+await approval?.wait()
+
+const simulation = await borrowToken.simulateRepayAllWithSwap(repayAllPlan)
+if (!simulation.success) throw new Error(simulation.error)
+await borrowToken.repayAllWithSwap(repayAllPlan)
+```
+
+Execution re-reads projected debt, rejects plans near expiry, checks input-token
+allowance, and simulates before broadcast. Native input requires no ERC20
+approval. Repayment itself does not require cToken delegate approval. Any debt
+asset produced beyond the live debt is returned to the payer by SimpleZapper.
+Because the deployed contract repays as much as possible rather than exposing a
+strict repay-all flag, the SDK's short lifetime, buffered projection, refresh,
+and simulation are the enforcement boundary for the current deployment.
+
 ### Interest rate model
 
 ```ts
@@ -875,9 +929,11 @@ Run before every SDK `npm publish`:
    no duplicate fallbacks, policy fields within sane ranges).
 
 2. **Fork gate green, or explicitly classified as pending.** `npm run test:fork`
-   is the live fork/write gate. If it skips because `TEST_RPC`, deployer keys,
-   or a generated fixture are missing, the SDK can be called
-   deterministic/package covered, but not fork-covered.
+   is the broad live fork/write suite. If it skips because `TEST_RPC`, deployer
+   keys, or a generated fixture are missing, the SDK can be called
+   deterministic/package covered, but not fork-covered. Zap-and-repay changes
+   additionally require `npm run test:zap-repay-fork`; this focused gate fails
+   when `TEST_RPC` is absent instead of allowing Node's skipped suite to exit 0.
 
 3. **Package artifact smoke green.**
 
@@ -910,6 +966,9 @@ Run before every SDK `npm publish`:
 - `test:fork` must execute against a local Anvil-compatible fork before calling
   the SDK fork-covered. A command that exits 0 after skip messages is not live
   fork proof.
+- `test:zap-repay-fork` is the non-skipping release gate for repay-with-swap.
+  It requires `TEST_RPC` and only exits 0 after the focused fork suite actually
+  executes its same-token, ERC20, native, partial, and repay-all write paths.
 - App build, app Cypress/Vitest, and app RPC-origin probes are downstream
   adoption checks. Run them after publishing or linking the packed SDK into the
   app repo; they are not part of the SDK-only publish gate.

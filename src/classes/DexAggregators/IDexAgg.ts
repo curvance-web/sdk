@@ -22,6 +22,58 @@ export type Quote = {
     raw?: any;
 };
 
+export type DexQuoteErrorCode =
+    | "aborted"
+    | "timeout"
+    | "rate-limited"
+    | "unavailable"
+    | "no-route"
+    | "malformed-response"
+    | "http";
+
+export class DexQuoteError extends Error {
+    readonly code: DexQuoteErrorCode;
+    readonly provider: string;
+    readonly retryable: boolean;
+    readonly status: number | undefined;
+
+    constructor(
+        code: DexQuoteErrorCode,
+        message: string,
+        options: {
+            provider?: string;
+            retryable?: boolean;
+            status?: number;
+            cause?: unknown;
+        } = {},
+    ) {
+        super(message, options.cause === undefined ? undefined : { cause: options.cause });
+        this.name = "DexQuoteError";
+        this.code = code;
+        this.provider = options.provider ?? "DEX aggregator";
+        this.retryable = options.retryable ?? false;
+        this.status = options.status;
+    }
+}
+
+export type DexQuoteOptions = {
+    signal?: AbortSignal;
+    /** Shared mutable retry allowance so a multi-step quote cannot reset its retry budget. */
+    retryBudget?: DexQuoteRetryBudget;
+};
+
+export type DexQuoteRetryBudget = {
+    remaining: number;
+};
+
+export type PreparedQuote = {
+    min_out: bigint;
+    out: bigint;
+    build(options?: DexQuoteOptions): Promise<Quote>;
+};
+
+export type PreparedQuoteArgs = [...QuoteArgs, options?: DexQuoteOptions];
+
 export type DexAggContext = {
     markets: readonly Market[];
     feePolicy: FeePolicy;
@@ -39,4 +91,6 @@ export default interface IDexAgg {
     }>;
     quoteMin(...args: QuoteArgs): Promise<bigint>;
     quote(...args: QuoteArgs): Promise<Quote>;
+    /** Optional two-phase quote support. Route sizing can remain GET-only and build calldata once. */
+    prepareQuote?(...args: PreparedQuoteArgs): Promise<PreparedQuote>;
 }

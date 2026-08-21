@@ -202,6 +202,60 @@ function jsonResponse(body: unknown, ok = true): any {
     };
 }
 
+function statusJsonResponse(
+    body: unknown,
+    status: number,
+    headers: Record<string, string> = {},
+): any {
+    return {
+        ok: status >= 200 && status < 300,
+        status,
+        statusText: status === 429 ? "Too Many Requests" : status >= 500 ? "Server Error" : "Bad Request",
+        headers: new Headers(headers),
+        async json() {
+            return body;
+        },
+    };
+}
+
+function kyberRouteResponse(kyber: KyberSwap, amountIn = "1000", amountOut = "1000") {
+    return {
+        message: "OK",
+        data: {
+            routeSummary: {
+                tokenIn: TOKEN_IN,
+                tokenOut: TOKEN_OUT,
+                amountIn,
+                amountOut,
+                extraFee: {
+                    feeAmount: "4",
+                    chargeFeeBy: "currency_in",
+                    isInBps: true,
+                    feeReceiver: FEE_RECEIVER,
+                },
+                route: [],
+            },
+            routerAddress: kyber.router,
+        },
+        requestId: "routes",
+    };
+}
+
+function kyberBuildResponse(kyber: KyberSwap, calldata: bytes, amountOut = "1000") {
+    return {
+        code: 0,
+        message: "OK",
+        data: {
+            amountIn: "1000",
+            amountOut,
+            data: calldata,
+            routerAddress: kyber.router,
+            transactionValue: "0",
+        },
+        requestId: "build",
+    };
+}
+
 async function withMockedKyberFetch<T>(
     kyber: KyberSwap,
     calldata: bytes,
@@ -211,17 +265,18 @@ async function withMockedKyberFetch<T>(
     const originalFetch = globalThis.fetch;
     let calls = 0;
 
-    (globalThis as any).fetch = async () => {
+    (globalThis as any).fetch = async (input: string | URL | Request) => {
         calls++;
 
         if (calls === 1) {
+            const amountIn = new URL(String(input)).searchParams.get("amountIn") ?? "1000";
             return jsonResponse({
                 message: "OK",
                 data: {
                     routeSummary: {
                         tokenIn: TOKEN_IN,
                         tokenOut: TOKEN_OUT,
-                        amountIn: "1000",
+                        amountIn,
                         amountOut: "1000",
                         extraFee: {
                             feeAmount: "0",
@@ -269,6 +324,178 @@ async function withMockedKyberFetch<T>(
         globalThis.fetch = originalFetch;
     }
 }
+
+test("KyberSwap retries one transient 429 within the same quote operation", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+    const calldata = encodeKyberSwapCalldata({ feeBps: 4n, feeReceiver: FEE_RECEIVER });
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    (globalThis as any).fetch = async () => {
+        calls++;
+        if (calls === 1) {
+            return statusJsonResponse(
+                { code: 429, message: "rate limit", requestId: "limited" },
+                429,
+                { "Retry-After": "0" },
+            );
+        }
+        if (calls === 2) return jsonResponse(kyberRouteResponse(kyber));
+        return jsonResponse(kyberBuildResponse(kyber, calldata));
+    };
+
+    try {
+        const quote = await kyber.quote(
+            WALLET,
+            TOKEN_IN,
+            TOKEN_OUT,
+            1_000n,
+            50n,
+            4n,
+            FEE_RECEIVER,
+        );
+        assert.equal(quote.min_out, 995n);
+        assert.equal(calls, 3);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("KyberSwap does not reset a shared retry budget between sizing previews", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+    const retryBudget = { remaining: 1 };
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    (globalThis as any).fetch = async () => {
+        calls++;
+        if (calls === 2) return jsonResponse(kyberRouteResponse(kyber));
+        return statusJsonResponse(
+            { code: 429, message: "rate limit", requestId: `limited-${calls}` },
+            429,
+            { "Retry-After": "0" },
+        );
+    };
+
+    try {
+        await kyber.prepareQuote(
+            WALLET,
+            TOKEN_IN,
+            TOKEN_OUT,
+            1_000n,
+            50n,
+            4n,
+            FEE_RECEIVER,
+            { retryBudget },
+        );
+        assert.equal(retryBudget.remaining, 0);
+
+        await assert.rejects(
+            () => kyber.prepareQuote(
+                WALLET,
+                TOKEN_IN,
+                TOKEN_OUT,
+                1_000n,
+                50n,
+                4n,
+                FEE_RECEIVER,
+                { retryBudget },
+            ),
+            (error: unknown) => error instanceof sdk.DexQuoteError && error.code === "rate-limited",
+        );
+        assert.equal(calls, 3);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("KyberSwap aborts a hanging calldata build after a successful GET preview", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    (globalThis as any).fetch = async (_input: unknown, init: RequestInit) => {
+        calls++;
+        if (calls === 1) return jsonResponse(kyberRouteResponse(kyber));
+        return new Promise((_resolve, reject) => {
+            init.signal?.addEventListener(
+                "abort",
+                () => reject(new DOMException("Aborted", "AbortError")),
+                { once: true },
+            );
+        });
+    };
+
+    try {
+        const controller = new AbortController();
+        const prepared = await kyber.prepareQuote(
+            WALLET,
+            TOKEN_IN,
+            TOKEN_OUT,
+            1_000n,
+            50n,
+            4n,
+            FEE_RECEIVER,
+            { signal: controller.signal },
+        );
+        const build = prepared.build({ signal: controller.signal });
+        controller.abort("quote superseded");
+        await assert.rejects(
+            () => build,
+            (error: unknown) => error instanceof sdk.DexQuoteError && error.code === "aborted",
+        );
+        assert.equal(calls, 2);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test("KyberSwap types malformed and no-route responses without retrying them", async () => {
+    const kyber = new KyberSwap(FEE_RECEIVER);
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+
+    try {
+        (globalThis as any).fetch = async () => {
+            calls++;
+            return jsonResponse({ message: "OK", data: {}, requestId: "malformed" });
+        };
+        await assert.rejects(
+            () => kyber.prepareQuote(
+                WALLET,
+                TOKEN_IN,
+                TOKEN_OUT,
+                1_000n,
+                50n,
+                4n,
+                FEE_RECEIVER,
+            ),
+            (error: unknown) => error instanceof sdk.DexQuoteError && error.code === "malformed-response",
+        );
+        assert.equal(calls, 1);
+
+        calls = 0;
+        (globalThis as any).fetch = async () => {
+            calls++;
+            return statusJsonResponse(
+                { code: 400, message: "No route with sufficient liquidity", requestId: "no-route" },
+                400,
+            );
+        };
+        await assert.rejects(
+            () => kyber.prepareQuote(
+                WALLET,
+                TOKEN_IN,
+                TOKEN_OUT,
+                1_000n,
+                50n,
+                4n,
+                FEE_RECEIVER,
+            ),
+            (error: unknown) => error instanceof sdk.DexQuoteError && error.code === "no-route",
+        );
+        assert.equal(calls, 1);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
 
 test("KyberSwap.quoteAction expands action.slippage by feeBps when fees are active", async () => {
     const kyber = new KyberSwap();

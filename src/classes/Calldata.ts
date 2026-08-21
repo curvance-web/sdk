@@ -1,6 +1,11 @@
 import { Contract, TransactionResponse } from "ethers";
 import { address, bytes, curvance_signer } from "../types";
 import { requireSigner } from "../helpers";
+import {
+    isTransactionLookupProvider,
+    submitTransactionWithBroadcastRecovery,
+    type TransactionLookupProvider,
+} from "../transaction-recovery";
 
 export abstract class Calldata<T> {
     abstract address: address;
@@ -12,6 +17,20 @@ export abstract class Calldata<T> {
         };
         return requireSigner(self.signer);
     }
+
+    private getTransactionLookupProvider(signer: curvance_signer): TransactionLookupProvider | null {
+        const self = this as typeof this & {
+            provider?: unknown;
+            setup?: { readProvider?: unknown };
+        };
+        const candidates: unknown[] = [
+            self.provider,
+            self.setup?.readProvider,
+            signer.provider,
+        ];
+
+        return candidates.find(isTransactionLookupProvider) ?? null;
+    }
     
     getCallData(functionName: string, exec_params: any[]) {
         return this.contract.interface.encodeFunctionData(functionName, exec_params) as bytes;
@@ -19,11 +38,14 @@ export abstract class Calldata<T> {
 
     async executeCallData(calldata: bytes, overrides: { [key: string]: any } = {}): Promise<TransactionResponse> {
         const signer = this.getExecutionSigner();
-        return signer.sendTransaction({
-            to: this.address,
-            data: calldata,
-            ...overrides
-        });
+        return submitTransactionWithBroadcastRecovery(
+            () => signer.sendTransaction({
+                to: this.address,
+                data: calldata,
+                ...overrides
+            }),
+            this.getTransactionLookupProvider(signer),
+        );
     }
 
     async simulateCallData(calldata: bytes, overrides: { [key: string]: any } = {}): Promise<{ success: boolean; error?: string }> {

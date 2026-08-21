@@ -539,6 +539,15 @@ class RetryableProvider {
         const errorMessage = error?.message?.toLowerCase() || '';
         const errorCode = error?.code?.toString() || '';
 
+        // ethers may wrap a malformed RPC transaction field in a BAD_DATA
+        // error whose message contains the nested INVALID_ARGUMENT cause.
+        // The outer code identifies a read-response failure, so it must be
+        // eligible for fallback even though the nested message matches a
+        // deterministic caller-error pattern.
+        if (errorCode.toUpperCase() === 'BAD_DATA') {
+            return false;
+        }
+
         return RetryableProvider.CONTRACT_ERROR_PATTERNS.some((pattern) =>
             errorMessage.includes(pattern) || errorCode.includes(pattern)
         );

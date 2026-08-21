@@ -6,6 +6,7 @@ import { address, curvance_provider, curvance_read_provider, curvance_signer, To
 import { OracleManager } from "./OracleManager";
 import Decimal from "decimal.js";
 import FormatConverter from "./FormatConverter";
+import { submitTransactionWithBroadcastRecovery } from "../transaction-recovery";
 
 function getSetupConfig() {
     return (require("../setup") as typeof import("../setup")).setup_config;
@@ -88,18 +89,28 @@ export class ERC20 {
         const signer = requireSigner(this.signer);
         const decimals = this.decimals ?? await this.fetchDecimals();
         const tokens = toBigInt(amount, decimals);
-        return contractSetup<IERC20>(signer, this.address, ERC20_ABI).transfer(to, tokens);
+        return submitTransactionWithBroadcastRecovery(
+            () => contractSetup<IERC20>(signer, this.address, ERC20_ABI).transfer(to, tokens),
+            this.provider,
+        );
     }
 
     async rawTransfer(to: address, amount: bigint) {
-        return contractSetup<IERC20>(requireSigner(this.signer), this.address, ERC20_ABI).transfer(to, amount);
+        const signer = requireSigner(this.signer);
+        return submitTransactionWithBroadcastRecovery(
+            () => contractSetup<IERC20>(signer, this.address, ERC20_ABI).transfer(to, amount),
+            this.provider,
+        );
     }
 
     async approve(spender: address, amount: TokenInput | null) {
         const signer = requireSigner(this.signer);
         const decimals = this.decimals ?? await this.fetchDecimals();
         const tokens = amount == null ? UINT256_MAX : toBigInt(amount, decimals);
-        return contractSetup<IERC20>(signer, this.address, ERC20_ABI).approve(spender, tokens);
+        return submitTransactionWithBroadcastRecovery(
+            () => contractSetup<IERC20>(signer, this.address, ERC20_ABI).approve(spender, tokens),
+            this.provider,
+        );
     }
 
     async fetchName() {
