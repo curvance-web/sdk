@@ -52,6 +52,11 @@ export interface RepayAllWithSwapOptions extends RepayWithSwapOptions {
     initialInputAmount?: TokenInput;
 }
 
+export type RefreshRepayAllWithSwapRouteOptions = Pick<
+    RepayWithSwapOptions,
+    "planningTimeoutMs" | "signal"
+>;
+
 export type RepayWithSwapMode = "exact-input" | "repay-all";
 
 export interface RepayWithSwapPlan {
@@ -465,6 +470,98 @@ export class BorrowableCToken extends CToken {
                 quote: solved.quote,
                 quoteIterations: solved.iterations,
             });
+        });
+    }
+
+    /**
+     * Rebuilds only the external route for an existing repay-all plan. The
+     * approved input, repayment floor, receiver, and debt-projection deadline
+     * remain fixed so route expiry cannot silently expand token allowance.
+     */
+    async refreshRepayAllWithSwapRoute(
+        plan: RepayWithSwapPlan,
+        options: RefreshRepayAllWithSwapRouteOptions = {},
+    ): Promise<RepayWithSwapPlan> {
+        this.assertRepayAllPlan(plan);
+        this.assertRepayWithSwapPlanBinding(plan);
+
+        return this.runRepayWithSwapPlanning(options, async (signal) => {
+            const now = await this.getRepayWithSwapChainTimestamp();
+            if (now + plan.minSubmitWindowSeconds > plan.validUntil) {
+                throw new Error(
+                    "Zap repay debt projection is expired or too close to expiry; request a new plan.",
+                );
+            }
+
+            const freshProjectedDebt = await this.fetchProjectedDebtFor(
+                plan.receiver,
+                plan.validUntil,
+            );
+            this.assertOutstandingProjectedDebt(freshProjectedDebt, plan.receiver);
+            if (freshProjectedDebt > plan.repayAssets) {
+                throw new Error(
+                    `Projected debt increased to ${freshProjectedDebt}, above repay-all floor ${plan.repayAssets}; request a new plan.`,
+                );
+            }
+
+            const zapper = this.getZapper("simple");
+            if (zapper == null) {
+                throw new Error(`Simple Zapper is not configured for ${this.symbol}.`);
+            }
+            const quote = await zapper.quoteSwapAndRepay(
+                this,
+                plan.inputToken,
+                plan.inputAmount,
+                plan.slippageBps,
+                { signal },
+            );
+            if (quote.minimumOutput < plan.repayAssets) {
+                throw new DexQuoteError(
+                    "no-route",
+                    `Refreshed repay-all route for fixed input ${plan.inputAmount} only guarantees ` +
+                    `${quote.minimumOutput}, below repayment floor ${plan.repayAssets}.`,
+                    { provider: "Curvance SDK", retryable: true },
+                );
+            }
+
+            const calldata = zapper.getSwapAndRepayCalldataFromQuote(
+                this,
+                quote,
+                plan.repayAssets,
+                plan.receiver,
+            );
+            const usesExternalRoute = quote.action.target.toLowerCase() !== EMPTY_ADDRESS.toLowerCase();
+            const routeQuotedAt = usesExternalRoute
+                ? await this.getRepayWithSwapChainTimestamp()
+                : plan.quotedAt;
+            if (routeQuotedAt + plan.minSubmitWindowSeconds > plan.validUntil) {
+                throw new Error(
+                    "Zap repay debt projection expired while refreshing the route; request a new plan.",
+                );
+            }
+            const refreshedPlan: RepayWithSwapPlan = {
+                ...plan,
+                swapInputToken: quote.swapInputToken,
+                minimumOutput: quote.minimumOutput,
+                expectedOutput: quote.expectedOutput,
+                slippageBps: quote.slippageBps,
+                contractSlippage: quote.action.slippage,
+                feeBps: quote.feeBps,
+                feeReceiver: quote.feeReceiver,
+                routeQuotedAt,
+                routeValidUntil: usesExternalRoute
+                    ? routeQuotedAt + REPAY_WITH_SWAP.DEFAULT_ROUTE_VALID_FOR_SECONDS
+                    : plan.validUntil,
+                routeMinSubmitWindowSeconds: usesExternalRoute
+                    ? REPAY_WITH_SWAP.DEFAULT_ROUTE_MIN_SUBMIT_WINDOW_SECONDS
+                    : plan.minSubmitWindowSeconds,
+                quoteIterations: 1,
+                swapAction: Object.freeze({ ...quote.action }),
+                calldata,
+                value: this.isNativeRepayInput(quote.inputToken) ? quote.inputAmount : 0n,
+            };
+            this.assertRepayWithSwapPlanBinding(refreshedPlan);
+            return Object.freeze(refreshedPlan);
         });
     }
 

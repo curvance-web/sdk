@@ -573,6 +573,84 @@ describe("BorrowableCToken repay-with-swap planning", () => {
         }]);
     });
 
+    test("refreshes only the repay-all route while preserving approved input and debt bounds", async () => {
+        const harness = createBorrowableHarness();
+        const plan = await harness.token.quoteRepayAllWithSwap(
+            INPUT_TOKEN,
+            Decimal("0.005"),
+            { receiver: RECEIVER },
+        );
+        harness.setTimestamp(plan.routeValidUntil - 1n);
+
+        const refreshed = await harness.token.refreshRepayAllWithSwapRoute(plan);
+
+        assert.notEqual(refreshed, plan);
+        assert.equal(refreshed.mode, "repay-all");
+        assert.equal(refreshed.inputAmount, plan.inputAmount);
+        assert.equal(refreshed.projectedDebt, plan.projectedDebt);
+        assert.equal(refreshed.repayAssets, plan.repayAssets);
+        assert.equal(refreshed.quotedAt, plan.quotedAt);
+        assert.equal(refreshed.debtProjectionUntil, plan.debtProjectionUntil);
+        assert.equal(refreshed.validUntil, plan.validUntil);
+        assert.equal(refreshed.receiver, plan.receiver);
+        assert.equal(refreshed.routeQuotedAt, plan.routeValidUntil - 1n);
+        assert.equal(
+            refreshed.routeValidUntil,
+            refreshed.routeQuotedAt + REPAY_WITH_SWAP.DEFAULT_ROUTE_VALID_FOR_SECONDS,
+        );
+        assert.equal(refreshed.quoteIterations, 1);
+        assert.equal(Object.isFrozen(refreshed), true);
+        assert.equal(Object.isFrozen(refreshed.swapAction), true);
+        assert.deepEqual(harness.dexCalls.map((call) => call.amount), [501n, 558n, 558n]);
+        assert.deepEqual(harness.dexBuildCalls.map((call) => call.amount), [558n, 558n]);
+        assert.deepEqual(harness.debtReads, [
+            { receiver: RECEIVER, timestamp: plan.validUntil },
+            { receiver: RECEIVER, timestamp: plan.validUntil },
+        ]);
+    });
+
+    test("rejects a refreshed repay-all route that needs more than the approved input", async () => {
+        let routeWeakened = false;
+        const harness = createBorrowableHarness({
+            quoteFn: (amount) => routeWeakened
+                ? { min: amount, out: amount }
+                : { min: amount * 9n / 5n, out: amount * 2n },
+        });
+        const plan = await harness.token.quoteRepayAllWithSwap(
+            INPUT_TOKEN,
+            Decimal("0.005"),
+            { receiver: RECEIVER },
+        );
+        routeWeakened = true;
+        harness.setTimestamp(plan.routeValidUntil - 1n);
+
+        await assert.rejects(
+            () => harness.token.refreshRepayAllWithSwapRoute(plan),
+            /fixed input .* below repayment floor/i,
+        );
+
+        assert.equal(harness.dexCalls.at(-1)?.amount, plan.inputAmount);
+        assert.equal(harness.dexBuildCalls.at(-1)?.amount, plan.inputAmount);
+    });
+
+    test("rejects route-only refresh when the original repay-all debt floor is no longer safe", async () => {
+        const harness = createBorrowableHarness();
+        const plan = await harness.token.quoteRepayAllWithSwap(
+            INPUT_TOKEN,
+            Decimal("0.005"),
+            { receiver: RECEIVER },
+        );
+        harness.setProjectedDebt(plan.repayAssets + 1n);
+        const quoteCount = harness.dexCalls.length;
+
+        await assert.rejects(
+            () => harness.token.refreshRepayAllWithSwapRoute(plan),
+            /above repay-all floor .* request a new plan/i,
+        );
+
+        assert.equal(harness.dexCalls.length, quoteCount);
+    });
+
     test("repay-all accepts an explicit initial estimate when oracle sizing is unavailable", async () => {
         const harness = createBorrowableHarness();
         (harness.token as any).market.oracle_manager.getPrice = async () => {
