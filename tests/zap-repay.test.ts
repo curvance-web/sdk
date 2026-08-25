@@ -21,6 +21,7 @@ const RECEIVER = "0x00000000000000000000000000000000000000a2" as address;
 const CTOKEN = "0x00000000000000000000000000000000000000c1" as address;
 const DEBT_TOKEN = "0x00000000000000000000000000000000000000d1" as address;
 const INPUT_TOKEN = "0x00000000000000000000000000000000000000d2" as address;
+const HYAUSD = "0xaD663aC84052b52BE4ed1b27BA416505e84a00Bf" as address;
 const WRAPPED_NATIVE = "0x00000000000000000000000000000000000000d3" as address;
 const ZAPPER = "0x00000000000000000000000000000000000000e1" as address;
 const ROUTER = "0x00000000000000000000000000000000000000e2" as address;
@@ -50,7 +51,8 @@ function createSetup(dexAgg: any, feeBps: bigint = 4n) {
             native_name: "Monad",
             native_vaults: [],
             vaults: [],
-            excluded_zap_symbols: [],
+            excluded_zap_symbols: ["hyAUSD"],
+            excluded_zap_addresses: [HYAUSD],
         },
         feePolicy: {
             feeReceiver: RECEIVER,
@@ -164,6 +166,32 @@ describe("Zapper swapAndRepay calldata", () => {
         assert.equal(decoded.swapAction.inputAmount, 1_000n);
         assert.equal(decoded.repayAssets, 999n);
         assert.equal(decoded.receiver.toLowerCase(), RECEIVER.toLowerCase());
+    });
+
+    test("hyAUSD input is rejected before requesting a swapAndRepay quote", async () => {
+        const { zapper, ctoken, calls } = createZapperHarness();
+
+        await assert.rejects(
+            () => zapper.quoteSwapAndRepay(ctoken, HYAUSD, 1_000n, 50n),
+            /swapAndRepay does not support excluded zap input token/i,
+        );
+        assert.equal(calls.length, 0);
+    });
+
+    test("hyAUSD input is rejected from prebuilt swapAndRepay calldata", async () => {
+        const { zapper, ctoken } = createZapperHarness();
+        const quote = await zapper.quoteSwapAndRepay(ctoken, INPUT_TOKEN, 1_000n, 50n);
+        const excludedQuote = {
+            ...quote,
+            inputToken: HYAUSD,
+            swapInputToken: HYAUSD,
+            action: { ...quote.action, inputToken: HYAUSD },
+        };
+
+        assert.throws(
+            () => zapper.getSwapAndRepayCalldataFromQuote(ctoken, excludedQuote, 1_000n, RECEIVER),
+            /swapAndRepay does not support excluded zap input token/i,
+        );
     });
 
     test("native-to-wrapped debt repayment wraps without asking the DEX", async () => {

@@ -17,6 +17,7 @@ import type { address, bytes } from "../src/types";
 const OPTIMIZER = "0x00000000000000000000000000000000000000a1" as address;
 const ASSET = "0x00000000000000000000000000000000000000a2" as address;
 const INPUT = "0x00000000000000000000000000000000000000c1" as address;
+const HYAUSD = "0xaD663aC84052b52BE4ed1b27BA416505e84a00Bf" as address;
 const ZAPPER = "0x00000000000000000000000000000000000000b1" as address;
 const SIGNER = "0x00000000000000000000000000000000000000a3" as address;
 const RECEIVER = "0x00000000000000000000000000000000000000a4" as address;
@@ -56,7 +57,8 @@ function createSetup(feeBps: bigint = 0n) {
             wrapped_native: WRAPPED_NATIVE,
             native_vaults: [],
             vaults: [],
-            excluded_zap_symbols: [],
+            excluded_zap_symbols: ["hyAUSD"],
+            excluded_zap_addresses: [HYAUSD],
         },
         services: {
             curvanceApi: {
@@ -81,10 +83,12 @@ function createHarness({
     feeBps = 0n,
     directAllowance = 10n ** 18n,
     zapAllowance = 10n ** 18n,
+    dexTokens = [],
 }: {
     feeBps?: bigint;
     directAllowance?: bigint;
     zapAllowance?: bigint;
+    dexTokens?: any[];
 } = {}) {
     const sent: Array<{ to: string; data: string; value?: bigint }> = [];
     const quoteCalls: Array<{
@@ -108,7 +112,7 @@ function createHarness({
     const dexAgg = {
         dao: FEE_RECEIVER,
         router: SWAP_TARGET,
-        getAvailableTokens: async () => [],
+        getAvailableTokens: async () => dexTokens,
         quoteAction: async () => {
             throw new Error("quoteAction should not be used by optimizer zaps");
         },
@@ -260,6 +264,66 @@ test("ERC20 optimizer zap uses setup-bound DEX adapter and fee policy", async ()
         assert.equal(decoded.expectedShares, 989_802n);
     } finally {
         ERC20.prototype.fetchDecimals = originalFetchDecimals;
+        restore();
+    }
+});
+
+test("optimizer vault keeps allowed zap inputs while filtering hyAUSD", async () => {
+    const { optimizer, restore } = createHarness({
+        dexTokens: [{
+            interface: {
+                address: HYAUSD,
+                decimals: 18n,
+                symbol: "hyAUSD",
+                name: "High Yield AUSD",
+            },
+            type: "simple",
+        }, {
+            interface: {
+                address: INPUT,
+                decimals: 6n,
+                symbol: "USDC",
+                name: "USD Coin",
+            },
+            type: "simple",
+        }],
+    });
+
+    try {
+        assert.deepEqual(
+            (await optimizer.getDepositTokens()).map((token) => ({
+                address: token.interface.address.toLowerCase(),
+                type: token.type,
+            })),
+            [
+                { address: ASSET.toLowerCase(), type: "none" },
+                { address: INPUT.toLowerCase(), type: "optimizer" },
+                { address: NATIVE_ADDRESS.toLowerCase(), type: "optimizer" },
+            ],
+        );
+    } finally {
+        restore();
+    }
+});
+
+test("optimizer zap rejects hyAUSD input before decimals or DEX quoting", async () => {
+    const { optimizer, zapper, quoteCalls, restore } = createHarness();
+
+    try {
+        await assert.rejects(
+            () => optimizer.getZapDepositCalldata(
+                new Decimal("1"),
+                { type: "optimizer", inputToken: HYAUSD, slippage: new Decimal("0.005") },
+                RECEIVER,
+            ),
+            /LendingOptimizer zap does not support excluded zap input token/i,
+        );
+        await assert.rejects(
+            () => zapper.getDepositCalldata(optimizer, HYAUSD, 1_000_000n, 50n, RECEIVER),
+            /OptimizerZapper does not support excluded zap input token/i,
+        );
+        assert.deepEqual(quoteCalls, []);
+    } finally {
         restore();
     }
 });

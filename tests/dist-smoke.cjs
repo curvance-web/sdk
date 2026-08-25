@@ -1183,6 +1183,7 @@ async function main() {
         assert.equal(Object.isFrozen(setupResult.setupConfigSnapshot.contracts), true);
         assert.equal(Object.isFrozen(setupResult.setupConfigSnapshot.assets), true);
         assert.equal(Object.isFrozen(setupResult.setupConfigSnapshot.assets.excluded_zap_symbols), true);
+        assert.equal(Object.isFrozen(setupResult.setupConfigSnapshot.assets.excluded_zap_addresses), true);
         assert.notEqual(
             setupResult.setupConfigSnapshot.assets.native_vaults,
             packedSdk.chain_config["arb-sepolia"].native_vaults,
@@ -1193,6 +1194,11 @@ async function main() {
             packedSdk.chain_config["arb-sepolia"].excluded_zap_symbols,
             "setup snapshot should clone zap exclusion arrays instead of sharing exported chain config",
         );
+        assert.notEqual(
+            setupResult.setupConfigSnapshot.assets.excluded_zap_addresses,
+            packedSdk.chain_config["arb-sepolia"].excluded_zap_addresses,
+            "setup snapshot should clone zap address exclusion arrays instead of sharing exported chain config",
+        );
         assert.deepEqual(setupResult.setupConfigSnapshot.assets, {
             native_symbol: packedSdk.chain_config["arb-sepolia"].native_symbol,
             native_name: packedSdk.chain_config["arb-sepolia"].native_name,
@@ -1200,6 +1206,7 @@ async function main() {
             native_vaults: [...packedSdk.chain_config["arb-sepolia"].native_vaults],
             vaults: [...packedSdk.chain_config["arb-sepolia"].vaults],
             excluded_zap_symbols: [...packedSdk.chain_config["arb-sepolia"].excluded_zap_symbols],
+            excluded_zap_addresses: [...packedSdk.chain_config["arb-sepolia"].excluded_zap_addresses],
         });
         assert.equal(Object.isFrozen(setupResult.setupConfigSnapshot.services), true);
         assert.notEqual(
@@ -1234,6 +1241,7 @@ async function main() {
         assert.equal(monadSetupResult.setupConfigSnapshot.environment, "production-mainnet");
         assert.equal(Object.isFrozen(monadSetupResult.setupConfigSnapshot.assets), true);
         assert.equal(Object.isFrozen(monadSetupResult.setupConfigSnapshot.assets.excluded_zap_symbols), true);
+        assert.equal(Object.isFrozen(monadSetupResult.setupConfigSnapshot.assets.excluded_zap_addresses), true);
         assert.notEqual(
             monadSetupResult.setupConfigSnapshot.assets.native_vaults,
             packedSdk.chain_config["monad-mainnet"].native_vaults,
@@ -1244,6 +1252,11 @@ async function main() {
             packedSdk.chain_config["monad-mainnet"].excluded_zap_symbols,
             "Monad setup snapshot should clone zap exclusion arrays instead of sharing exported chain config",
         );
+        assert.notEqual(
+            monadSetupResult.setupConfigSnapshot.assets.excluded_zap_addresses,
+            packedSdk.chain_config["monad-mainnet"].excluded_zap_addresses,
+            "Monad setup snapshot should clone zap address exclusion arrays instead of sharing exported chain config",
+        );
         assert.deepEqual(monadSetupResult.setupConfigSnapshot.assets, {
             native_symbol: packedSdk.chain_config["monad-mainnet"].native_symbol,
             native_name: packedSdk.chain_config["monad-mainnet"].native_name,
@@ -1251,6 +1264,7 @@ async function main() {
             native_vaults: [...packedSdk.chain_config["monad-mainnet"].native_vaults],
             vaults: [...packedSdk.chain_config["monad-mainnet"].vaults],
             excluded_zap_symbols: [...packedSdk.chain_config["monad-mainnet"].excluded_zap_symbols],
+            excluded_zap_addresses: [...packedSdk.chain_config["monad-mainnet"].excluded_zap_addresses],
         });
         assert.deepEqual(monadSetupResult.setupConfigSnapshot.services.curvanceApi, {
             rewardsSlug: "monad-mainnet",

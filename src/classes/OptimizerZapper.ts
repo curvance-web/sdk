@@ -7,6 +7,7 @@ import type { SetupConfigSnapshot } from "../setup";
 import type IDexAgg from "./DexAggregators/IDexAgg";
 import type { LendingOptimizer } from "./LendingOptimizer";
 import type { Swap } from "./Zapper";
+import { assertZapSwapAllowed } from "../zapPolicy";
 
 const OPTIMIZER_ZAP_SHARES_BUFFER_BPS = 2n;
 
@@ -72,6 +73,12 @@ export class OptimizerZapper extends Calldata<IOptimizerZapper> {
         }
 
         const swapInputToken = isNative ? wrappedNative : inputToken;
+        assertZapSwapAllowed(
+            this.setup.assets,
+            swapInputToken,
+            outputToken,
+            "OptimizerZapper",
+        );
 
         if (swapInputToken.toLowerCase() === outputToken.toLowerCase()) {
             const swap: Swap = {

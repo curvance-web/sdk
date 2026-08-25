@@ -9,6 +9,7 @@ import { type SetupConfigSnapshot } from "../setup";
 import type IDexAgg from "./DexAggregators/IDexAgg";
 import type { DexQuoteOptions, PreparedQuote, Quote } from "./DexAggregators/IDexAgg";
 import { validateSlippageBps } from "../validation";
+import { assertZapSwapAllowed } from "../zapPolicy";
 
 export interface Swap {
     inputToken: address,
@@ -155,6 +156,12 @@ export class Zapper extends Calldata<IZapper> {
         const wrappedNative = this.setup.assets.wrapped_native;
         const swapInputToken = isNative ? wrappedNative : inputToken;
         const depositAsWrappedNative = isNative;
+        assertZapSwapAllowed(
+            this.setup.assets,
+            swapInputToken,
+            outputToken,
+            "swapAndRepay",
+        );
 
         if (swapInputToken.toLowerCase() === outputToken.toLowerCase()) {
             const action: Swap = {
@@ -320,6 +327,18 @@ export class Zapper extends Calldata<IZapper> {
             throw new Error(`swapAndRepay repayment floor must be positive, got ${repayAssets}`);
         }
         const debtAsset = ctoken.getAsset(false);
+        const policyInputToken = quotedSwap.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()
+            ? this.setup.assets.wrapped_native
+            : quotedSwap.inputToken;
+        if (quotedSwap.swapInputToken.toLowerCase() !== policyInputToken.toLowerCase()) {
+            throw new Error("swapAndRepay quote swap input does not match its declared input token");
+        }
+        assertZapSwapAllowed(
+            this.setup.assets,
+            policyInputToken,
+            quotedSwap.outputToken,
+            "swapAndRepay",
+        );
         if (quotedSwap.outputToken.toLowerCase() !== debtAsset.toLowerCase()) {
             throw new Error(
                 `swapAndRepay quote output ${quotedSwap.outputToken} does not match debt asset ${debtAsset}`,
@@ -395,6 +414,12 @@ export class Zapper extends Calldata<IZapper> {
         // For native MON into non-WMON tokens: wrap first, then swap WMON → target
         // The contract handles wrapping when depositAsWrappedNative=true
         const swapInputToken = isNative ? wrappedNative : inputToken;
+        assertZapSwapAllowed(
+            this.setup.assets,
+            swapInputToken,
+            outputToken,
+            "SimpleZapper",
+        );
 
         // No-op short-circuit: same-token zap (e.g., USDC → USDC market). The
         // SimpleZapper.swapAndDeposit contract handles this on-chain via

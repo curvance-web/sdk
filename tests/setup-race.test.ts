@@ -260,6 +260,7 @@ test("setupChain returns chain provenance and immutable setup snapshot", async (
     assert.equal(Object.isFrozen(monad.setupConfigSnapshot.assets), true);
     assert.equal(Object.isFrozen(monad.setupConfigSnapshot.assets.native_vaults), true);
     assert.equal(Object.isFrozen(monad.setupConfigSnapshot.assets.excluded_zap_symbols), true);
+    assert.equal(Object.isFrozen(monad.setupConfigSnapshot.assets.excluded_zap_addresses), true);
     assert.equal(Object.isFrozen(monad.setupConfigSnapshot.services), true);
     assert.equal(Object.isFrozen(monad.setupConfigSnapshot.services.curvanceApi.rewardChainAliases), true);
     assert.equal(Object.isFrozen(monad.setupConfigSnapshot.services.dexAggregators), true);
@@ -267,6 +268,7 @@ test("setupChain returns chain provenance and immutable setup snapshot", async (
     assert.notEqual(monad.setupConfigSnapshot.assets, chain_config["monad-mainnet"]);
     assert.notEqual(monad.setupConfigSnapshot.assets.native_vaults, chain_config["monad-mainnet"].native_vaults);
     assert.notEqual(monad.setupConfigSnapshot.assets.excluded_zap_symbols, chain_config["monad-mainnet"].excluded_zap_symbols);
+    assert.notEqual(monad.setupConfigSnapshot.assets.excluded_zap_addresses, chain_config["monad-mainnet"].excluded_zap_addresses);
     assert.notEqual(monad.setupConfigSnapshot.services, chain_config["monad-mainnet"].services);
     assert.notEqual(
         monad.setupConfigSnapshot.services.curvanceApi.rewardChainAliases,
@@ -282,6 +284,7 @@ test("setupChain returns chain provenance and immutable setup snapshot", async (
     const originalNativeVaults = chain_config["monad-mainnet"].native_vaults.map((vault) => ({ ...vault }));
     const originalVaults = chain_config["monad-mainnet"].vaults.map((vault) => ({ ...vault }));
     const originalExcludedZapSymbols = [...chain_config["monad-mainnet"].excluded_zap_symbols];
+    const originalExcludedZapAddresses = [...(chain_config["monad-mainnet"].excluded_zap_addresses ?? [])];
     const originalRewardsSlug = monad.setupConfigSnapshot.services.curvanceApi.rewardsSlug;
     const originalNativeYieldSlug = monad.setupConfigSnapshot.services.curvanceApi.nativeYieldSlug;
     const originalRewardAliases = [...chain_config["monad-mainnet"].services.curvanceApi.rewardChainAliases];
@@ -303,6 +306,11 @@ test("setupChain returns chain provenance and immutable setup snapshot", async (
             0,
             chain_config["monad-mainnet"].excluded_zap_symbols.length,
             ...originalExcludedZapSymbols,
+        );
+        chain_config["monad-mainnet"].excluded_zap_addresses?.splice(
+            0,
+            chain_config["monad-mainnet"].excluded_zap_addresses.length,
+            ...originalExcludedZapAddresses,
         );
         chain_config["monad-mainnet"].services.curvanceApi.rewardChainAliases.splice(
             0,
@@ -326,6 +334,9 @@ test("setupChain returns chain provenance and immutable setup snapshot", async (
         (monad.setupConfigSnapshot.assets.excluded_zap_symbols as any).push("wrong");
     });
     ignoreMutationError(() => {
+        (monad.setupConfigSnapshot.assets.excluded_zap_addresses as any).push("0x0000000000000000000000000000000000000008");
+    });
+    ignoreMutationError(() => {
         (monad.setupConfigSnapshot.services.curvanceApi as any).rewardsSlug = "wrong";
     });
     ignoreMutationError(() => {
@@ -340,6 +351,7 @@ test("setupChain returns chain provenance and immutable setup snapshot", async (
         contract: "0x0000000000000000000000000000000000000005" as any,
     });
     chain_config["monad-mainnet"].excluded_zap_symbols.push("wrong-symbol");
+    chain_config["monad-mainnet"].excluded_zap_addresses?.push("0x0000000000000000000000000000000000000009" as any);
     chain_config["monad-mainnet"].services.curvanceApi.rewardChainAliases.push("wrong-alias");
     if (chain_config["monad-mainnet"].services.dexAggregators.kyberSwap != null) {
         chain_config["monad-mainnet"].services.dexAggregators.kyberSwap.router =
@@ -350,6 +362,7 @@ test("setupChain returns chain provenance and immutable setup snapshot", async (
     assert.equal(monad.setupConfigSnapshot.assets.wrapped_native, originalWrappedNative);
     assert.deepEqual(monad.setupConfigSnapshot.assets.native_vaults, originalNativeVaults);
     assert.deepEqual(monad.setupConfigSnapshot.assets.excluded_zap_symbols, originalExcludedZapSymbols);
+    assert.deepEqual(monad.setupConfigSnapshot.assets.excluded_zap_addresses, originalExcludedZapAddresses);
     assert.equal(monad.setupConfigSnapshot.services.curvanceApi.rewardsSlug, originalRewardsSlug);
     assert.equal(monad.setupConfigSnapshot.services.curvanceApi.nativeYieldSlug, originalNativeYieldSlug);
     assert.deepEqual(monad.setupConfigSnapshot.services.curvanceApi.rewardChainAliases, originalRewardAliases);
@@ -1473,6 +1486,7 @@ test("direct Market.getAll markets do not fall back to the mutable chain DEX sin
             native_vaults: [...chain_config["monad-mainnet"].native_vaults],
             vaults: [...chain_config["monad-mainnet"].vaults],
             excluded_zap_symbols: [...chain_config["monad-mainnet"].excluded_zap_symbols],
+            excluded_zap_addresses: [...(chain_config["monad-mainnet"].excluded_zap_addresses ?? [])],
         },
         services: {
             curvanceApi: {

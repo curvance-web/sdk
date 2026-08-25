@@ -8,6 +8,7 @@ import Decimal from "decimal.js";
 const CTOKEN = "0x00000000000000000000000000000000000000c1" as address;
 const ZAPPER = "0x00000000000000000000000000000000000000b1" as address;
 const TOKEN = "0x00000000000000000000000000000000000000d1" as address;
+const HYAUSD = "0xaD663aC84052b52BE4ed1b27BA416505e84a00Bf" as address;
 const RECEIVER = "0x00000000000000000000000000000000000000f2" as address;
 
 function createSetupAssets(wrappedNative: address = chain_config["monad-mainnet"].wrapped_native) {
@@ -17,7 +18,8 @@ function createSetupAssets(wrappedNative: address = chain_config["monad-mainnet"
         wrapped_native: wrappedNative,
         native_vaults: [],
         vaults: [],
-        excluded_zap_symbols: [],
+        excluded_zap_symbols: ["hyAUSD"],
+        excluded_zap_addresses: [HYAUSD],
     };
 }
 
@@ -165,6 +167,27 @@ test("real simple zap encodes WAD swapSafe slippage with fee expansion", async (
     assert.equal(args[2].target, "0x00000000000000000000000000000000000000e1");
     assert.equal(args[2].call, "0x1234");
     assert.equal(args[3], 9_898n);
+});
+
+test("SimpleZapper rejects hyAUSD as either side of a swap before DEX quoting", async () => {
+    const quoteCalls: unknown[][] = [];
+    const { token } = createBufferedToken();
+    const { zapper } = createZapper(0n, {
+        quote: async (...args: unknown[]) => {
+            quoteCalls.push(args);
+            throw new Error("DEX quote should not be reached");
+        },
+    });
+
+    await assert.rejects(
+        () => zapper.getSimpleZapCalldata(token, HYAUSD, TOKEN, 10_000n, false, 50n, RECEIVER),
+        /SimpleZapper does not support excluded zap input token/i,
+    );
+    await assert.rejects(
+        () => zapper.getSimpleZapCalldata(token, TOKEN, HYAUSD, 10_000n, false, 50n, RECEIVER),
+        /SimpleZapper does not support excluded zap output token/i,
+    );
+    assert.deepEqual(quoteCalls, []);
 });
 
 test("CToken.getZapper binds simple zap quotes to the market DEX aggregator", async () => {

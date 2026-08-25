@@ -38,6 +38,7 @@ const AMBIENT_ORACLE_MANAGER = '0x0000000000000000000000000000000000000bad';
 const DEX_ROUTER = '0x0000000000000000000000000000000000000def';
 const ZAP_ASSET = '0x00000000000000000000000000000000000000f1';
 const EXCLUDED_ASSET = '0x00000000000000000000000000000000000000f2';
+const HYAUSD = '0xaD663aC84052b52BE4ed1b27BA416505e84a00Bf';
 
 interface MockCache {
     totalSupply: bigint;
@@ -153,6 +154,7 @@ function createRouteCapabilityToken({
     assetSymbol,
     assetName = assetSymbol,
     excludedZapSymbols = [],
+    excludedZapAddresses = [],
     dexTokens,
 }: {
     chain: string;
@@ -160,6 +162,7 @@ function createRouteCapabilityToken({
     assetSymbol: string;
     assetName?: string;
     excludedZapSymbols?: readonly string[];
+    excludedZapAddresses?: readonly string[];
     dexTokens?: any[];
 }) {
     const token = createCToken({
@@ -213,6 +216,7 @@ function createRouteCapabilityToken({
                 native_vaults: [],
                 vaults: [],
                 excluded_zap_symbols: excludedZapSymbols,
+                excluded_zap_addresses: excludedZapAddresses,
             },
         },
     };
@@ -390,6 +394,51 @@ test('getDepositTokens filters excluded DEX input symbols through setup assets',
             { symbol: 'WMON', type: 'simple', quoteable: true },
             { symbol: 'MON', type: 'simple', quoteable: false },
         ],
+    );
+});
+
+test('hyAUSD address policy disables market zap routes and filters it as a DEX input', async () => {
+    const hyAusdMarketToken = createRouteCapabilityToken({
+        chain: 'monad-mainnet',
+        assetAddress: HYAUSD,
+        assetSymbol: 'hyAUSD',
+        excludedZapSymbols: ['hyAUSD'],
+        excludedZapAddresses: [HYAUSD],
+    });
+    assert.deepEqual(hyAusdMarketToken.zapTypes, []);
+    assert.deepEqual(hyAusdMarketToken.leverageTypes, []);
+    assert.deepEqual(
+        (await hyAusdMarketToken.getDepositTokens()).map((option) => option.type),
+        ['none'],
+    );
+
+    const ausdMarketToken = createRouteCapabilityToken({
+        chain: 'monad-mainnet',
+        assetAddress: ADDR,
+        assetSymbol: 'AUSD',
+        excludedZapSymbols: ['hyAUSD'],
+        excludedZapAddresses: [HYAUSD],
+        dexTokens: [{
+            interface: {
+                address: HYAUSD,
+                decimals: 18n,
+                symbol: 'UNTRUSTED_LABEL',
+                name: 'High Yield AUSD',
+            },
+            type: 'simple',
+        }, {
+            interface: {
+                address: ZAP_ASSET,
+                decimals: 6n,
+                symbol: 'USDC',
+                name: 'USD Coin',
+            },
+            type: 'simple',
+        }],
+    });
+    assert.deepEqual(
+        (await ausdMarketToken.getDepositTokens()).map((option) => option.interface.address.toLowerCase()),
+        [ADDR, ZAP_ASSET, NATIVE_ADDRESS].map((address) => address.toLowerCase()),
     );
 });
 
