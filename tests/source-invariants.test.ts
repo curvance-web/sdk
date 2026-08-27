@@ -225,6 +225,21 @@ test("chain config, RPC config, and contract manifests stay aligned", () => {
             `${chain} excluded_zap_symbols must not contain case-insensitive duplicates`,
         );
         assert.ok(
+            Array.isArray(config.excluded_zap_addresses),
+            `${chain} excluded_zap_addresses must be explicit`,
+        );
+        const excludedZapAddresses = config.excluded_zap_addresses ?? [];
+        assert.ok(
+            excludedZapAddresses.every((token) => /^0x[0-9a-f]{40}$/i.test(token)),
+            `${chain} excluded_zap_addresses must contain valid addresses`,
+        );
+        const normalizedExcludedZapAddresses = excludedZapAddresses.map((token) => token.toLowerCase());
+        assert.equal(
+            new Set(normalizedExcludedZapAddresses).size,
+            normalizedExcludedZapAddresses.length,
+            `${chain} excluded_zap_addresses must not contain case-insensitive duplicates`,
+        );
+        assert.ok(
             config.services.dexAggregators,
             `${chain} must explicitly declare DEX aggregator service config`,
         );
@@ -400,6 +415,11 @@ test("Monad mainnet manifest uses the current oracle and optimizer rollout", () 
     assert.deepEqual(monad.Optimizers, {
         "High Yield AUSD": "0xaD663aC84052b52BE4ed1b27BA416505e84a00Bf",
     });
+    assert.ok(chain_config["monad-mainnet"].excluded_zap_symbols.includes("hyAUSD"));
+    assert.deepEqual(
+        chain_config["monad-mainnet"].excluded_zap_addresses,
+        [monad.Optimizers["High Yield AUSD"]],
+    );
     assert.equal(monad["CombinedAggregator-ezETH"], "0xC54481C5425f091DfBE7A8e2B264D7dCf4783cD4");
     assert.equal(monad["CombinedAggregator-earnAUSD"], "0x4a048D2dFd6cd75A7e239393a14CE913d756f992");
     assert.equal(monad["CombinedAggregator-savUSD"], "0x7CB9a321c30c753c3F7C6af7Ae8776E5C1524999");
@@ -554,6 +574,7 @@ test("deposit approval source keeps zap delegation branch-specific", () => {
 test("CToken DEX execution paths stay behind the market-bound adapter getter", () => {
     const source = readRepoFile("src/classes/CToken.ts");
     const zapperSource = readRepoFile("src/classes/Zapper.ts");
+    const zapPolicySource = readRepoFile("src/zapPolicy.ts");
     const nativeTokenSource = readRepoFile("src/classes/NativeToken.ts");
     const directStaticDexReads = [...source.matchAll(/currentChainConfig\.dexAgg/g)].map((match) => match.index);
 
@@ -565,8 +586,9 @@ test("CToken DEX execution paths stay behind the market-bound adapter getter", (
     assert.match(source, /private get boundDexAgg\(\): IDexAgg \| null \{ return this\.market\.dexAgg \?\? null; \}/);
     assert.match(source, /DEX aggregator is not bound for token/);
     assert.match(source, /private get currentChainAssets\(\) \{ return this\.setup\.assets; \}/);
-    assert.match(source, /private isZapSymbolExcluded/);
-    assert.match(source, /excluded_zap_symbols/);
+    assert.match(source, /isZapTokenExcluded\(this\.currentChainAssets, this\.asset\)/);
+    assert.match(zapPolicySource, /excluded_zap_symbols/);
+    assert.match(zapPolicySource, /excluded_zap_addresses/);
     assert.doesNotMatch(source, /EXCLUDED_ZAP_SYMBOLS/);
     assert.match(source, /const chainSettings = this\.currentChainAssets;/);
     assert.match(source, /\? this\.currentChainAssets\.wrapped_native/);

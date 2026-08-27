@@ -11,6 +11,7 @@ import type { AllocationBound, ReallocationAction } from "./OptimizerReader";
 import type IDexAgg from "./DexAggregators/IDexAgg";
 import { OptimizerZapper } from "./OptimizerZapper";
 import { NativeToken } from "./NativeToken";
+import { assertZapSwapAllowed, isZapTokenExcluded } from "../zapPolicy";
 
 function getSetupConfig(): SetupConfigSnapshot | undefined {
     return (require("../setup") as typeof import("../setup")).setup_config;
@@ -312,7 +313,10 @@ export class LendingOptimizer extends Calldata<ILendingOptimizer> {
             const account = (this.signer?.address as address | undefined) ?? setup.account;
             const dexTokens = await dexAgg.getAvailableTokens(this.provider, search, account);
             const optimizerTokens = dexTokens
-                .filter((token) => !tokensExclude.includes(token.interface.address.toLowerCase()))
+                .filter((token) => (
+                    !tokensExclude.includes(token.interface.address.toLowerCase())
+                    && !isZapTokenExcluded(setup.assets, token.interface)
+                ))
                 .map((token) => {
                     const optimizerToken: OptimizerDepositToken = {
                         interface: token.interface,
@@ -509,6 +513,14 @@ export class LendingOptimizer extends Calldata<ILendingOptimizer> {
         if (instructions === 'none') {
             return this.asset.decimals ?? await this.asset.fetchDecimals();
         }
+        if (this.setup != null) {
+            assertZapSwapAllowed(
+                this.setup.assets,
+                instructions.inputToken,
+                this.asset.address,
+                "LendingOptimizer zap",
+            );
+        }
         if (instructions.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
             return 18n;
         }
@@ -537,6 +549,14 @@ export class LendingOptimizer extends Calldata<ILendingOptimizer> {
     } | null> {
         if (instructions === 'none') {
             throw new Error("Optimizer zap instructions must be provided");
+        }
+        if (this.setup != null) {
+            assertZapSwapAllowed(
+                this.setup.assets,
+                instructions.inputToken,
+                this.asset.address,
+                "LendingOptimizer zap",
+            );
         }
         if (instructions.inputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase()) {
             return null;

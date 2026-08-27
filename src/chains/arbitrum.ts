@@ -27,4 +27,5 @@ export const testnet: ChainConfig = {
     native_vaults: [],
     vaults: [],
     excluded_zap_symbols: [],
+    excluded_zap_addresses: [],
 }

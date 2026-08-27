@@ -24,6 +24,8 @@ export type ChainAssetConfig = {
     native_vaults: { name: string; contract: address }[];
     vaults: { name: string; contract: address; underlying: address }[];
     excluded_zap_symbols: string[];
+    /** Token addresses that must never participate in an SDK-built zap swap. */
+    excluded_zap_addresses?: address[];
 };
 
 export type ChainEnvironment = "production-mainnet" | "testnet" | "local";
