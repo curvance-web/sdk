@@ -29,6 +29,7 @@ const WAD = 10n ** 18n;
 
 type AbiComponent = {
     name?: string;
+    type?: string;
     components?: AbiComponent[];
 };
 
@@ -72,11 +73,17 @@ function optimizerReaderFixtureSkip(): string | undefined {
         return 'OptimizerReader fixture is stale: OptimizerCTokenData is missing allocation cap fields.';
     }
 
+    const incentiveInput = optimalRebalance?.inputs?.[3];
+    const incentiveFields = incentiveInput?.components?.map((field) => field.name) ?? [];
     if (
-        (optimalRebalance?.inputs?.length ?? 0) !== 3 ||
-        optimalRebalance?.inputs?.[2]?.name !== 'rebalanceChunks'
+        (optimalRebalance?.inputs?.length ?? 0) !== 4 ||
+        optimalRebalance?.inputs?.[2]?.name !== 'rebalanceChunks' ||
+        incentiveInput?.name !== 'marketIncentives' ||
+        incentiveInput.type !== 'tuple[]' ||
+        !incentiveFields.includes('cToken') ||
+        !incentiveFields.includes('incentiveAPYBps')
     ) {
-        return 'OptimizerReader fixture is stale: optimalRebalance must accept rebalanceChunks.';
+        return 'OptimizerReader fixture is stale: optimalRebalance must accept tagged market incentives.';
     }
 
     if (abi.some((fragment) => fragment.name === 'REBALANCE_CHUNKS')) {
@@ -85,6 +92,21 @@ function optimizerReaderFixtureSkip(): string | undefined {
 
     if (!abi.some((fragment) => fragment.type === 'error' && fragment.name === 'OptimizerReader__InvalidRebalanceChunks')) {
         return 'OptimizerReader fixture is stale: missing OptimizerReader__InvalidRebalanceChunks error.';
+    }
+
+    if (!abi.some((fragment) => fragment.name === 'MAX_INCENTIVE_APY_BPS')) {
+        return 'OptimizerReader fixture is stale: missing MAX_INCENTIVE_APY_BPS.';
+    }
+
+    for (const errorName of [
+        'OptimizerReader__InvalidIncentiveMarket',
+        'OptimizerReader__InvalidIncentiveAPYBps',
+        'OptimizerReader__DuplicateIncentiveMarket',
+    ]) {
+        const error = abi.find((fragment) => fragment.type === 'error' && fragment.name === errorName);
+        if (error == undefined || (error.inputs?.length ?? 0) !== 0) {
+            return `OptimizerReader fixture is stale: missing parameterless ${errorName} error.`;
+        }
     }
 
     if (!OptimizerReaderArtifact.bytecode) {
@@ -254,10 +276,18 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
         const directTotalSupply: bigint = await optimizer.totalSupply();
         const expectedSharePrice = directTotalSupply === 0n
             ? 0n
-            : directTotalAssets * 10n ** 18n / directTotalSupply;
+            : entry.totalAssets * 10n ** 18n / directTotalSupply;
         assert.strictEqual(entry.address, optimizerAddress, 'Address should match deployed optimizer');
         assert.strictEqual(entry.asset, USDC, 'Asset should be USDC');
-        assert.strictEqual(entry.totalAssets, directTotalAssets, 'reader totalAssets should match optimizer');
+        // The reader simulates accrueIfNeeded before collecting its snapshot,
+        // while the direct optimizer read does not. One raw asset unit of
+        // interest-rounding drift is therefore valid at this boundary.
+        assertApproxBigInt(
+            entry.totalAssets,
+            directTotalAssets,
+            1n,
+            'reader totalAssets should match optimizer after simulated accrual',
+        );
         assertApproxBigInt(
             entry.totalAssets,
             seededDepositAmount,
@@ -428,11 +458,17 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
         assert.strictEqual(sharesAfterRedeem, sharesBefore, 'redeeming exact minted shares should restore share balance');
     });
 
-    test('optimalRebalance returns actions for all markets', async () => {
+    test('optimalRebalance returns an empty or fully aligned native-rate plan', async () => {
         const { actions, bounds } = await reader.optimalRebalance(optimizerAddress);
 
-        assert.strictEqual(actions.length, 3, 'Should return 3 rebalance actions');
-        assert.strictEqual(bounds.length, 3, 'Should return 3 allocation bounds');
+        // An empty plan is a documented successful result when no actionable
+        // move survives allocation, dust, cap, or USD-threshold guards.
+        assert.strictEqual(actions.length, bounds.length, 'actions and bounds must have matching lengths');
+        assert(
+            actions.length === 0 || actions.length === APPROVED_CTOKENS.length,
+            `expected an empty or ${APPROVED_CTOKENS.length}-market plan, received ${actions.length}`,
+        );
+        if (actions.length === 0) return;
 
         const actionAddresses = actions.map(a => a.cToken);
         const boundAddresses = bounds.map(b => b.cToken);
@@ -459,6 +495,31 @@ describe('Lending Optimizer', { skip: FORK_SKIP }, () => {
                 bound.maxBps <= Number(BPS),
                 `Allocation bound for ${bound.cToken} exceeds 100%: ${bound.maxBps}`,
             );
+        }
+    });
+
+    test('optimalRebalanceWithIncentives executes the tagged Merkl tuple-array path', async () => {
+        // Keep this fork test deterministic: unit coverage verifies the real
+        // fetch and aggregation policy, while this controlled row proves that
+        // the generated nonempty tuple array encodes against deployed bytecode.
+        (reader as any).fetchMerklOpportunities = async () => ([{
+            name: 'Controlled WMON incentive',
+            apr: 5,
+            action: 'LEND',
+            identifier: 'controlled-wmon',
+            type: 'TOKEN',
+            tokens: [{ address: APPROVED_CTOKENS[0], symbol: 'WMON|USDC' }],
+        }]);
+
+        try {
+            const { actions, bounds } = await reader.optimalRebalanceWithIncentives(optimizerAddress);
+            assert.strictEqual(actions.length, bounds.length, 'actions and bounds must have matching lengths');
+            assert(
+                actions.length === 0 || actions.length === APPROVED_CTOKENS.length,
+                `expected an empty or ${APPROVED_CTOKENS.length}-market incentive plan, received ${actions.length}`,
+            );
+        } finally {
+            delete (reader as any).fetchMerklOpportunities;
         }
     });
 

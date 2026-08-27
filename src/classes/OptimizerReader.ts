@@ -2,7 +2,11 @@ import { Contract } from "ethers";
 import Decimal from "decimal.js";
 import abi from '../abis/OptimizerReader.json'
 import { address, curvance_read_provider } from "../types";
-import { WAD_DECIMAL } from "../helpers";
+import { aggregateMerklAprByToken, toBps, WAD_DECIMAL } from "../helpers";
+import {
+    fetchMerklOpportunities as fetchMerklOpportunitiesFromApi,
+    type MerklOpportunity,
+} from "../integrations/merkl";
 import type { Market, MarketToken } from "./Market";
 
 function resolveDefaultReadProvider(): curvance_read_provider | undefined {
@@ -76,12 +80,22 @@ export interface AllocationBound {
     maxBps: bigint;
 }
 
+/**
+ * Annual incentive APY for one optimizer market in contract-scale BPS.
+ * The cToken tag keeps the value independent of approved-market ordering.
+ */
+interface MarketIncentiveAPYBps {
+    cToken: address;
+    incentiveAPYBps: bigint;
+}
+
 type ReaderMethod<TArgs extends unknown[], TResult> = {
     (...args: TArgs): Promise<TResult>;
     staticCall?: (...args: TArgs) => Promise<TResult>;
 };
 
 export const DEFAULT_REBALANCE_CHUNKS = 200n;
+const MAX_INCENTIVE_APY_BPS = 1_000n;
 
 export interface IOptimizerReader {
     getOptimizerAPY: ReaderMethod<[address], bigint>;
@@ -89,7 +103,7 @@ export interface IOptimizerReader {
     getOptimizerUserData: ReaderMethod<[address[], address], any[]>;
     isBad: ReaderMethod<[address], address[]>;
     multiIsBadCheck: ReaderMethod<[address[]], address[][]>;
-    optimalRebalance: ReaderMethod<[address, bigint, bigint], any>;
+    optimalRebalance: ReaderMethod<[address, bigint, bigint, MarketIncentiveAPYBps[]], any>;
 }
 
 function normalizeReallocationAction(action: any): ReallocationAction {
@@ -174,6 +188,56 @@ function buildTokenIndex(markets: Market[]): Map<string, MarketTokenWithApy> {
     }
 
     return tokens;
+}
+
+/**
+ * Converts Merkl LEND opportunity APRs into the sparse tagged BPS input
+ * expected by OptimizerReader.optimalRebalance.
+ *
+ * Merkl returns `apr` in percentage points (5 means 5%). The SDK's existing
+ * aggregator converts that into a fractional Decimal (0.05), and `toBps`
+ * converts the fraction into contract-scale BPS (500). Multiple opportunities
+ * for the same cToken are summed before conversion.
+ */
+function buildTaggedMerklIncentives(
+    data: OptimizerMarketData,
+    opportunities: MerklOpportunity[],
+): MarketIncentiveAPYBps[] {
+    // Match Market.getAll(): opportunities without an action are treated as
+    // supply incentives, while explicit BORROW rows must not affect routing.
+    const lendOpportunities = opportunities.filter((opportunity) => (
+        opportunity.action == undefined || opportunity.action.toUpperCase() === "LEND"
+    ));
+    const incentiveApyByToken = aggregateMerklAprByToken(lendOpportunities, "deposit");
+    const marketIncentives: MarketIncentiveAPYBps[] = [];
+
+    // Iterate over the authoritative approved markets returned by the reader.
+    // This prevents unrelated Merkl opportunities from becoming invalid tags.
+    for (const market of data.markets) {
+        const incentiveApy = incentiveApyByToken.get(market.address.toLowerCase());
+        const incentiveAPYBps = incentiveApy == undefined ? 0n : toBps(incentiveApy);
+
+        // The contract accepts sparse input and assigns zero to omitted markets,
+        // so zero-valued tags only increase calldata without changing the plan.
+        if (incentiveAPYBps === 0n) continue;
+
+        // Do not clamp untrusted API data. A value above the contract's 10% cap
+        // must fail visibly instead of producing a plan with altered economics.
+        if (incentiveAPYBps > MAX_INCENTIVE_APY_BPS) {
+            throw new Error(
+                `OptimizerReader.optimalRebalanceWithIncentives: Merkl incentive APY for ` +
+                `${market.address} exceeds ${MAX_INCENTIVE_APY_BPS.toString()} BPS ` +
+                `(received ${incentiveAPYBps.toString()} BPS).`,
+            );
+        }
+
+        marketIncentives.push({
+            cToken: market.address,
+            incentiveAPYBps,
+        });
+    }
+
+    return marketIncentives;
 }
 
 export class OptimizerReader {
@@ -284,7 +348,69 @@ export class OptimizerReader {
         slippageBps: bigint = 0n,
         rebalanceChunks: bigint = DEFAULT_REBALANCE_CHUNKS,
     ): Promise<{ actions: ReallocationAction[]; bounds: AllocationBound[] }> {
-        const data = await staticCallOrCall(this.contract.optimalRebalance, optimizer, slippageBps, rebalanceChunks);
+        // The contract now has one incentive-aware signature. Preserve the
+        // existing SDK behavior by explicitly supplying no incentive tags.
+        const data = await staticCallOrCall(
+            this.contract.optimalRebalance,
+            optimizer,
+            slippageBps,
+            rebalanceChunks,
+            [],
+        );
         return normalizeRebalanceResult(data);
+    }
+
+    /**
+     * Builds an incentive-aware rebalance plan from current Merkl LEND data.
+     *
+     * Merkl is queried for the reader provider's chain. Only opportunities for
+     * the optimizer's current approved cTokens are sent to the contract. A
+     * thrown transport and non-OK Merkl failures are intentionally surfaced;
+     * catching those and silently using zero incentives would make this method
+     * indistinguishable from `optimalRebalance`. A valid empty or fully
+     * filtered response still produces an ordinary zero-incentive plan.
+     */
+    async optimalRebalanceWithIncentives(
+        optimizer: address,
+        slippageBps: bigint = 0n,
+        rebalanceChunks: bigint = DEFAULT_REBALANCE_CHUNKS,
+    ): Promise<{ actions: ReallocationAction[]; bounds: AllocationBound[] }> {
+        const [data] = await this.getOptimizerMarketData([optimizer]);
+        if (data == undefined) {
+            throw new Error(
+                `OptimizerReader.optimalRebalanceWithIncentives: no data returned for ${optimizer}.`,
+            );
+        }
+
+        let marketIncentives: MarketIncentiveAPYBps[] = [];
+        if (data.markets.length > 0) {
+            const network = await this.provider.getNetwork();
+            const chainId = network.chainId;
+            if (chainId <= 0n || chainId > BigInt(Number.MAX_SAFE_INTEGER)) {
+                throw new Error(
+                    `OptimizerReader.optimalRebalanceWithIncentives: provider returned invalid ` +
+                    `chainId ${chainId.toString()}.`,
+                );
+            }
+
+            // Fetching without an action reuses the chain-scoped opportunity
+            // cache populated by Market.getAll; the builder filters to LEND.
+            const opportunities = await this.fetchMerklOpportunities(Number(chainId));
+            marketIncentives = buildTaggedMerklIncentives(data, opportunities);
+        }
+
+        const result = await staticCallOrCall(
+            this.contract.optimalRebalance,
+            optimizer,
+            slippageBps,
+            rebalanceChunks,
+            marketIncentives,
+        );
+        return normalizeRebalanceResult(result);
+    }
+
+    /** Isolated for deterministic unit tests without weakening the public API. */
+    private async fetchMerklOpportunities(chainId: number): Promise<MerklOpportunity[]> {
+        return fetchMerklOpportunitiesFromApi({ chainId });
     }
 }

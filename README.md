@@ -772,6 +772,12 @@ await optimizerReader.getOptimizerUserData(optimizerAddresses, account)
 
 await optimizerReader.optimalRebalance(optimizerAddress, 100n, 200n)
 // Args: optimizer address, slippage BPS, rebalance chunks
+// Uses native market rates only by passing an empty incentive array to the reader contract.
+
+await optimizerReader.optimalRebalanceWithIncentives(optimizerAddress, 100n, 200n)
+// Fetches chain-scoped Merkl LEND opportunities, aggregates campaigns by approved cToken,
+// converts Merkl percentage-point APRs into BPS, and supplies the nonzero tagged incentives.
+// Merkl fetch failures and aggregate incentives above the contract's 1,000 BPS cap throw.
 // Returns: { actions: { cToken, assetsOrBps }[], bounds: { cToken, minBps, maxBps }[] }
 
 await optimizerReader.isBad(optimizerAddress)

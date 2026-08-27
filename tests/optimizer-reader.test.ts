@@ -22,6 +22,7 @@ test("OptimizerReader only exposes live contract helpers", () => {
     assert.equal(typeof reader.isBad, "function");
     assert.equal(typeof reader.multiIsBadCheck, "function");
     assert.equal(typeof reader.optimalRebalance, "function");
+    assert.equal(typeof reader.optimalRebalanceWithIncentives, "function");
     assert.equal(reader.optimalRebalanceUpdated, undefined);
     assert.equal(reader.optimalDeposit, undefined);
     assert.equal(reader.optimalWithdrawal, undefined);
@@ -217,7 +218,12 @@ test("getOptimizerMarketData uses reader static call and normalizes contract row
 
 test("optimalRebalance forwards default slippage and chunks, then decodes actions plus bounds", async () => {
     const reader = createReader();
-    let captured: { optimizer: string; slippageBps: bigint; rebalanceChunks: bigint } | null = null;
+    let captured: {
+        optimizer: string;
+        slippageBps: bigint;
+        rebalanceChunks: bigint;
+        marketIncentives: unknown[];
+    } | null = null;
     const response: any = [
         [
             { cToken: CTOKEN_A, assetsOrBps: -5n },
@@ -235,8 +241,13 @@ test("optimalRebalance forwards default slippage and chunks, then decodes action
         optimalRebalance: Object.assign(
             async () => { throw new Error("optimalRebalance must use staticCall"); },
             {
-                staticCall: async (optimizer: string, slippageBps: bigint, rebalanceChunks: bigint) => {
-                    captured = { optimizer, slippageBps, rebalanceChunks };
+                staticCall: async (
+                    optimizer: string,
+                    slippageBps: bigint,
+                    rebalanceChunks: bigint,
+                    marketIncentives: unknown[],
+                ) => {
+                    captured = { optimizer, slippageBps, rebalanceChunks, marketIncentives };
                     return response;
                 },
             },
@@ -249,6 +260,7 @@ test("optimalRebalance forwards default slippage and chunks, then decodes action
         optimizer: OPTIMIZER,
         slippageBps: 0n,
         rebalanceChunks: DEFAULT_REBALANCE_CHUNKS,
+        marketIncentives: [],
     });
     assert.deepEqual(result, {
         actions: [
@@ -264,11 +276,21 @@ test("optimalRebalance forwards default slippage and chunks, then decodes action
 
 test("optimalRebalance preserves explicit slippage and chunks, and tolerates legacy action field names", async () => {
     const reader = createReader();
-    let captured: { optimizer: string; slippageBps: bigint; rebalanceChunks: bigint } | null = null;
+    let captured: {
+        optimizer: string;
+        slippageBps: bigint;
+        rebalanceChunks: bigint;
+        marketIncentives: unknown[];
+    } | null = null;
 
     reader.contract = {
-        optimalRebalance: async (optimizer: string, slippageBps: bigint, rebalanceChunks: bigint) => {
-            captured = { optimizer, slippageBps, rebalanceChunks };
+        optimalRebalance: async (
+            optimizer: string,
+            slippageBps: bigint,
+            rebalanceChunks: bigint,
+            marketIncentives: unknown[],
+        ) => {
+            captured = { optimizer, slippageBps, rebalanceChunks, marketIncentives };
             return [
                 [{ cToken: CTOKEN_A, assets: -9n }],
                 [{ cToken: CTOKEN_A, minBps: 0n, maxBps: 10_000n }],
@@ -282,11 +304,223 @@ test("optimalRebalance preserves explicit slippage and chunks, and tolerates leg
         optimizer: OPTIMIZER,
         slippageBps: 25n,
         rebalanceChunks: 123n,
+        marketIncentives: [],
     });
     assert.deepEqual(result, {
         actions: [{ cToken: CTOKEN_A, assetsOrBps: -9n }],
         bounds: [{ cToken: CTOKEN_A, minBps: 0n, maxBps: 10_000n }],
     });
+});
+
+test("optimalRebalanceWithIncentives converts and aggregates Merkl LEND APRs for approved markets", async () => {
+    const reader = createReader();
+    let fetchedChainId: number | null = null;
+    let captured: {
+        optimizer: string;
+        slippageBps: bigint;
+        rebalanceChunks: bigint;
+        marketIncentives: Array<{ cToken: string; incentiveAPYBps: bigint }>;
+    } | null = null;
+
+    reader.getOptimizerMarketData = async (optimizers) => {
+        assert.deepEqual(optimizers, [OPTIMIZER as any]);
+        return [{
+            address: OPTIMIZER as any,
+            asset: CTOKEN_A as any,
+            totalAssets: 1_000n,
+            markets: [
+                { address: CTOKEN_A as any, allocatedAssets: 400n, liquidity: 0n, allocationCap: WAD, allocationCapUtilizationBps: 4_000n },
+                { address: CTOKEN_B as any, allocatedAssets: 600n, liquidity: 0n, allocationCap: WAD, allocationCapUtilizationBps: 6_000n },
+            ],
+            totalLiquidity: 0n,
+            sharePrice: WAD,
+            exchangeRateHighWatermark: WAD,
+            performanceFee: 0n,
+            numApprovedMarkets: 2n,
+            apy: 0n,
+        }];
+    };
+    reader.provider = {
+        getNetwork: async () => ({ chainId: 143n }),
+    } as any;
+    (reader as any).fetchMerklOpportunities = async (chainId: number) => {
+        fetchedChainId = chainId;
+        return [
+            // Reverse order proves values are keyed by cToken, not array index.
+            { name: "B supply", apr: 1.5, action: "LEND", identifier: "b", type: "TOKEN", tokens: [{ address: CTOKEN_B, symbol: "B" }] },
+            { name: "A campaign 1", apr: 5, action: "LEND", identifier: "a1", type: "TOKEN", tokens: [{ address: CTOKEN_A, symbol: "A" }] },
+            { name: "A campaign 2", apr: 0.25, identifier: "a2", type: "TOKEN", tokens: [{ address: CTOKEN_A, symbol: "A" }] },
+            { name: "B borrow", apr: 9, action: "BORROW", identifier: CTOKEN_B, type: "TOKEN", tokens: [{ address: CTOKEN_B, symbol: "B" }] },
+            { name: "unapproved", apr: 7, action: "LEND", identifier: "other", type: "TOKEN", tokens: [{ address: "0x00000000000000000000000000000000000000ff", symbol: "X" }] },
+        ];
+    };
+
+    reader.contract = {
+        optimalRebalance: Object.assign(
+            async () => { throw new Error("optimalRebalanceWithIncentives must use staticCall"); },
+            {
+                staticCall: async (
+                    optimizer: string,
+                    slippageBps: bigint,
+                    rebalanceChunks: bigint,
+                    marketIncentives: Array<{ cToken: string; incentiveAPYBps: bigint }>,
+                ) => {
+                    captured = { optimizer, slippageBps, rebalanceChunks, marketIncentives };
+                    return [
+                        [{ cToken: CTOKEN_A, assetsOrBps: 11n }],
+                        [{ cToken: CTOKEN_A, minBps: 0n, maxBps: 10_000n }],
+                    ];
+                },
+            },
+        ),
+    } as any;
+
+    const result = await reader.optimalRebalanceWithIncentives(OPTIMIZER as any, 25n, 123n);
+
+    assert.equal(fetchedChainId, 143);
+    assert.deepEqual(captured, {
+        optimizer: OPTIMIZER,
+        slippageBps: 25n,
+        rebalanceChunks: 123n,
+        marketIncentives: [
+            { cToken: CTOKEN_A, incentiveAPYBps: 525n },
+            { cToken: CTOKEN_B, incentiveAPYBps: 150n },
+        ],
+    });
+    assert.deepEqual(result, {
+        actions: [{ cToken: CTOKEN_A, assetsOrBps: 11n }],
+        bounds: [{ cToken: CTOKEN_A, minBps: 0n, maxBps: 10_000n }],
+    });
+});
+
+test("optimalRebalanceWithIncentives accepts 1,000 BPS and rejects a larger aggregate", async () => {
+    const createConfiguredReader = (apr: number) => {
+        const reader = createReader();
+        reader.getOptimizerMarketData = async () => [{
+            address: OPTIMIZER as any,
+            asset: CTOKEN_A as any,
+            totalAssets: 1n,
+            markets: [
+                { address: CTOKEN_A as any, allocatedAssets: 1n, liquidity: 0n, allocationCap: WAD, allocationCapUtilizationBps: 10_000n },
+                { address: CTOKEN_B as any, allocatedAssets: 0n, liquidity: 0n, allocationCap: WAD, allocationCapUtilizationBps: 0n },
+            ],
+            totalLiquidity: 0n,
+            sharePrice: WAD,
+            exchangeRateHighWatermark: WAD,
+            performanceFee: 0n,
+            numApprovedMarkets: 2n,
+            apy: 0n,
+        }];
+        reader.provider = { getNetwork: async () => ({ chainId: 143n }) } as any;
+        (reader as any).fetchMerklOpportunities = async () => ([{
+            name: "A supply",
+            apr,
+            action: "LEND",
+            identifier: "a",
+            type: "TOKEN",
+            tokens: [{ address: CTOKEN_A, symbol: "A" }],
+        }]);
+        return reader;
+    };
+
+    const boundaryReader = createConfiguredReader(10);
+    let boundaryIncentives: unknown[] | null = null;
+    boundaryReader.contract = {
+        optimalRebalance: async (
+            _optimizer: string,
+            _slippageBps: bigint,
+            _rebalanceChunks: bigint,
+            marketIncentives: unknown[],
+        ) => {
+            boundaryIncentives = marketIncentives;
+            return [[], []];
+        },
+    } as any;
+
+    await boundaryReader.optimalRebalanceWithIncentives(OPTIMIZER as any);
+    assert.deepEqual(boundaryIncentives, [{ cToken: CTOKEN_A, incentiveAPYBps: 1_000n }]);
+
+    const overCapReader = createConfiguredReader(10.01);
+    let contractCalled = false;
+    overCapReader.contract = {
+        optimalRebalance: async () => {
+            contractCalled = true;
+            return [[], []];
+        },
+    } as any;
+
+    await assert.rejects(
+        () => overCapReader.optimalRebalanceWithIncentives(OPTIMIZER as any),
+        /exceeds 1000 BPS \(received 1001 BPS\)/,
+    );
+    assert.equal(contractCalled, false);
+});
+
+test("optimalRebalanceWithIncentives skips Merkl when the optimizer has no approved markets", async () => {
+    const reader = createReader();
+    reader.getOptimizerMarketData = async () => [{
+        address: OPTIMIZER as any,
+        asset: CTOKEN_A as any,
+        totalAssets: 0n,
+        markets: [],
+        totalLiquidity: 0n,
+        sharePrice: WAD,
+        exchangeRateHighWatermark: WAD,
+        performanceFee: 0n,
+        numApprovedMarkets: 0n,
+        apy: 0n,
+    }];
+    (reader as any).fetchMerklOpportunities = async () => {
+        throw new Error("Merkl should not be fetched");
+    };
+    reader.contract = {
+        optimalRebalance: async (
+            _optimizer: string,
+            _slippageBps: bigint,
+            _rebalanceChunks: bigint,
+            marketIncentives: unknown[],
+        ) => {
+            assert.deepEqual(marketIncentives, []);
+            return [[], []];
+        },
+    } as any;
+
+    assert.deepEqual(
+        await reader.optimalRebalanceWithIncentives(OPTIMIZER as any),
+        { actions: [], bounds: [] },
+    );
+});
+
+test("optimalRebalanceWithIncentives surfaces a Merkl fetch failure", async () => {
+    const reader = createReader();
+    reader.getOptimizerMarketData = async () => [{
+        address: OPTIMIZER as any,
+        asset: CTOKEN_A as any,
+        totalAssets: 1n,
+        markets: [
+            { address: CTOKEN_A as any, allocatedAssets: 1n, liquidity: 0n, allocationCap: WAD, allocationCapUtilizationBps: 10_000n },
+        ],
+        totalLiquidity: 0n,
+        sharePrice: WAD,
+        exchangeRateHighWatermark: WAD,
+        performanceFee: 0n,
+        numApprovedMarkets: 1n,
+        apy: 0n,
+    }];
+    reader.provider = { getNetwork: async () => ({ chainId: 143n }) } as any;
+    (reader as any).fetchMerklOpportunities = async () => {
+        throw new Error("Merkl unavailable");
+    };
+    reader.contract = {
+        optimalRebalance: async () => {
+            throw new Error("contract should not be called");
+        },
+    } as any;
+
+    await assert.rejects(
+        () => reader.optimalRebalanceWithIncentives(OPTIMIZER as any),
+        /Merkl unavailable/,
+    );
 });
 
 test("bad-market helpers forward optimizer arrays", async () => {

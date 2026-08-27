@@ -196,10 +196,16 @@ test("OptimizerReader optimalRebalance output can be executed by LendingOptimize
     const { optimizer, sent } = createLendingOptimizer();
     const reader = Object.create(OptimizerReader.prototype) as OptimizerReader;
     (reader as any).contract = {
-        optimalRebalance: async (optimizerAddress: string, slippageBps: bigint, rebalanceChunks: bigint) => {
+        optimalRebalance: async (
+            optimizerAddress: string,
+            slippageBps: bigint,
+            rebalanceChunks: bigint,
+            marketIncentives: unknown[],
+        ) => {
             assert.equal(optimizerAddress, OPTIMIZER);
             assert.equal(slippageBps, 25n);
             assert.equal(rebalanceChunks, DEFAULT_REBALANCE_CHUNKS);
+            assert.deepEqual(marketIncentives, []);
             return {
                 actions: [
                     { cToken: BORROWABLE, assets: 2500n },
