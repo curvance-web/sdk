@@ -2197,8 +2197,8 @@ async function main() {
         };
         globalThis.fetch = async (input) => {
             const url = String(input);
-            if (url.includes("/native_apy")) {
-                return jsonResponse({ native_apy: [] });
+            if (url.includes("/asset/")) {
+                return jsonResponse([]);
             }
             const merklUrl = getProxiedMerklUrl(url);
             if (merklUrl.origin === "https://api.merkl.xyz" && merklUrl.pathname === "/v4/opportunities") {
@@ -2422,7 +2422,7 @@ async function main() {
         );
         assert.deepEqual(
             packedArbFetchUrls.map((url) => getProxiedMerklUrl(url).searchParams.get("chainId")),
-            ["421614", "421614"],
+            ["421614"],
             "packed Arbitrum real boot should only make chain-scoped Merkl opportunity requests",
         );
     } finally {
@@ -2487,57 +2487,33 @@ async function main() {
         packedSdk.chain_config["monad-mainnet"].services.curvanceApi.nativeYieldSlug = "moved-dist-native";
 
         await withMockedFetch(
-            {
-                milestones: [{
-                    market: TOKEN_IN,
-                    tvl: 1,
-                    multiplier: 2,
-                    fail_multiplier: 0,
-                    chain_network: "monad-mainnet",
-                    start_date: "2026-01-01",
-                    end_date: "2026-01-02",
-                    duration_in_days: 1,
-                }],
-                incentives: [{
-                    market: TOKEN_IN,
+            [{
+                chain_id: 143,
+                token: TOKEN_OUT,
+                symbol: "WMON",
+                token_image: "wmon.svg",
+                market_address: TOKEN_IN,
+                vault: false,
+                percent_native_apy: 3.14,
+                points: [{
                     type: "supply",
                     rate: 4,
-                    description: "dist reward",
                     image: "stars-rewards",
-                }, {
-                    market: TOKEN_IN,
-                    type: "supply",
-                    rate: 99,
-                    description: "wrong-chain dist reward",
-                    image: "stars-rewards",
-                    chain_network: "Ethereum",
                 }],
-            },
+            }],
             async (urls) => {
                 const rewards = await packedSdk.Api.getRewards(monadSetupSnapshot);
-
-                assert.deepEqual(urls, [
-                    "https://api.dist-smoke.example/v1/rewards/active/monad-mainnet",
-                ]);
-                assert.equal(rewards.milestones[TOKEN_IN]?.chain_network, "monad-mainnet");
-                assert.deepEqual(
-                    rewards.incentives[TOKEN_IN]?.map((incentive) => incentive.description),
-                    ["dist reward"],
-                    "packed Api.getRewards should drop explicit wrong-chain incentive rows",
-                );
-            },
-        );
-
-        await withMockedFetch(
-            {
-                native_apy: [{ symbol: "WMON", apy: 3.14 }],
-            },
-            async (urls) => {
                 const yields = await packedSdk.Api.fetchNativeYields(monadSetupSnapshot);
 
                 assert.deepEqual(urls, [
-                    "https://api.dist-smoke.example/v1/monad/native_apy",
+                    "https://api.dist-smoke.example/asset/143",
                 ]);
+                assert.deepEqual(rewards.milestones, {});
+                assert.deepEqual(
+                    rewards.incentives[TOKEN_IN]?.map((incentive) => incentive.description),
+                    ["supply"],
+                    "packed Api.getRewards should map asset points into legacy incentives",
+                );
                 assert.deepEqual(yields, [{ symbol: "WMON", apy: 3.14 }]);
             },
         );

@@ -81,6 +81,7 @@ test("test:fork includes every env-backed fork test file", () => {
         "leverage.test.ts",
         "zap.test.ts",
         "zap-repay-fork.ts",
+        "zap-exits-fork.ts",
         "dual-fork-switch.test.ts",
     ];
 
@@ -416,9 +417,13 @@ test("Monad mainnet manifest uses the current oracle and optimizer rollout", () 
         "High Yield AUSD": "0xaD663aC84052b52BE4ed1b27BA416505e84a00Bf",
     });
     assert.ok(chain_config["monad-mainnet"].excluded_zap_symbols.includes("hyAUSD"));
+    assert.ok(chain_config["monad-mainnet"].excluded_zap_symbols.includes("aguaUSDCgc"));
     assert.deepEqual(
         chain_config["monad-mainnet"].excluded_zap_addresses,
-        [monad.Optimizers["High Yield AUSD"]],
+        [
+            monad.Optimizers["High Yield AUSD"],
+            "0x2ABc42250154752273a4560e875c858623F83ecC",
+        ],
     );
     assert.equal(monad["CombinedAggregator-ezETH"], "0xC54481C5425f091DfBE7A8e2B264D7dCf4783cD4");
     assert.equal(monad["CombinedAggregator-earnAUSD"], "0x4a048D2dFd6cd75A7e239393a14CE913d756f992");
