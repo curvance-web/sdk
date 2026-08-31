@@ -7,13 +7,14 @@ import { Calldata } from "./Calldata";
 import Decimal from "decimal.js";
 import base_ctoken_abi from '../abis/BaseCToken.json';
 import { address, bytes, curvance_read_provider, curvance_signer, Percentage, TokenInput, USD, USD_WAD } from "../types";
-import { Zapper, ZapperTypes, zapperTypeToName } from "./Zapper";
+import { Zapper, ZapperTypes, zapperTypeToName, type RedeemSwapQuote, type Swap } from "./Zapper";
 import { PositionManager, PositionManagerTypes } from "./PositionManager";
 import { BorrowableCToken } from "./BorrowableCToken";
 import { NativeToken } from "./NativeToken";
 import { ERC4626 } from "./ERC4626";
 import FormatConverter from "./FormatConverter";
 import type IDexAgg from "./DexAggregators/IDexAgg";
+import type { DexQuoteOptions } from "./DexAggregators/IDexAgg";
 import { isZapTokenExcluded } from "../zapPolicy";
 
 const EXECUTION_DEBT_BUFFER_TIME = 100n;
@@ -23,6 +24,44 @@ function ceilDiv(numerator: bigint, denominator: bigint): bigint {
         throw new Error("ceilDiv denominator must be positive");
     }
     return numerator === 0n ? 0n : (numerator - 1n) / denominator + 1n;
+}
+
+function attachSettledTransactionContext(
+    error: unknown,
+    transaction: TransactionResponse,
+    receipt?: unknown,
+): Error {
+    const contextualError = error instanceof Error ? error : new Error(String(error));
+
+    try {
+        Object.defineProperty(contextualError, "transaction", {
+            configurable: true,
+            enumerable: true,
+            value: transaction,
+        });
+        if (receipt !== undefined) {
+            Object.defineProperty(contextualError, "receipt", {
+                configurable: true,
+                enumerable: true,
+                value: receipt,
+            });
+        }
+        return contextualError;
+    } catch {
+        const wrapped = new Error(contextualError.message);
+        Object.defineProperty(wrapped, "cause", { value: error });
+        Object.defineProperty(wrapped, "transaction", {
+            enumerable: true,
+            value: transaction,
+        });
+        if (receipt !== undefined) {
+            Object.defineProperty(wrapped, "receipt", {
+                enumerable: true,
+                value: receipt,
+            });
+        }
+        return wrapped;
+    }
 }
 
 /**
@@ -225,6 +264,167 @@ export type ZapperInstructions =  'none' | 'native-vault' | 'vault' | 'native-si
     inputToken: address;
     slippage: Percentage;
 }
+
+export const REDEEM_ZAP = {
+    DEFAULT_VALID_FOR_SECONDS: 100n,
+    MAX_VALID_FOR_SECONDS: 600n,
+    DEFAULT_MIN_SUBMIT_WINDOW_SECONDS: 15n,
+    DEFAULT_PLANNING_TIMEOUT_MS: 12_000,
+    MAX_PLANNING_TIMEOUT_MS: 12_000,
+    DEFAULT_ROUTE_VALID_FOR_SECONDS: 10n,
+    DEFAULT_ROUTE_MIN_SUBMIT_WINDOW_SECONDS: 2n,
+    /**
+     * Initial quotes are built before SimpleZapper delegation exists, so the
+     * SDK cannot yet eth_call the exact state-changing redemption preview.
+     * Keep that approval quote executable while the post-approval refresh
+     * replaces it with the exact redeemFor return value.
+     */
+    PRE_APPROVAL_SOURCE_BUFFER_BPS: 1n,
+    /** Headroom used only when preflighting optional destination collateral. */
+    TARGET_COLLATERAL_HEADROOM_BPS: 2n,
+} as const;
+
+export type RedeemZapErrorCode =
+    | "invalid-amount"
+    | "capacity"
+    | "source-unavailable"
+    | "unsupported-token"
+    | "setup-mismatch"
+    | "invalid-account"
+    | "stale-plan"
+    | "invalid-plan"
+    | "approval-required"
+    | "target-unavailable"
+    | "target-collateral-unavailable"
+    | "aborted"
+    | "timeout"
+    | "simulation-failed";
+
+export class RedeemZapError extends Error {
+    readonly code: RedeemZapErrorCode;
+
+    constructor(code: RedeemZapErrorCode, message: string, cause?: unknown) {
+        super(message, cause === undefined ? undefined : { cause });
+        this.name = "RedeemZapError";
+        this.code = code;
+    }
+}
+
+export interface RedeemZapCapacitySnapshot {
+    readonly shareBalance: bigint;
+    readonly maxRedemptionShares: bigint;
+    readonly liquidityAssets: bigint | null;
+    readonly liquidityShares: bigint | null;
+    readonly executableShares: bigint;
+    readonly executableAssets: bigint;
+}
+
+export class RedeemZapCapacityError extends RedeemZapError {
+    readonly requestedShares: bigint;
+    readonly capacity: RedeemZapCapacitySnapshot;
+
+    constructor(requestedShares: bigint, capacity: RedeemZapCapacitySnapshot) {
+        super(
+            "capacity",
+            `Requested redemption requires ${requestedShares} shares, above the current executable capacity of ${capacity.executableShares}.`,
+        );
+        this.name = "RedeemZapCapacityError";
+        this.requestedShares = requestedShares;
+        this.capacity = capacity;
+    }
+}
+
+export interface RedeemZapOptions {
+    /** Redeem the exact fresh executable share capacity instead of round-tripping through assets. */
+    redeemMax?: boolean;
+    /** Lifetime of the capacity-bound plan, measured from chain time. */
+    validForSeconds?: bigint;
+    /** Minimum remaining lifetime required before simulation or submission. */
+    minSubmitWindowSeconds?: bigint;
+    /** Hard wall-clock budget for quote construction. */
+    planningTimeoutMs?: number;
+    /** Cancels capacity reads and route construction. */
+    signal?: AbortSignal;
+}
+
+export type RefreshRedeemZapOptions = Pick<RedeemZapOptions, "planningTimeoutMs" | "signal">;
+
+export interface RedeemZapExecutionOptions {
+    /** Synchronous final intent check run after simulation and immediately before broadcast. */
+    beforeBroadcast?: () => void;
+}
+
+export interface RedeemZapTargetDepositSnapshot {
+    readonly mintPaused: boolean;
+    readonly maxDepositAssets: bigint;
+}
+
+export interface RedeemZapTargetCollateralSnapshot {
+    readonly collateralizationPaused: boolean;
+    readonly collateralCapShares: bigint;
+    readonly collateralPostedShares: bigint;
+    readonly remainingCollateralShares: bigint;
+    readonly requiredCollateralShares: bigint;
+}
+
+interface RedeemZapPlanBase {
+    readonly chain: string;
+    readonly chainId: number;
+    readonly setupId: string;
+    readonly zapper: address;
+    readonly owner: address;
+    readonly receiver: address;
+    readonly sourceMarket: address;
+    readonly sourceCToken: address;
+    readonly sourceAsset: address;
+    readonly sourceAssetDecimals: bigint;
+    readonly outputToken: address;
+    readonly requestedSourceAssets: bigint;
+    readonly redeemMax: boolean;
+    readonly capacity: RedeemZapCapacitySnapshot;
+    readonly sourceShares: bigint;
+    readonly sourceAssets: bigint;
+    readonly sourceAssetRefundPossible: boolean;
+    readonly quotedSourceAssetRefund: bigint;
+    readonly expectedOutput: bigint;
+    readonly minimumOutput: bigint;
+    readonly slippageBps: bigint;
+    readonly contractSlippage: bigint;
+    readonly feeBps: bigint;
+    readonly feeReceiver: address | undefined;
+    readonly quotedAt: bigint;
+    readonly validUntil: bigint;
+    readonly minSubmitWindowSeconds: bigint;
+    readonly routeQuotedAt: bigint;
+    readonly routeValidUntil: bigint;
+    readonly routeMinSubmitWindowSeconds: bigint;
+    readonly forceRedeemCollateral: false;
+    readonly swapAction: Swap;
+    readonly calldata: bytes;
+    readonly value: 0n;
+}
+
+export interface RedeemAndSwapPlan extends RedeemZapPlanBase {
+    readonly kind: "curvance-redeem-and-swap-plan";
+}
+
+export interface RedeemSwapAndDepositPlan extends RedeemZapPlanBase {
+    readonly kind: "curvance-redeem-swap-and-deposit-plan";
+    readonly destinationMarket: address;
+    readonly destinationCToken: address;
+    readonly destinationAsset: address;
+    readonly destinationAssetDecimals: bigint;
+    readonly expectedDestinationShares: bigint;
+    readonly minimumDestinationShares: bigint;
+    readonly collateralizeFor: boolean;
+    readonly collateralizeAccount: address;
+    readonly targetDeposit: RedeemZapTargetDepositSnapshot;
+    readonly targetCollateral: RedeemZapTargetCollateralSnapshot | null;
+}
+
+const redeemAndSwapPlans = new WeakSet<object>();
+const redeemSwapAndDepositPlans = new WeakSet<object>();
+const redeemSwapDestinations = new WeakMap<object, CToken>();
 
 export interface ICToken {
     decimals(): Promise<bigint>;
@@ -1510,6 +1710,998 @@ export class CToken extends Calldata<ICToken> {
         return FormatConverter.bigIntToDecimal(all_assets, this.asset.decimals);
     }
 
+    /** Reads the exact live constraints used to size SimpleZapper exits. */
+    async fetchRedeemZapCapacity(): Promise<RedeemZapCapacitySnapshot> {
+        const owner = this.getRedeemZapOwner();
+        const liquidityPromise: Promise<bigint | null> = this.isBorrowable
+            ? (this.contract as unknown as Contract & { assetsHeld(): Promise<bigint> }).assetsHeld()
+            : Promise.resolve(null);
+        const [shareBalance, maxRedemptionShares, liquidityAssets, redeemPaused] = await Promise.all([
+            this.balanceOf(owner),
+            this.maxRedemption(true, this.getExecutionDebtBufferTime()),
+            liquidityPromise,
+            this.market.contract.redeemPaused(),
+        ]);
+        if (redeemPaused === 2n) {
+            throw new RedeemZapError(
+                "source-unavailable",
+                `Redemptions are currently paused for source market ${this.market.address}.`,
+            );
+        }
+        const liquidityShares = liquidityAssets == null
+            ? null
+            : await this.contract.convertToShares(liquidityAssets);
+        let executableShares = shareBalance < maxRedemptionShares
+            ? shareBalance
+            : maxRedemptionShares;
+        if (liquidityShares != null && liquidityShares < executableShares) {
+            executableShares = liquidityShares;
+        }
+        const executableAssets = executableShares > 0n
+            ? await this.contract.convertToAssets(executableShares)
+            : 0n;
+        return Object.freeze({
+            shareBalance,
+            maxRedemptionShares,
+            liquidityAssets,
+            liquidityShares,
+            executableShares,
+            executableAssets,
+        });
+    }
+
+    async quoteRedeemAndSwap(
+        outputToken: address,
+        amount: TokenInput,
+        slippage: Percentage,
+        options: RedeemZapOptions = {},
+    ): Promise<RedeemAndSwapPlan> {
+        const requestedAssets = this.parseRedeemZapAmount(amount);
+        const slippageBps = FormatConverter.percentageToBps(slippage);
+        return this.runRedeemZapPlanning(options, (signal) => this.buildRedeemAndSwapPlan(
+            outputToken,
+            requestedAssets,
+            slippageBps,
+            { ...options, signal },
+        ));
+    }
+
+    async refreshRedeemAndSwapPlan(
+        plan: RedeemAndSwapPlan,
+        options: RefreshRedeemZapOptions = {},
+    ): Promise<RedeemAndSwapPlan> {
+        this.assertRedeemAndSwapPlanBinding(plan);
+        const refreshOptions: RedeemZapOptions = {
+            ...options,
+            redeemMax: plan.redeemMax,
+            validForSeconds: plan.validUntil - plan.quotedAt,
+            minSubmitWindowSeconds: plan.minSubmitWindowSeconds,
+        };
+        return this.runRedeemZapPlanning(refreshOptions, (signal) => this.buildRedeemAndSwapPlan(
+            plan.outputToken,
+            plan.requestedSourceAssets,
+            plan.slippageBps,
+            { ...refreshOptions, signal },
+        ));
+    }
+
+    async isRedeemAndSwapApproved(plan: RedeemAndSwapPlan): Promise<boolean> {
+        this.assertRedeemAndSwapPlanBinding(plan);
+        return this.contract.isDelegate(plan.owner, plan.zapper);
+    }
+
+    async approveRedeemAndSwap(plan: RedeemAndSwapPlan): Promise<TransactionResponse> {
+        this.assertRedeemAndSwapPlanBinding(plan);
+        return this.approvePlugin("simple", "zapper");
+    }
+
+    async simulateRedeemAndSwap(
+        plan: RedeemAndSwapPlan,
+    ): Promise<{ success: boolean; error?: string }> {
+        try {
+            const overrides = await this.preflightRedeemAndSwap(plan);
+            return this.simulateOracleRoute(plan.calldata, overrides);
+        } catch (error: any) {
+            return { success: false, error: error?.reason || error?.message || String(error) };
+        }
+    }
+
+    async redeemAndSwap(
+        plan: RedeemAndSwapPlan,
+        options: RedeemZapExecutionOptions = {},
+    ): Promise<TransactionResponse> {
+        const overrides = await this.preflightRedeemAndSwap(plan);
+        const simulation = await this.simulateOracleRoute(plan.calldata, overrides);
+        if (!simulation.success) {
+            throw new RedeemZapError(
+                "simulation-failed",
+                `Redemption swap simulation failed${simulation.error ? `: ${simulation.error}` : "."}`,
+            );
+        }
+        options.beforeBroadcast?.();
+        return this.oracleRoute(plan.calldata, overrides, plan.receiver);
+    }
+
+    async quoteRedeemSwapAndDeposit(
+        destination: CToken,
+        amount: TokenInput,
+        slippage: Percentage,
+        collateralizeFor: boolean = false,
+        options: RedeemZapOptions = {},
+    ): Promise<RedeemSwapAndDepositPlan> {
+        const requestedAssets = this.parseRedeemZapAmount(amount);
+        const slippageBps = FormatConverter.percentageToBps(slippage);
+        return this.runRedeemZapPlanning(options, (signal) => this.buildRedeemSwapAndDepositPlan(
+            destination,
+            requestedAssets,
+            slippageBps,
+            collateralizeFor,
+            { ...options, signal },
+        ));
+    }
+
+    async refreshRedeemSwapAndDepositPlan(
+        plan: RedeemSwapAndDepositPlan,
+        options: RefreshRedeemZapOptions = {},
+    ): Promise<RedeemSwapAndDepositPlan> {
+        const destination = this.assertRedeemSwapAndDepositPlanBinding(plan);
+        const refreshOptions: RedeemZapOptions = {
+            ...options,
+            redeemMax: plan.redeemMax,
+            validForSeconds: plan.validUntil - plan.quotedAt,
+            minSubmitWindowSeconds: plan.minSubmitWindowSeconds,
+        };
+        return this.runRedeemZapPlanning(refreshOptions, (signal) => this.buildRedeemSwapAndDepositPlan(
+            destination,
+            plan.requestedSourceAssets,
+            plan.slippageBps,
+            plan.collateralizeFor,
+            { ...refreshOptions, signal },
+        ));
+    }
+
+    async isRedeemSwapAndDepositApproved(plan: RedeemSwapAndDepositPlan): Promise<boolean> {
+        this.assertRedeemSwapAndDepositPlanBinding(plan);
+        return this.contract.isDelegate(plan.owner, plan.zapper);
+    }
+
+    async approveRedeemSwapAndDeposit(plan: RedeemSwapAndDepositPlan): Promise<TransactionResponse> {
+        this.assertRedeemSwapAndDepositPlanBinding(plan);
+        return this.approvePlugin("simple", "zapper");
+    }
+
+    async isRedeemSwapAndDepositTargetApproved(
+        plan: RedeemSwapAndDepositPlan,
+    ): Promise<boolean> {
+        const destination = this.assertRedeemSwapAndDepositPlanBinding(plan);
+        if (!plan.collateralizeFor) return true;
+        return destination.contract.isDelegate(plan.collateralizeAccount, plan.zapper);
+    }
+
+    async approveRedeemSwapAndDepositTarget(
+        plan: RedeemSwapAndDepositPlan,
+    ): Promise<TransactionResponse | undefined> {
+        const destination = this.assertRedeemSwapAndDepositPlanBinding(plan);
+        if (!plan.collateralizeFor) return undefined;
+        return destination.approvePlugin("simple", "zapper");
+    }
+
+    async simulateRedeemSwapAndDeposit(
+        plan: RedeemSwapAndDepositPlan,
+    ): Promise<{ success: boolean; error?: string }> {
+        try {
+            const { overrides } = await this.preflightRedeemSwapAndDeposit(plan);
+            return this.simulateOracleRoute(plan.calldata, overrides);
+        } catch (error: any) {
+            return { success: false, error: error?.reason || error?.message || String(error) };
+        }
+    }
+
+    async redeemSwapAndDeposit(
+        plan: RedeemSwapAndDepositPlan,
+        options: RedeemZapExecutionOptions = {},
+    ): Promise<TransactionResponse> {
+        const { destination, overrides } = await this.preflightRedeemSwapAndDeposit(plan);
+        const simulation = await this.simulateOracleRoute(plan.calldata, overrides);
+        if (!simulation.success) {
+            throw new RedeemZapError(
+                "simulation-failed",
+                `Move position simulation failed${simulation.error ? `: ${simulation.error}` : "."}`,
+            );
+        }
+        options.beforeBroadcast?.();
+        const tx = await this.oracleRoute(plan.calldata, overrides, plan.receiver);
+        if (destination.market.address.toLowerCase() !== this.market.address.toLowerCase()) {
+            try {
+                await destination.market.reloadUserData(plan.receiver);
+            } catch (error) {
+                throw attachSettledTransactionContext(error, tx);
+            }
+        }
+        return tx;
+    }
+
+    private parseRedeemZapAmount(amount: TokenInput): bigint {
+        let assets: bigint;
+        try {
+            assets = FormatConverter.decimalToBigInt(amount, this.asset.decimals);
+        } catch (error) {
+            throw new RedeemZapError("invalid-amount", "Redemption amount is invalid.", error);
+        }
+        if (assets <= 0n) {
+            throw new RedeemZapError("invalid-amount", "Redemption amount must be greater than zero.");
+        }
+        return assets;
+    }
+
+    private getRedeemZapSetupId(zapper: address): string {
+        const oracleManager = this.setup.contracts.OracleManager as address;
+        return `${this.currentChain}:${this.setup.chainId}:${oracleManager.toLowerCase()}:${zapper.toLowerCase()}`;
+    }
+
+    private getRedeemZapOwner(): address {
+        const owner = this.requireSigner().address as address;
+        if (owner.toLowerCase() === EMPTY_ADDRESS.toLowerCase()) {
+            throw new RedeemZapError("invalid-account", "Connected account cannot be the zero address.");
+        }
+        if (this.account != null && this.account.toLowerCase() !== owner.toLowerCase()) {
+            throw new RedeemZapError(
+                "invalid-account",
+                `Source market is loaded for ${this.account}, not the connected account ${owner}.`,
+            );
+        }
+        return owner;
+    }
+
+    private assertRedeemZapOutputToken(outputToken: address) {
+        if (
+            outputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase() ||
+            outputToken.toLowerCase() === EMPTY_ADDRESS.toLowerCase()
+        ) {
+            throw new RedeemZapError(
+                "unsupported-token",
+                "Exit output must be a nonzero ERC-20 token. Native output is not supported.",
+            );
+        }
+    }
+
+    private assertRedeemZapDestination(destination: CToken) {
+        if (destination.address.toLowerCase() === this.address.toLowerCase()) {
+            throw new RedeemZapError(
+                "target-unavailable",
+                "Move destination must differ from the source cToken.",
+            );
+        }
+        if (destination.market.setup !== this.setup) {
+            throw new RedeemZapError(
+                "setup-mismatch",
+                `Destination ${destination.address} is not bound to the source setup snapshot.`,
+            );
+        }
+        if (isZapTokenExcluded(this.setup.assets, destination.asset)) {
+            throw new RedeemZapError(
+                "unsupported-token",
+                `Move destination asset ${destination.asset.symbol} is excluded from zaps.`,
+            );
+        }
+    }
+
+    private async getRedeemZapContext(options: RedeemZapOptions) {
+        const owner = this.getRedeemZapOwner();
+        const validForSeconds = options.validForSeconds ?? REDEEM_ZAP.DEFAULT_VALID_FOR_SECONDS;
+        const minSubmitWindowSeconds = options.minSubmitWindowSeconds
+            ?? REDEEM_ZAP.DEFAULT_MIN_SUBMIT_WINDOW_SECONDS;
+        if (validForSeconds <= 0n || validForSeconds > REDEEM_ZAP.MAX_VALID_FOR_SECONDS) {
+            throw new RedeemZapError(
+                "invalid-plan",
+                `Exit plan validity must be in [1, ${REDEEM_ZAP.MAX_VALID_FOR_SECONDS}] seconds.`,
+            );
+        }
+        if (minSubmitWindowSeconds < 0n || minSubmitWindowSeconds >= validForSeconds) {
+            throw new RedeemZapError(
+                "invalid-plan",
+                "Exit plan minimum submit window must be non-negative and shorter than validity.",
+            );
+        }
+        const zapper = this.getZapper("simple");
+        if (zapper == null) {
+            throw new RedeemZapError(
+                "unsupported-token",
+                `Simple Zapper is not configured for ${this.symbol}.`,
+            );
+        }
+        const quotedAt = await this.getRedeemZapChainTimestamp();
+        return {
+            owner,
+            receiver: owner,
+            zapper,
+            quotedAt,
+            validUntil: quotedAt + validForSeconds,
+            minSubmitWindowSeconds,
+        };
+    }
+
+    private async getRedeemZapChainTimestamp(): Promise<bigint> {
+        const block = await this.provider.getBlock("latest");
+        if (block == null) {
+            throw new RedeemZapError("stale-plan", "Could not read the latest block for exit planning.");
+        }
+        return BigInt(block.timestamp);
+    }
+
+    private async runRedeemZapPlanning<T>(
+        options: RedeemZapOptions,
+        operation: (signal: AbortSignal) => Promise<T>,
+    ): Promise<T> {
+        const timeoutMs = options.planningTimeoutMs ?? REDEEM_ZAP.DEFAULT_PLANNING_TIMEOUT_MS;
+        if (
+            !Number.isInteger(timeoutMs) ||
+            timeoutMs <= 0 ||
+            timeoutMs > REDEEM_ZAP.MAX_PLANNING_TIMEOUT_MS
+        ) {
+            throw new RedeemZapError(
+                "invalid-plan",
+                `Exit planning timeout must be an integer in [1, ${REDEEM_ZAP.MAX_PLANNING_TIMEOUT_MS}] ms.`,
+            );
+        }
+        if (options.signal?.aborted) {
+            throw new RedeemZapError("aborted", "Exit quote planning was cancelled.", options.signal.reason);
+        }
+
+        const controller = new AbortController();
+        let rejectBoundary: ((error: RedeemZapError) => void) | undefined;
+        let settled = false;
+        const boundary = new Promise<never>((_resolve, reject) => {
+            rejectBoundary = reject;
+        });
+        const rejectOnce = (error: RedeemZapError) => {
+            if (settled) return;
+            controller.abort(error);
+            rejectBoundary?.(error);
+        };
+        const onAbort = () => rejectOnce(new RedeemZapError(
+            "aborted",
+            "Exit quote planning was cancelled.",
+            options.signal?.reason,
+        ));
+        options.signal?.addEventListener("abort", onAbort, { once: true });
+        const timeout = setTimeout(() => rejectOnce(new RedeemZapError(
+            "timeout",
+            `Exit quote planning exceeded its ${timeoutMs}ms deadline.`,
+        )), timeoutMs);
+        try {
+            return await Promise.race([operation(controller.signal), boundary]);
+        } finally {
+            settled = true;
+            clearTimeout(timeout);
+            options.signal?.removeEventListener("abort", onAbort);
+            if (!controller.signal.aborted) controller.abort();
+        }
+    }
+
+    private async assertRedeemZapHoldAvailable(owner: address, now?: bigint) {
+        const [cooldownTimestamp, holdPeriod, currentTimestamp] = await Promise.all([
+            this.market.contract.accountAssets(owner),
+            this.market.contract.MIN_HOLD_PERIOD(),
+            now == null ? this.getRedeemZapChainTimestamp() : Promise.resolve(now),
+        ]);
+        const availableAt = cooldownTimestamp + holdPeriod;
+        if (availableAt > currentTimestamp) {
+            throw new RedeemZapError(
+                "source-unavailable",
+                `Source market action hold is active until timestamp ${availableAt}.`,
+            );
+        }
+    }
+
+    private async normalizeRedeemZapAmount(
+        requestedAssets: bigint,
+        context: Pick<
+            Awaited<ReturnType<CToken["getRedeemZapContext"]>>,
+            "owner" | "quotedAt" | "zapper"
+        >,
+        redeemMax: boolean,
+    ) {
+        if (requestedAssets <= 0n) {
+            throw new RedeemZapError("invalid-amount", "Redemption amount must be greater than zero.");
+        }
+        const requestedSharesPromise = redeemMax
+            ? Promise.resolve<bigint | null>(null)
+            : this.contract.convertToShares(requestedAssets);
+        const [capacity, requestedShares] = await Promise.all([
+            this.fetchRedeemZapCapacity(),
+            requestedSharesPromise,
+            this.assertRedeemZapHoldAvailable(context.owner, context.quotedAt),
+        ]);
+        const sourceShares = redeemMax ? capacity.executableShares : requestedShares;
+        if (sourceShares == null || sourceShares <= 0n) {
+            throw new RedeemZapError("invalid-amount", "Redemption amount is below the minimum share unit.");
+        }
+        if (sourceShares > capacity.executableShares) {
+            throw new RedeemZapCapacityError(sourceShares, capacity);
+        }
+        const previewSourceAssets = await this.contract.convertToAssets(sourceShares);
+        if (previewSourceAssets <= 0n) {
+            throw new RedeemZapError("invalid-amount", "Redemption amount converts to zero source assets.");
+        }
+        const execution = await this.readRedeemZapExecutionAssets(
+            context.owner,
+            context.zapper.address,
+            sourceShares,
+            previewSourceAssets,
+            true,
+        );
+        return {
+            capacity,
+            sourceShares,
+            sourceAssets: execution.sourceAssets,
+            quotedSourceAssetRefund: execution.quotedSourceAssetRefund,
+            redeemMax,
+        };
+    }
+
+    /**
+     * `convertToAssets` reads cached totals, while `redeemFor` first runs
+     * `_accrueIfNeeded`. On live borrowable markets that accrual can mint fee
+     * shares, making the actual redemption a few raw units smaller than the
+     * view conversion and causing the zapper's exact expected-assets check to
+     * revert. Once delegated, simulate `redeemFor` from the zapper address so
+     * quote and calldata use the value the deployed contract will return.
+     */
+    private async readRedeemZapExecutionAssets(
+        owner: address,
+        zapper: address,
+        sourceShares: bigint,
+        previewSourceAssets: bigint,
+        allowPreApprovalFallback: boolean,
+    ): Promise<{ sourceAssets: bigint; quotedSourceAssetRefund: bigint }> {
+        const approved = await this.contract.isDelegate(owner, zapper);
+        if (!approved) {
+            if (!allowPreApprovalFallback) {
+                throw new RedeemZapError(
+                    "approval-required",
+                    `Approve Simple Zapper ${zapper} to redeem source cToken ${this.address}.`,
+                );
+            }
+            const requestedBuffer = ceilDiv(
+                previewSourceAssets * REDEEM_ZAP.PRE_APPROVAL_SOURCE_BUFFER_BPS,
+                BPS,
+            );
+            const buffer = requestedBuffer < previewSourceAssets
+                ? requestedBuffer
+                : previewSourceAssets - 1n;
+            const sourceAssets = previewSourceAssets - buffer;
+            if (sourceAssets <= 0n) {
+                throw new RedeemZapError(
+                    "invalid-amount",
+                    "Redemption amount is below the minimum safely executable asset unit.",
+                );
+            }
+            return {
+                sourceAssets,
+                quotedSourceAssetRefund: buffer,
+            };
+        }
+
+        const calldata = this.getCallData("redeemFor", [
+            sourceShares,
+            zapper,
+            owner,
+        ]);
+        let result: string;
+        try {
+            result = await this.provider.call({
+                from: zapper,
+                to: this.address,
+                data: calldata,
+            });
+        } catch (error) {
+            throw new RedeemZapError(
+                "source-unavailable",
+                "Unable to preview the exact source redemption from Simple Zapper.",
+                error,
+            );
+        }
+
+        let redeemedAssets: bigint;
+        try {
+            const decoded = this.contract.interface.decodeFunctionResult("redeemFor", result);
+            redeemedAssets = BigInt(decoded[0]);
+        } catch (error) {
+            throw new RedeemZapError(
+                "source-unavailable",
+                "Source redemption preview returned malformed data.",
+                error,
+            );
+        }
+        if (redeemedAssets <= 0n) {
+            throw new RedeemZapError(
+                "source-unavailable",
+                "Source redemption preview returned zero assets.",
+            );
+        }
+
+        return {
+            sourceAssets: redeemedAssets < previewSourceAssets
+                ? redeemedAssets
+                : previewSourceAssets,
+            quotedSourceAssetRefund: redeemedAssets > previewSourceAssets
+                ? redeemedAssets - previewSourceAssets
+                : 0n,
+        };
+    }
+
+    private async getRedeemZapRouteTiming(
+        context: Awaited<ReturnType<CToken["getRedeemZapContext"]>>,
+        quote: RedeemSwapQuote,
+    ) {
+        const usesExternalRoute = quote.action.target.toLowerCase() !== EMPTY_ADDRESS.toLowerCase();
+        const routeQuotedAt = usesExternalRoute
+            ? await this.getRedeemZapChainTimestamp()
+            : context.quotedAt;
+        if (routeQuotedAt + context.minSubmitWindowSeconds > context.validUntil) {
+            throw new RedeemZapError(
+                "stale-plan",
+                "Exit plan expired while the swap route was being built; request a new quote.",
+            );
+        }
+        return {
+            routeQuotedAt,
+            routeValidUntil: usesExternalRoute
+                ? routeQuotedAt + REDEEM_ZAP.DEFAULT_ROUTE_VALID_FOR_SECONDS
+                : context.validUntil,
+            routeMinSubmitWindowSeconds: usesExternalRoute
+                ? REDEEM_ZAP.DEFAULT_ROUTE_MIN_SUBMIT_WINDOW_SECONDS
+                : context.minSubmitWindowSeconds,
+        };
+    }
+
+    private createRedeemZapBase(
+        context: Awaited<ReturnType<CToken["getRedeemZapContext"]>>,
+        requestedAssets: bigint,
+        normalized: Awaited<ReturnType<CToken["normalizeRedeemZapAmount"]>>,
+        quote: RedeemSwapQuote,
+        timing: Awaited<ReturnType<CToken["getRedeemZapRouteTiming"]>>,
+        calldata: bytes,
+    ): Omit<RedeemZapPlanBase, "kind"> {
+        return {
+            chain: this.currentChain,
+            chainId: this.setup.chainId,
+            setupId: this.getRedeemZapSetupId(context.zapper.address),
+            zapper: context.zapper.address,
+            owner: context.owner,
+            receiver: context.receiver,
+            sourceMarket: this.market.address,
+            sourceCToken: this.address,
+            sourceAsset: this.asset.address,
+            sourceAssetDecimals: this.asset.decimals,
+            outputToken: quote.outputToken,
+            requestedSourceAssets: requestedAssets,
+            redeemMax: normalized.redeemMax,
+            capacity: normalized.capacity,
+            sourceShares: normalized.sourceShares,
+            sourceAssets: normalized.sourceAssets,
+            sourceAssetRefundPossible: true,
+            quotedSourceAssetRefund: normalized.quotedSourceAssetRefund,
+            expectedOutput: quote.expectedOutput,
+            minimumOutput: quote.minimumOutput,
+            slippageBps: quote.slippageBps,
+            contractSlippage: quote.action.slippage,
+            feeBps: quote.feeBps,
+            feeReceiver: quote.feeReceiver,
+            quotedAt: context.quotedAt,
+            validUntil: context.validUntil,
+            minSubmitWindowSeconds: context.minSubmitWindowSeconds,
+            ...timing,
+            forceRedeemCollateral: false,
+            swapAction: Object.freeze({ ...quote.action }),
+            calldata,
+            value: 0n,
+        };
+    }
+
+    private async buildRedeemAndSwapPlan(
+        outputToken: address,
+        requestedAssets: bigint,
+        slippageBps: bigint,
+        options: RedeemZapOptions,
+    ): Promise<RedeemAndSwapPlan> {
+        this.assertRedeemZapOutputToken(outputToken);
+        const context = await this.getRedeemZapContext(options);
+        const normalized = await this.normalizeRedeemZapAmount(
+            requestedAssets,
+            context,
+            options.redeemMax === true,
+        );
+        const quote = await context.zapper.quoteRedeemSwap(
+            this,
+            outputToken,
+            normalized.sourceAssets,
+            slippageBps,
+            options.signal == null ? {} : { signal: options.signal },
+        );
+        const calldata = context.zapper.getRedeemAndSwapCalldataFromQuote(
+            this,
+            quote,
+            normalized.sourceShares,
+            context.receiver,
+        );
+        const timing = await this.getRedeemZapRouteTiming(context, quote);
+        const plan = Object.freeze({
+            kind: "curvance-redeem-and-swap-plan" as const,
+            ...this.createRedeemZapBase(
+                context,
+                requestedAssets,
+                normalized,
+                quote,
+                timing,
+                calldata,
+            ),
+        });
+        redeemAndSwapPlans.add(plan);
+        this.assertRedeemAndSwapPlanBinding(plan);
+        return plan;
+    }
+
+    private async readRedeemZapTargetDeposit(
+        destination: CToken,
+        receiver: address,
+    ) {
+        const [pauses, maxDepositAssets] = await Promise.all([
+            destination.market.contract.actionsPaused(destination.address),
+            destination.contract.maxDeposit(receiver),
+        ]);
+        const mintPaused = Boolean(pauses[0]);
+        const collateralizationPaused = Boolean(pauses[1]);
+        if (mintPaused || maxDepositAssets <= 0n) {
+            throw new RedeemZapError(
+                "target-unavailable",
+                `Deposits are currently unavailable for destination ${destination.address}.`,
+            );
+        }
+        return {
+            deposit: Object.freeze({ mintPaused, maxDepositAssets }),
+            collateralizationPaused,
+        };
+    }
+
+    private async readRedeemZapTargetCollateral(
+        destination: CToken,
+        expectedOutput: bigint,
+        collateralizationPaused: boolean,
+    ): Promise<RedeemZapTargetCollateralSnapshot> {
+        const [collateralCapShares, collateralPostedShares, expectedShares] = await Promise.all([
+            destination.market.contract.collateralCaps(destination.address),
+            destination.contract.marketCollateralPosted(),
+            destination.contract.convertToShares(expectedOutput),
+        ]);
+        const remainingCollateralShares = collateralCapShares > collateralPostedShares
+            ? collateralCapShares - collateralPostedShares
+            : 0n;
+        const requiredCollateralShares = ceilDiv(
+            expectedShares * (BPS + REDEEM_ZAP.TARGET_COLLATERAL_HEADROOM_BPS),
+            BPS,
+        );
+        const snapshot = Object.freeze({
+            collateralizationPaused,
+            collateralCapShares,
+            collateralPostedShares,
+            remainingCollateralShares,
+            requiredCollateralShares,
+        });
+        if (
+            collateralizationPaused ||
+            requiredCollateralShares <= 0n ||
+            requiredCollateralShares > remainingCollateralShares
+        ) {
+            throw new RedeemZapError(
+                "target-collateral-unavailable",
+                collateralizationPaused
+                    ? `Collateralization is paused for destination ${destination.address}.`
+                    : `Destination collateral capacity is ${remainingCollateralShares} shares, below the required ${requiredCollateralShares}.`,
+            );
+        }
+        return snapshot;
+    }
+
+    private async buildRedeemSwapAndDepositPlan(
+        destination: CToken,
+        requestedAssets: bigint,
+        slippageBps: bigint,
+        collateralizeFor: boolean,
+        options: RedeemZapOptions,
+    ): Promise<RedeemSwapAndDepositPlan> {
+        this.assertRedeemZapDestination(destination);
+        this.assertRedeemZapOutputToken(destination.asset.address);
+        const context = await this.getRedeemZapContext(options);
+        const [normalized, targetState] = await Promise.all([
+            this.normalizeRedeemZapAmount(
+                requestedAssets,
+                context,
+                options.redeemMax === true,
+            ),
+            this.readRedeemZapTargetDeposit(destination, context.receiver),
+        ]);
+        const quote = await context.zapper.quoteRedeemSwap(
+            this,
+            destination.asset.address,
+            normalized.sourceAssets,
+            slippageBps,
+            options.signal == null ? {} : { signal: options.signal },
+        );
+        if (quote.expectedOutput > targetState.deposit.maxDepositAssets) {
+            throw new RedeemZapError(
+                "target-unavailable",
+                `Destination accepts at most ${targetState.deposit.maxDepositAssets} assets, below the quoted output ${quote.expectedOutput}.`,
+            );
+        }
+        const [minimumDestinationShares, expectedDestinationShares, targetCollateral] = await Promise.all([
+            destination.convertToShares(quote.minimumOutput),
+            destination.convertToShares(quote.expectedOutput, 0n),
+            collateralizeFor
+                ? this.readRedeemZapTargetCollateral(
+                    destination,
+                    quote.expectedOutput,
+                    targetState.collateralizationPaused,
+                )
+                : Promise.resolve(null),
+        ]);
+        if (minimumDestinationShares <= 0n || expectedDestinationShares <= 0n) {
+            throw new RedeemZapError(
+                "invalid-amount",
+                "Move output is below the destination's minimum share unit.",
+            );
+        }
+        const calldata = context.zapper.getRedeemSwapAndDepositCalldataFromQuote(
+            this,
+            destination,
+            quote,
+            normalized.sourceShares,
+            minimumDestinationShares,
+            collateralizeFor,
+            context.receiver,
+        );
+        const timing = await this.getRedeemZapRouteTiming(context, quote);
+        const plan = Object.freeze({
+            kind: "curvance-redeem-swap-and-deposit-plan" as const,
+            ...this.createRedeemZapBase(
+                context,
+                requestedAssets,
+                normalized,
+                quote,
+                timing,
+                calldata,
+            ),
+            destinationMarket: destination.market.address,
+            destinationCToken: destination.address,
+            destinationAsset: destination.asset.address,
+            destinationAssetDecimals: destination.asset.decimals,
+            expectedDestinationShares,
+            minimumDestinationShares,
+            collateralizeFor,
+            collateralizeAccount: context.receiver,
+            targetDeposit: targetState.deposit,
+            targetCollateral,
+        });
+        redeemSwapAndDepositPlans.add(plan);
+        redeemSwapDestinations.set(plan, destination);
+        this.assertRedeemSwapAndDepositPlanBinding(plan);
+        return plan;
+    }
+
+    private assertRedeemZapPlanBase(plan: RedeemZapPlanBase, registered: boolean) {
+        if (!registered || !Object.isFrozen(plan) || !Object.isFrozen(plan.swapAction)) {
+            throw new RedeemZapError(
+                "invalid-plan",
+                "Exit plan was not created by this SDK instance or is not immutable.",
+            );
+        }
+        const signer = this.requireSigner().address as address;
+        const zapper = this.getZapper("simple");
+        if (
+            zapper == null ||
+            plan.chain !== this.currentChain ||
+            plan.chainId !== this.setup.chainId ||
+            plan.setupId !== this.getRedeemZapSetupId(zapper.address) ||
+            plan.zapper.toLowerCase() !== zapper.address.toLowerCase() ||
+            plan.owner.toLowerCase() !== signer.toLowerCase() ||
+            plan.receiver.toLowerCase() !== signer.toLowerCase() ||
+            plan.sourceMarket.toLowerCase() !== this.market.address.toLowerCase() ||
+            plan.sourceCToken.toLowerCase() !== this.address.toLowerCase() ||
+            plan.sourceAsset.toLowerCase() !== this.asset.address.toLowerCase() ||
+            plan.sourceAssetDecimals !== this.asset.decimals
+        ) {
+            throw new RedeemZapError("invalid-plan", "Exit plan does not match the active account or setup.");
+        }
+        if (
+            plan.requestedSourceAssets <= 0n ||
+            typeof plan.redeemMax !== "boolean" ||
+            plan.sourceShares <= 0n ||
+            plan.sourceAssets <= 0n ||
+            plan.minimumOutput <= 0n ||
+            plan.expectedOutput < plan.minimumOutput ||
+            plan.forceRedeemCollateral !== false ||
+            plan.value !== 0n ||
+            plan.quotedSourceAssetRefund < 0n ||
+            plan.swapAction.inputToken.toLowerCase() !== plan.sourceAsset.toLowerCase() ||
+            plan.swapAction.inputAmount !== plan.sourceAssets ||
+            plan.swapAction.outputToken.toLowerCase() !== plan.outputToken.toLowerCase() ||
+            plan.swapAction.slippage !== plan.contractSlippage
+        ) {
+            throw new RedeemZapError("invalid-plan", "Exit plan amounts or swap action are inconsistent.");
+        }
+        if (
+            plan.capacity.executableShares > plan.capacity.shareBalance ||
+            plan.capacity.executableShares > plan.capacity.maxRedemptionShares ||
+            (plan.capacity.liquidityShares != null &&
+                plan.capacity.executableShares > plan.capacity.liquidityShares) ||
+            plan.sourceShares > plan.capacity.executableShares ||
+            (plan.redeemMax && plan.sourceShares !== plan.capacity.executableShares)
+        ) {
+            throw new RedeemZapError("invalid-plan", "Exit plan capacity snapshot is inconsistent.");
+        }
+        if (
+            plan.quotedAt >= plan.validUntil ||
+            plan.minSubmitWindowSeconds < 0n ||
+            plan.minSubmitWindowSeconds >= plan.validUntil - plan.quotedAt ||
+            plan.routeQuotedAt < plan.quotedAt ||
+            plan.routeQuotedAt >= plan.routeValidUntil ||
+            plan.routeMinSubmitWindowSeconds < 0n ||
+            plan.routeMinSubmitWindowSeconds >= plan.routeValidUntil - plan.routeQuotedAt
+        ) {
+            throw new RedeemZapError("invalid-plan", "Exit plan timing bounds are invalid.");
+        }
+        this.assertRedeemZapOutputToken(plan.outputToken);
+    }
+
+    private assertDecodedRedeemSwap(plan: RedeemZapPlanBase, decodedSwap: any) {
+        if (
+            decodedSwap.inputToken.toLowerCase() !== plan.swapAction.inputToken.toLowerCase() ||
+            BigInt(decodedSwap.inputAmount) !== plan.swapAction.inputAmount ||
+            decodedSwap.outputToken.toLowerCase() !== plan.swapAction.outputToken.toLowerCase() ||
+            decodedSwap.target.toLowerCase() !== plan.swapAction.target.toLowerCase() ||
+            BigInt(decodedSwap.slippage) !== plan.swapAction.slippage ||
+            decodedSwap.call.toLowerCase() !== plan.swapAction.call.toLowerCase()
+        ) {
+            throw new RedeemZapError("invalid-plan", "Exit plan calldata swap does not match its fields.");
+        }
+    }
+
+    private assertRedeemAndSwapPlanBinding(plan: RedeemAndSwapPlan) {
+        if (plan.kind !== "curvance-redeem-and-swap-plan") {
+            throw new RedeemZapError("invalid-plan", "Invalid redeem-and-swap plan kind.");
+        }
+        this.assertRedeemZapPlanBase(plan, redeemAndSwapPlans.has(plan));
+        const zapper = this.getZapper("simple")!;
+        let decoded;
+        try {
+            decoded = zapper.contract.interface.decodeFunctionData("redeemAndSwap", plan.calldata);
+        } catch (error) {
+            throw new RedeemZapError("invalid-plan", "Plan calldata is not redeemAndSwap.", error);
+        }
+        if (
+            decoded.redeemAction.cToken.toLowerCase() !== plan.sourceCToken.toLowerCase() ||
+            BigInt(decoded.redeemAction.shares) !== plan.sourceShares ||
+            decoded.redeemAction.forceRedeemCollateral !== false ||
+            decoded.receiver.toLowerCase() !== plan.receiver.toLowerCase()
+        ) {
+            throw new RedeemZapError("invalid-plan", "redeemAndSwap calldata does not match the plan.");
+        }
+        this.assertDecodedRedeemSwap(plan, decoded.swapAction);
+    }
+
+    private assertRedeemSwapAndDepositPlanBinding(plan: RedeemSwapAndDepositPlan): CToken {
+        if (plan.kind !== "curvance-redeem-swap-and-deposit-plan") {
+            throw new RedeemZapError("invalid-plan", "Invalid move-position plan kind.");
+        }
+        this.assertRedeemZapPlanBase(plan, redeemSwapAndDepositPlans.has(plan));
+        const destination = redeemSwapDestinations.get(plan);
+        if (
+            destination == null ||
+            destination.market.setup !== this.setup ||
+            plan.destinationMarket.toLowerCase() !== destination.market.address.toLowerCase() ||
+            plan.destinationCToken.toLowerCase() !== destination.address.toLowerCase() ||
+            plan.destinationAsset.toLowerCase() !== destination.asset.address.toLowerCase() ||
+            plan.outputToken.toLowerCase() !== destination.asset.address.toLowerCase() ||
+            plan.destinationAssetDecimals !== destination.asset.decimals ||
+            plan.collateralizeAccount.toLowerCase() !== plan.owner.toLowerCase() ||
+            plan.minimumDestinationShares <= 0n ||
+            plan.expectedDestinationShares < plan.minimumDestinationShares ||
+            (plan.collateralizeFor && plan.targetCollateral == null) ||
+            (!plan.collateralizeFor && plan.targetCollateral != null)
+        ) {
+            throw new RedeemZapError("invalid-plan", "Move plan destination fields are inconsistent.");
+        }
+        const zapper = this.getZapper("simple")!;
+        let decoded;
+        try {
+            decoded = zapper.contract.interface.decodeFunctionData(
+                "redeemSwapAndDeposit",
+                plan.calldata,
+            );
+        } catch (error) {
+            throw new RedeemZapError("invalid-plan", "Plan calldata is not redeemSwapAndDeposit.", error);
+        }
+        if (
+            decoded.cToken.toLowerCase() !== plan.destinationCToken.toLowerCase() ||
+            decoded.redeemAction.cToken.toLowerCase() !== plan.sourceCToken.toLowerCase() ||
+            BigInt(decoded.redeemAction.shares) !== plan.sourceShares ||
+            decoded.redeemAction.forceRedeemCollateral !== false ||
+            BigInt(decoded.expectedShares) !== plan.minimumDestinationShares ||
+            decoded.collateralizeFor !== plan.collateralizeFor ||
+            decoded.receiver.toLowerCase() !== plan.receiver.toLowerCase()
+        ) {
+            throw new RedeemZapError("invalid-plan", "redeemSwapAndDeposit calldata does not match the plan.");
+        }
+        this.assertDecodedRedeemSwap(plan, decoded.swapAction);
+        return destination;
+    }
+
+    private async preflightRedeemZapBase(plan: RedeemZapPlanBase) {
+        const now = await this.getRedeemZapChainTimestamp();
+        if (now + plan.routeMinSubmitWindowSeconds > plan.routeValidUntil) {
+            throw new RedeemZapError("stale-plan", "Exit swap route is expired; request a new quote.");
+        }
+        if (now + plan.minSubmitWindowSeconds > plan.validUntil) {
+            throw new RedeemZapError("stale-plan", "Exit capacity plan is expired; request a new quote.");
+        }
+        const [capacity] = await Promise.all([
+            this.fetchRedeemZapCapacity(),
+            this.assertRedeemZapHoldAvailable(plan.owner, now),
+        ]);
+        if (plan.sourceShares > capacity.executableShares) {
+            throw new RedeemZapCapacityError(plan.sourceShares, capacity);
+        }
+        const previewSourceAssets = await this.contract.convertToAssets(plan.sourceShares);
+        const freshExecution = await this.readRedeemZapExecutionAssets(
+            plan.owner,
+            plan.zapper,
+            plan.sourceShares,
+            previewSourceAssets,
+            false,
+        );
+        if (freshExecution.sourceAssets < plan.sourceAssets) {
+            throw new RedeemZapError(
+                "stale-plan",
+                `Fresh redemption output ${freshExecution.sourceAssets} is below the route input ${plan.sourceAssets}; re-quote.`,
+            );
+        }
+        return { to: plan.zapper };
+    }
+
+    private async preflightRedeemAndSwap(plan: RedeemAndSwapPlan) {
+        this.assertRedeemAndSwapPlanBinding(plan);
+        return this.preflightRedeemZapBase(plan);
+    }
+
+    private async preflightRedeemSwapAndDeposit(plan: RedeemSwapAndDepositPlan) {
+        const destination = this.assertRedeemSwapAndDepositPlanBinding(plan);
+        const [overrides, targetState] = await Promise.all([
+            this.preflightRedeemZapBase(plan),
+            this.readRedeemZapTargetDeposit(destination, plan.receiver),
+        ]);
+        if (plan.expectedOutput > targetState.deposit.maxDepositAssets) {
+            throw new RedeemZapError(
+                "target-unavailable",
+                "Destination deposit capacity fell below the expected plan output; re-quote.",
+            );
+        }
+        if (plan.collateralizeFor) {
+            await this.readRedeemZapTargetCollateral(
+                destination,
+                plan.expectedOutput,
+                targetState.collateralizationPaused,
+            );
+            if (!(await destination.contract.isDelegate(plan.collateralizeAccount, plan.zapper))) {
+                throw new RedeemZapError(
+                    "approval-required",
+                    `Approve Simple Zapper ${plan.zapper} to collateralize destination ${plan.destinationCToken}.`,
+                );
+            }
+        }
+        return { destination, overrides };
+    }
+
     /** @returns A list of tokens mapped to their respective zap options */
     async getDepositTokens(search: string | null = null) {
         const underlying = this.getAsset(true);
@@ -2777,14 +3969,19 @@ export class CToken extends Calldata<ICToken> {
     ): Promise<TransactionResponse> {
         const signer = this.requireSigner();
         const tx = await this.executeCallData(calldata, override);
+        let receipt: unknown;
         if (typeof tx.wait === "function") {
-            await tx.wait();
+            receipt = await tx.wait();
         }
         const signerAddress = signer.address as address;
         const refreshAccount = reloadAccount?.toLowerCase() === signerAddress.toLowerCase()
             ? reloadAccount
             : signerAddress;
-        await this.market.reloadUserData(refreshAccount);
+        try {
+            await this.market.reloadUserData(refreshAccount);
+        } catch (error) {
+            throw attachSettledTransactionContext(error, tx, receipt);
+        }
 
         return tx;
     }

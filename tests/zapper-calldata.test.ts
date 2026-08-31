@@ -4,6 +4,8 @@ import { CToken, LEVERAGE, NATIVE_ADDRESS, chain_config, toContractSwapSlippage 
 import { Zapper } from "../src/classes/Zapper";
 import type { address } from "../src/types";
 import Decimal from "decimal.js";
+import { Interface } from "ethers";
+import simple_zapper_abi from "../src/abis/SimpleZapper.json";
 
 const CTOKEN = "0x00000000000000000000000000000000000000c1" as address;
 const ZAPPER = "0x00000000000000000000000000000000000000b1" as address;
@@ -27,6 +29,9 @@ function createBufferedToken() {
     const calls: Array<{ assets: bigint; bufferBps: bigint }> = [];
     const token = Object.create(CToken.prototype) as CToken;
     (token as any).address = CTOKEN;
+    (token as any).cache = {
+        asset: { address: TOKEN, decimals: 18n, symbol: "TOKEN" },
+    };
     (token as any).isVault = false;
     (token as any).isNativeVault = false;
     (token as any).convertToShares = async (
@@ -550,4 +555,70 @@ test("object zap slippage floors fractional BPS through the shared converter", a
 
     assert.equal(result.calldata, "0xencoded");
     assert.deepEqual(calls, [{ slippage: 1n }]);
+});
+
+test("redeemAndSwap encodes the bound redeem tuple and no-op ERC20 swap", async () => {
+    const { token } = createBufferedToken();
+    const { zapper } = createZapper();
+    const iface = new Interface(simple_zapper_abi);
+    (zapper as any).getCallData = (method: string, args: unknown[]) =>
+        iface.encodeFunctionData(method, args);
+    (token as any).getAsset = () => TOKEN;
+
+    const quote = await zapper.quoteRedeemSwap(token, TOKEN, 10_000n, 50n);
+    const calldata = zapper.getRedeemAndSwapCalldataFromQuote(
+        token,
+        quote,
+        9_000n,
+        RECEIVER,
+    );
+    const decoded = iface.decodeFunctionData("redeemAndSwap", calldata);
+
+    assert.equal(decoded.redeemAction.cToken.toLowerCase(), CTOKEN.toLowerCase());
+    assert.equal(decoded.redeemAction.shares, 9_000n);
+    assert.equal(decoded.redeemAction.forceRedeemCollateral, false);
+    assert.equal(decoded.swapAction.inputToken.toLowerCase(), TOKEN.toLowerCase());
+    assert.equal(decoded.swapAction.inputAmount, 10_000n);
+    assert.equal(decoded.swapAction.outputToken.toLowerCase(), TOKEN.toLowerCase());
+    assert.equal(decoded.swapAction.target, "0x0000000000000000000000000000000000000000");
+    assert.equal(decoded.swapAction.slippage, 0n);
+    assert.equal(decoded.swapAction.call, "0x");
+    assert.equal(decoded.receiver.toLowerCase(), RECEIVER.toLowerCase());
+});
+
+test("redeemSwapAndDeposit encodes destination, minimum shares, and collateralization", async () => {
+    const { token: source } = createBufferedToken();
+    const { token: destination } = createBufferedToken();
+    const destinationAddress = "0x00000000000000000000000000000000000000c2" as address;
+    (source as any).getAsset = () => TOKEN;
+    (destination as any).address = destinationAddress;
+    (destination as any).getAsset = () => TOKEN;
+    const { zapper } = createZapper();
+    const iface = new Interface(simple_zapper_abi);
+    (zapper as any).getCallData = (method: string, args: unknown[]) =>
+        iface.encodeFunctionData(method, args);
+
+    const quote = await zapper.quoteRedeemSwap(source, TOKEN, 10_000n, 50n);
+    const calldata = zapper.getRedeemSwapAndDepositCalldataFromQuote(
+        source,
+        destination,
+        quote,
+        9_000n,
+        8_500n,
+        true,
+        RECEIVER,
+    );
+    const decoded = iface.decodeFunctionData(
+        "redeemSwapAndDeposit",
+        calldata,
+    );
+
+    assert.equal(decoded.cToken.toLowerCase(), destinationAddress.toLowerCase());
+    assert.equal(decoded.redeemAction.cToken.toLowerCase(), CTOKEN.toLowerCase());
+    assert.equal(decoded.redeemAction.shares, 9_000n);
+    assert.equal(decoded.redeemAction.forceRedeemCollateral, false);
+    assert.equal(decoded.swapAction.inputAmount, 10_000n);
+    assert.equal(decoded.expectedShares, 8_500n);
+    assert.equal(decoded.collateralizeFor, true);
+    assert.equal(decoded.receiver.toLowerCase(), RECEIVER.toLowerCase());
 });

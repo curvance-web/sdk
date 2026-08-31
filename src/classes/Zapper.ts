@@ -9,7 +9,7 @@ import { type SetupConfigSnapshot } from "../setup";
 import type IDexAgg from "./DexAggregators/IDexAgg";
 import type { DexQuoteOptions, PreparedQuote, Quote } from "./DexAggregators/IDexAgg";
 import { validateSlippageBps } from "../validation";
-import { assertZapSwapAllowed } from "../zapPolicy";
+import { assertZapSwapAllowed, isZapTokenExcluded } from "../zapPolicy";
 
 export interface Swap {
     inputToken: address,
@@ -44,6 +44,52 @@ export interface IZapper {
         repayAssets: bigint,
         receiver: address
     ): Promise<TransactionResponse>
+    redeemAndSwap(
+        redeemAction: RedeemAction,
+        swapAction: Swap,
+        receiver: address
+    ): Promise<TransactionResponse>
+    redeemSwapAndDeposit(
+        cToken: address,
+        redeemAction: RedeemAction,
+        swapAction: Swap,
+        expectedShares: bigint,
+        collateralizeFor: boolean,
+        receiver: address
+    ): Promise<TransactionResponse>
+}
+
+export interface RedeemAction {
+    cToken: address;
+    shares: bigint;
+    forceRedeemCollateral: boolean;
+}
+
+/** A fully-built exact-input ERC-20 swap for a SimpleZapper redemption. */
+export interface RedeemSwapQuote {
+    inputToken: address;
+    outputToken: address;
+    inputAmount: bigint;
+    minimumOutput: bigint;
+    expectedOutput: bigint;
+    slippageBps: bigint;
+    feeBps: bigint;
+    feeReceiver: address | undefined;
+    action: Swap;
+    quote: Quote;
+}
+
+/** GET-only redemption quote whose transaction calldata is built once on demand. */
+export interface PreparedRedeemSwapQuote {
+    inputToken: address;
+    outputToken: address;
+    inputAmount: bigint;
+    minimumOutput: bigint;
+    expectedOutput: bigint;
+    slippageBps: bigint;
+    feeBps: bigint;
+    feeReceiver: address | undefined;
+    build(options?: DexQuoteOptions): Promise<RedeemSwapQuote>;
 }
 
 /** A fully-built exact-input swap quote suitable for SimpleZapper.swapAndRepay. */
@@ -399,6 +445,248 @@ export class Zapper extends Calldata<IZapper> {
             ? { value: amount, to: this.address }
             : { to: this.address };
         return ctoken.oracleRoute(calldata, overrides, receiver);
+    }
+
+    /**
+     * Prepares an exact-input ERC-20 swap for a redemption. Native output is
+     * intentionally unsupported: SimpleZapper wraps native transfers, while
+     * exit-zap callers need an unambiguous ERC-20 result.
+     */
+    async prepareRedeemSwap(
+        ctoken: CToken,
+        outputToken: address,
+        amount: bigint,
+        slippage: bigint,
+        options: DexQuoteOptions = {},
+    ): Promise<PreparedRedeemSwapQuote> {
+        this.assertCTokenBelongsToSetup(ctoken);
+        validateSlippageBps(slippage, "redemption swap quote");
+        if (amount <= 0n) {
+            throw new Error(`Redemption swap input amount must be positive, got ${amount}`);
+        }
+        if (
+            outputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase() ||
+            outputToken.toLowerCase() === EMPTY_ADDRESS.toLowerCase()
+        ) {
+            throw new Error("Redemption swap output must be a nonzero ERC-20 address.");
+        }
+        if (isZapTokenExcluded(this.setup.assets, ctoken.asset)) {
+            throw new Error(
+                `Redemption swap does not support excluded source asset ${ctoken.asset.symbol}.`,
+            );
+        }
+
+        const inputToken = ctoken.getAsset(false);
+        assertZapSwapAllowed(this.setup.assets, inputToken, outputToken, "redemption swap");
+
+        if (inputToken.toLowerCase() === outputToken.toLowerCase()) {
+            const action: Swap = {
+                inputToken,
+                inputAmount: amount,
+                outputToken,
+                target: EMPTY_ADDRESS,
+                slippage: 0n,
+                call: EMPTY_BYTES,
+            };
+            const quote: Quote = {
+                to: EMPTY_ADDRESS,
+                calldata: EMPTY_BYTES,
+                min_out: amount,
+                out: amount,
+            };
+            return {
+                inputToken,
+                outputToken,
+                inputAmount: amount,
+                minimumOutput: amount,
+                expectedOutput: amount,
+                slippageBps: slippage,
+                feeBps: 0n,
+                feeReceiver: undefined,
+                build: async () => ({
+                    inputToken,
+                    outputToken,
+                    inputAmount: amount,
+                    minimumOutput: amount,
+                    expectedOutput: amount,
+                    slippageBps: slippage,
+                    feeBps: 0n,
+                    feeReceiver: undefined,
+                    action,
+                    quote,
+                }),
+            };
+        }
+
+        const feeBps = this.setup.feePolicy.getFeeBps({
+            operation: "zap",
+            inputToken,
+            outputToken,
+            inputAmount: amount,
+            currentLeverage: null,
+            targetLeverage: null,
+        });
+        const feeReceiver = feeBps > 0n ? this.setup.feePolicy.feeReceiver : undefined;
+        const quoteArgs = [
+            this.address,
+            inputToken,
+            outputToken,
+            amount,
+            slippage,
+            feeBps,
+            feeReceiver,
+        ] as const;
+        let preparedQuote: PreparedQuote;
+        if (this.dexAgg.prepareQuote != undefined) {
+            preparedQuote = await this.dexAgg.prepareQuote(...quoteArgs, options);
+        } else {
+            const quote = await this.dexAgg.quote(...quoteArgs);
+            preparedQuote = {
+                min_out: quote.min_out,
+                out: quote.out,
+                build: async () => quote,
+            };
+        }
+        this.assertRedeemSwapOutput(preparedQuote.min_out, preparedQuote.out);
+
+        return {
+            inputToken,
+            outputToken,
+            inputAmount: amount,
+            minimumOutput: preparedQuote.min_out,
+            expectedOutput: preparedQuote.out,
+            slippageBps: slippage,
+            feeBps,
+            feeReceiver,
+            build: async (buildOptions: DexQuoteOptions = {}) => {
+                const signal = buildOptions.signal ?? options.signal;
+                const quote = await preparedQuote.build(
+                    signal == undefined ? buildOptions : { ...buildOptions, signal },
+                );
+                this.assertRedeemSwapOutput(quote.min_out, quote.out);
+                return {
+                    inputToken,
+                    outputToken,
+                    inputAmount: amount,
+                    minimumOutput: quote.min_out,
+                    expectedOutput: quote.out,
+                    slippageBps: slippage,
+                    feeBps,
+                    feeReceiver,
+                    action: {
+                        inputToken,
+                        inputAmount: amount,
+                        outputToken,
+                        target: quote.to,
+                        slippage: toContractSwapSlippage(slippage, feeBps),
+                        call: quote.calldata,
+                    },
+                    quote,
+                };
+            },
+        };
+    }
+
+    async quoteRedeemSwap(
+        ctoken: CToken,
+        outputToken: address,
+        amount: bigint,
+        slippage: bigint,
+        options: DexQuoteOptions = {},
+    ): Promise<RedeemSwapQuote> {
+        return (await this.prepareRedeemSwap(
+            ctoken,
+            outputToken,
+            amount,
+            slippage,
+            options,
+        )).build(options);
+    }
+
+    getRedeemAndSwapCalldataFromQuote(
+        ctoken: CToken,
+        quotedSwap: RedeemSwapQuote,
+        shares: bigint,
+        receiver: address = this.signer.address as address,
+    ): bytes {
+        this.assertCTokenBelongsToSetup(ctoken);
+        this.assertRedeemSwapQuoteBinding(ctoken, quotedSwap);
+        if (shares <= 0n) {
+            throw new Error(`Redemption shares must be positive, got ${shares}`);
+        }
+        return this.getCallData("redeemAndSwap", [{
+            cToken: ctoken.address,
+            shares,
+            forceRedeemCollateral: false,
+        }, quotedSwap.action, receiver]);
+    }
+
+    getRedeemSwapAndDepositCalldataFromQuote(
+        source: CToken,
+        destination: CToken,
+        quotedSwap: RedeemSwapQuote,
+        shares: bigint,
+        expectedShares: bigint,
+        collateralizeFor: boolean,
+        receiver: address = this.signer.address as address,
+    ): bytes {
+        this.assertCTokenBelongsToSetup(source);
+        this.assertCTokenBelongsToSetup(destination);
+        this.assertRedeemSwapQuoteBinding(source, quotedSwap);
+        if (source.address.toLowerCase() === destination.address.toLowerCase()) {
+            throw new Error("Move destination cToken must differ from the source cToken.");
+        }
+        if (quotedSwap.outputToken.toLowerCase() !== destination.getAsset(false).toLowerCase()) {
+            throw new Error(
+                `Move quote output ${quotedSwap.outputToken} does not match destination asset ${destination.getAsset(false)}.`,
+            );
+        }
+        if (shares <= 0n || expectedShares <= 0n) {
+            throw new Error("Move redemption and expected destination shares must be positive.");
+        }
+        return this.getCallData("redeemSwapAndDeposit", [
+            destination.address,
+            {
+                cToken: source.address,
+                shares,
+                forceRedeemCollateral: false,
+            },
+            quotedSwap.action,
+            expectedShares,
+            collateralizeFor,
+            receiver,
+        ]);
+    }
+
+    private assertRedeemSwapOutput(minimumOutput: bigint, expectedOutput: bigint) {
+        if (minimumOutput <= 0n) {
+            throw new Error("Redemption swap quote returned zero guaranteed output.");
+        }
+        if (expectedOutput < minimumOutput) {
+            throw new Error(
+                `Redemption swap expected output ${expectedOutput} is below minimum output ${minimumOutput}.`,
+            );
+        }
+    }
+
+    private assertRedeemSwapQuoteBinding(ctoken: CToken, quote: RedeemSwapQuote) {
+        const inputToken = ctoken.getAsset(false);
+        if (
+            quote.inputToken.toLowerCase() !== inputToken.toLowerCase() ||
+            quote.action.inputToken.toLowerCase() !== inputToken.toLowerCase() ||
+            quote.action.inputAmount !== quote.inputAmount ||
+            quote.action.outputToken.toLowerCase() !== quote.outputToken.toLowerCase()
+        ) {
+            throw new Error("Redemption swap action does not match its declared tokens and amount.");
+        }
+        if (
+            quote.outputToken.toLowerCase() === NATIVE_ADDRESS.toLowerCase() ||
+            quote.outputToken.toLowerCase() === EMPTY_ADDRESS.toLowerCase()
+        ) {
+            throw new Error("Redemption swap output must be a nonzero ERC-20 address.");
+        }
+        this.assertRedeemSwapOutput(quote.minimumOutput, quote.expectedOutput);
+        assertZapSwapAllowed(this.setup.assets, inputToken, quote.outputToken, "redemption swap");
     }
 
     async getSimpleZapCalldata(ctoken: CToken, inputToken: address, outputToken: address, amount: bigint, collateralize: boolean, slippage: bigint, receiver: address = this.signer.address as address) {

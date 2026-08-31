@@ -97,6 +97,7 @@ Runs:
 - `tests/leverage.test.ts`
 - `tests/zap.test.ts`
 - `tests/zap-repay-fork.ts`
+- `tests/zap-exits-fork.ts`
 - `tests/dual-fork-switch.test.ts`
 
 What it proves:
@@ -108,6 +109,9 @@ What it proves:
 - SimpleZapper exact-input and projected repay-all plans execute against the
   deployed Monad zapper, including exact-input ERC20 swaps, same-token refunds,
   and native-to-debt Kyber routing
+- SimpleZapper MAX exits clear every executable source share, pay either the
+  wallet or destination collateral, move configured fees, and leave no input
+  or output residue on the zapper
 - lending optimizer deployment/reader/rebalance behavior still works when its checked-in artifacts match the go-forward contract shape
 - SDK-level chain switching works across simultaneous Monad and Arbitrum Sepolia forks in one process
 

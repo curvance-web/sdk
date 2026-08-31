@@ -43,9 +43,11 @@ export const mainnet: ChainConfig = {
         'wsrUSD',
         'sAUSD',
         'earnAUSD',
-        'hyAUSD'
+        'hyAUSD',
+        'aguaUSDCgc'
     ],
     excluded_zap_addresses: [
         "0xaD663aC84052b52BE4ed1b27BA416505e84a00Bf" as address,
+        "0x2ABc42250154752273a4560e875c858623F83ecC" as address,
     ],
 };

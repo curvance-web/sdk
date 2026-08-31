@@ -302,6 +302,35 @@ describe('CToken simple leverage execution', () => {
         }]);
     });
 
+    test('oracleRoute preserves settled transaction context when the refresh fails', async () => {
+        const token = Object.create(CToken.prototype) as CToken;
+        const refreshError = new Error('refresh RPC unavailable');
+        const receipt = { hash: '0xhash', blockNumber: 123, status: 1 };
+        const transaction = {
+            hash: '0xhash',
+            wait: async () => receipt,
+        };
+
+        (token as any).address = COLLATERAL;
+        (token as any).market = {
+            reloadUserData: async () => {
+                throw refreshError;
+            },
+        };
+        (token as any).requireSigner = () => ({ address: ACCOUNT });
+        (token as any).executeCallData = async () => transaction;
+
+        await assert.rejects(
+            token.oracleRoute('0xaction' as any),
+            (error: unknown) => {
+                assert.equal(error, refreshError);
+                assert.equal((error as any).transaction, transaction);
+                assert.equal((error as any).receipt, receipt);
+                return true;
+            },
+        );
+    });
+
     test('_getLeverageSnapshot does not partially mutate market user cache', async () => {
         const token = Object.create(CToken.prototype) as CToken;
         const borrow = Object.create(BorrowableCToken.prototype) as BorrowableCToken;

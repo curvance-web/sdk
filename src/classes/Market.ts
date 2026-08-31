@@ -66,6 +66,13 @@ export interface IMarket {
     accountAssets(account: address): Promise<bigint>;
     MIN_HOLD_PERIOD(): Promise<bigint>;
     statusOf(account: address): Promise<StatusOf>;
+    redeemPaused(): Promise<bigint>;
+    actionsPaused(cToken: address): Promise<[
+        mintPaused: boolean,
+        collateralizationPaused: boolean,
+        borrowPaused: boolean,
+    ]>;
+    collateralCaps(cToken: address): Promise<bigint>;
 }
 
 type NativeYield = Awaited<ReturnType<typeof Api.fetchNativeYields>>[number];
