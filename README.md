@@ -99,6 +99,25 @@ that context even if another chain boots later.
 - Missing zapper or position-manager delegate approval also throws before submit.
 - There is no setup-time approval mode switch. Use `approveUnderlying`, `approveZapAsset`, and `approvePlugin` explicitly when the caller needs to satisfy approvals.
 
+### Redemption swap plans
+
+`quoteRedeemAndSwap` and `quoteRedeemSwapAndDeposit` return immutable,
+SDK-instance-bound plans. Keep the returned object intact (for example, disable
+React Query structural sharing for these plans). Satisfy the plan's source and,
+when required, destination delegation approvals, then request a fresh plan after
+the approvals finish.
+
+`redeemAndSwap` and `redeemSwapAndDeposit` check fresh capacity, permissions,
+route validity, and simulate the exact calldata before submitting. They check
+the plan deadline again after simulation. An app does not need to call the
+standalone simulation method immediately before these execution methods.
+
+Destination share previews simulate `accrueIfNeeded` and `convertToShares`
+together through the destination cToken's `multicall`. This accounts for pending
+interest without sending an accrual transaction. A failed preview rejects the
+plan instead of falling back to stored, pre-accrual accounting. The share buffer,
+minimum output, and destination deposit/collateral checks still apply.
+
 ### Explore markets
 
 ```ts
