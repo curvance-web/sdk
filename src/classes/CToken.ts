@@ -1818,6 +1818,7 @@ export class CToken extends Calldata<ICToken> {
                 `Redemption swap simulation failed${simulation.error ? `: ${simulation.error}` : "."}`,
             );
         }
+        await this.assertRedeemZapPlanFresh(plan);
         options.beforeBroadcast?.();
         return this.oracleRoute(plan.calldata, overrides, plan.receiver);
     }
@@ -1909,6 +1910,7 @@ export class CToken extends Calldata<ICToken> {
                 `Move position simulation failed${simulation.error ? `: ${simulation.error}` : "."}`,
             );
         }
+        await this.assertRedeemZapPlanFresh(plan);
         options.beforeBroadcast?.();
         const tx = await this.oracleRoute(plan.calldata, overrides, plan.receiver);
         if (destination.market.address.toLowerCase() !== this.market.address.toLowerCase()) {
@@ -2365,15 +2367,52 @@ export class CToken extends Calldata<ICToken> {
         };
     }
 
+    /**
+     * Deposits accrue yield before converting assets to shares. Plain view
+     * conversions can overstate the shares minted after that accrual. Run the
+     * same accrual and conversions in one eth_call to the cToken's multicall;
+     * no transaction is sent and no accrued state is persisted.
+     */
+    private async readRedeemZapTargetShares(
+        destination: CToken,
+        receiver: address,
+        assets: readonly bigint[],
+    ): Promise<bigint[]> {
+        const abi = destination.contract.interface;
+        const calls = [
+            abi.encodeFunctionData("accrueIfNeeded"),
+            ...assets.map((amount) => abi.encodeFunctionData("convertToShares", [amount])),
+        ].map((data) => ({ target: destination.address, isPriceUpdate: false, data }));
+        try {
+            const result = await destination.provider.call({
+                to: destination.address,
+                from: receiver,
+                data: abi.encodeFunctionData("multicall", [calls]),
+            });
+            const [results] = abi.decodeFunctionResult("multicall", result);
+            if (results.length !== calls.length || results[0] !== "0x") {
+                throw new Error("Invalid destination accrual preview result.");
+            }
+            return assets.map((_, index) => BigInt(
+                abi.decodeFunctionResult("convertToShares", results[index + 1])[0],
+            ));
+        } catch (error) {
+            throw new RedeemZapError(
+                "target-unavailable",
+                `Unable to preview destination ${destination.address} shares after interest accrual.`,
+                error,
+            );
+        }
+    }
+
     private async readRedeemZapTargetCollateral(
         destination: CToken,
-        expectedOutput: bigint,
+        expectedShares: bigint,
         collateralizationPaused: boolean,
     ): Promise<RedeemZapTargetCollateralSnapshot> {
-        const [collateralCapShares, collateralPostedShares, expectedShares] = await Promise.all([
+        const [collateralCapShares, collateralPostedShares] = await Promise.all([
             destination.market.contract.collateralCaps(destination.address),
             destination.contract.marketCollateralPosted(),
-            destination.contract.convertToShares(expectedOutput),
         ]);
         const remainingCollateralShares = collateralCapShares > collateralPostedShares
             ? collateralCapShares - collateralPostedShares
@@ -2435,23 +2474,26 @@ export class CToken extends Calldata<ICToken> {
                 `Destination accepts at most ${targetState.deposit.maxDepositAssets} assets, below the quoted output ${quote.expectedOutput}.`,
             );
         }
-        const [minimumDestinationShares, expectedDestinationShares, targetCollateral] = await Promise.all([
-            destination.convertToShares(quote.minimumOutput),
-            destination.convertToShares(quote.expectedOutput, 0n),
-            collateralizeFor
-                ? this.readRedeemZapTargetCollateral(
-                    destination,
-                    quote.expectedOutput,
-                    targetState.collateralizationPaused,
-                )
-                : Promise.resolve(null),
-        ]);
+        const [minimumShares, expectedShares] = await this.readRedeemZapTargetShares(
+            destination,
+            context.receiver,
+            [quote.minimumOutput, quote.expectedOutput],
+        );
+        const expectedDestinationShares = expectedShares!;
+        const minimumDestinationShares = minimumShares! * (BPS - LEVERAGE.SHARES_BUFFER_BPS) / BPS;
         if (minimumDestinationShares <= 0n || expectedDestinationShares <= 0n) {
             throw new RedeemZapError(
                 "invalid-amount",
                 "Move output is below the destination's minimum share unit.",
             );
         }
+        const targetCollateral = collateralizeFor
+            ? await this.readRedeemZapTargetCollateral(
+                destination,
+                expectedDestinationShares,
+                targetState.collateralizationPaused,
+            )
+            : null;
         const calldata = context.zapper.getRedeemSwapAndDepositCalldataFromQuote(
             this,
             destination,
@@ -2637,7 +2679,7 @@ export class CToken extends Calldata<ICToken> {
         return destination;
     }
 
-    private async preflightRedeemZapBase(plan: RedeemZapPlanBase) {
+    private async assertRedeemZapPlanFresh(plan: RedeemZapPlanBase): Promise<bigint> {
         const now = await this.getRedeemZapChainTimestamp();
         if (now + plan.routeMinSubmitWindowSeconds > plan.routeValidUntil) {
             throw new RedeemZapError("stale-plan", "Exit swap route is expired; request a new quote.");
@@ -2645,6 +2687,11 @@ export class CToken extends Calldata<ICToken> {
         if (now + plan.minSubmitWindowSeconds > plan.validUntil) {
             throw new RedeemZapError("stale-plan", "Exit capacity plan is expired; request a new quote.");
         }
+        return now;
+    }
+
+    private async preflightRedeemZapBase(plan: RedeemZapPlanBase) {
+        const now = await this.assertRedeemZapPlanFresh(plan);
         const [capacity] = await Promise.all([
             this.fetchRedeemZapCapacity(),
             this.assertRedeemZapHoldAvailable(plan.owner, now),
@@ -2687,9 +2734,14 @@ export class CToken extends Calldata<ICToken> {
             );
         }
         if (plan.collateralizeFor) {
+            const [expectedShares] = await this.readRedeemZapTargetShares(
+                destination,
+                plan.receiver,
+                [plan.expectedOutput],
+            );
             await this.readRedeemZapTargetCollateral(
                 destination,
-                plan.expectedOutput,
+                expectedShares!,
                 targetState.collateralizationPaused,
             );
             if (!(await destination.contract.isDelegate(plan.collateralizeAccount, plan.zapper))) {

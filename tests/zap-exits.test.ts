@@ -47,12 +47,16 @@ function createHarness(options: {
     convertToShares?: (assets: bigint) => bigint;
     convertToAssets?: (shares: bigint) => bigint;
     redeemForAssets?: (shares: bigint) => bigint;
+    targetPostAccrualShares?: (assets: bigint) => bigint;
+    targetPreviewError?: Error;
+    targetPreviewResult?: string;
 } = {}) {
     let timestamp = 1_000n;
     let sourceApproved = options.sourceApproved ?? true;
     let targetApproved = options.targetApproved ?? true;
     let sourceBalance = options.balance ?? 1_000n;
     let sourceMaxRedemption = options.maxRedemption ?? 800n;
+    let targetShares = options.targetPostAccrualShares ?? ((assets: bigint) => assets);
     const sourceAsset = options.sourceAsset ?? SOURCE_ASSET;
     const destinationAsset = options.destinationAsset ?? OUTPUT_ASSET;
     const calls = {
@@ -70,6 +74,7 @@ function createHarness(options: {
         destinationReloads: 0,
         collateralReads: 0,
         redemptionPreviews: 0,
+        targetSharePreviews: 0,
     };
     const dexAgg = {
         dao: FEE_RECEIVER,
@@ -122,11 +127,32 @@ function createHarness(options: {
     const sourceInterface = new Interface([
         "function redeemFor(uint256 shares,address receiver,address owner) returns (uint256 assets)",
     ]);
+    const targetInterface = new Interface([
+        "function accrueIfNeeded()",
+        "function convertToShares(uint256 assets) view returns (uint256 shares)",
+        "function multicall((address target,bool isPriceUpdate,bytes data)[] calls) returns (bytes[] results)",
+    ]);
     const provider = {
         async getBlock() {
             return { timestamp };
         },
-        async call(request: { data: string }) {
+        async call(request: { to: string; from: string; data: string }) {
+            if (request.to.toLowerCase() === DESTINATION_CTOKEN.toLowerCase()) {
+                calls.targetSharePreviews += 1;
+                assert.equal(request.from.toLowerCase(), OWNER.toLowerCase());
+                if (options.targetPreviewError) throw options.targetPreviewError;
+                if (options.targetPreviewResult !== undefined) return options.targetPreviewResult;
+                const [actions] = targetInterface.decodeFunctionData("multicall", request.data);
+                assert.equal(actions[0].data, targetInterface.encodeFunctionData("accrueIfNeeded"));
+                const results = actions.map((action: any, index: number) => {
+                    assert.equal(action.target.toLowerCase(), DESTINATION_CTOKEN.toLowerCase());
+                    assert.equal(action.isPriceUpdate, false);
+                    if (index === 0) return "0x";
+                    const [assets] = targetInterface.decodeFunctionData("convertToShares", action.data);
+                    return targetInterface.encodeFunctionResult("convertToShares", [targetShares(assets)]);
+                });
+                return targetInterface.encodeFunctionResult("multicall", [results]);
+            }
             calls.redemptionPreviews += 1;
             const decoded = sourceInterface.decodeFunctionData("redeemFor", request.data);
             const shares = BigInt(decoded.shares);
@@ -242,6 +268,7 @@ function createHarness(options: {
         },
     };
     (destination as any).contract = {
+        interface: targetInterface,
         async maxDeposit() {
             return options.maxDeposit ?? 1_000_000n;
         },
@@ -281,10 +308,82 @@ function createHarness(options: {
         setSourceMaxRedemption(value: bigint) {
             sourceMaxRedemption = value;
         },
+        setTargetPostAccrualShares(value: (assets: bigint) => bigint) {
+            targetShares = value;
+        },
     };
 }
 
 describe("typed SimpleZapper exit plans", () => {
+    for (const move of [false, true]) {
+        test(`rejects routes that expire during the final simulation (move=${move})`, async () => {
+            const harness = createHarness();
+            (harness.source as any).simulateOracleRoute = async () => {
+                harness.calls.simulations += 1;
+                harness.setTimestamp(1_009n);
+                return { success: true };
+            };
+            const run = move
+                ? harness.source.quoteRedeemSwapAndDeposit(harness.destination, new Decimal(500), new Decimal("0.005"), false)
+                    .then((plan) => harness.source.redeemSwapAndDeposit(plan))
+                : harness.source.quoteRedeemAndSwap(OUTPUT_ASSET, new Decimal(500), new Decimal("0.005"))
+                    .then((plan) => harness.source.redeemAndSwap(plan));
+            await assert.rejects(run, (error: any) => error instanceof RedeemZapError && error.code === "stale-plan");
+            assert.equal(harness.calls.simulations, 1);
+            assert.equal(harness.calls.executions, 0);
+        });
+    }
+
+    for (const redeemMax of [false, true]) {
+        for (const collateralize of [false, true]) {
+            test(`uses post-accrual destination shares for same-asset moves (max=${redeemMax}, collateral=${collateralize})`, async () => {
+                const harness = createHarness({
+                    destinationAsset: SOURCE_ASSET,
+                    targetPostAccrualShares: (assets) => assets * 9n / 10n,
+                });
+                const plan = await harness.source.quoteRedeemSwapAndDeposit(
+                    harness.destination, new Decimal(500), new Decimal("0.005"), collateralize, { redeemMax },
+                );
+                const expectedShares = plan.expectedOutput * 9n / 10n;
+                assert.equal(plan.expectedDestinationShares, expectedShares);
+                assert.equal(plan.minimumDestinationShares, expectedShares * 9_998n / 10_000n);
+                assert.equal(harness.calls.targetSharePreviews, 1);
+                if (collateralize) {
+                    assert.equal(plan.targetCollateral!.requiredCollateralShares,
+                        (expectedShares * 10_002n + 9_999n) / 10_000n);
+                }
+                const decoded = harness.source.getZapper("simple")!.contract.interface
+                    .decodeFunctionData("redeemSwapAndDeposit", plan.calldata);
+                assert.equal(decoded.expectedShares, plan.minimumDestinationShares);
+            });
+        }
+    }
+
+    test("fails closed if post-accrual destination preview fails or is malformed", async () => {
+        for (const options of [
+            { targetPreviewError: new Error("accrual reverted") },
+            { targetPreviewResult: "0x" },
+        ]) {
+            const harness = createHarness(options);
+            await assert.rejects(() => harness.source.quoteRedeemSwapAndDeposit(
+                harness.destination, new Decimal(500), new Decimal("0.005"), false,
+            ), (error: any) => error instanceof RedeemZapError && error.code === "target-unavailable");
+            assert.equal(harness.calls.executions, 0);
+        }
+    });
+
+    test("rechecks destination collateral using the latest accrued conversion before execution", async () => {
+        const harness = createHarness({ collateralCap: 600n, targetPostAccrualShares: (assets) => assets * 9n / 10n });
+        const plan = await harness.source.quoteRedeemSwapAndDeposit(
+            harness.destination, new Decimal(500), new Decimal("0.005"), true,
+        );
+        harness.setTargetPostAccrualShares((assets) => assets * 2n);
+        await assert.rejects(() => harness.source.redeemSwapAndDeposit(plan),
+            (error: any) => error instanceof RedeemZapError && error.code === "target-collateral-unavailable");
+        assert.equal(harness.calls.simulations, 0);
+        assert.equal(harness.calls.executions, 0);
+    });
+
     test("uses fresh balance, maxRedemption, and borrowable liquidity without clipping", async () => {
         const { source, calls } = createHarness();
         const plan = await source.quoteRedeemAndSwap(

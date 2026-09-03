@@ -44,10 +44,21 @@ export const mainnet: ChainConfig = {
         'sAUSD',
         'earnAUSD',
         'hyAUSD',
-        'aguaUSDCgc'
+        'aguaUSDCgc',
+        // Illiquid secondary-market routes; direct token actions remain available.
+        'muBOND',
+        'loAZND',
+        'PT-AUSD-8OCT2026',
+        'PT-earnAUSD-8OCT2026',
+        'aprMON'
     ],
     excluded_zap_addresses: [
         "0xaD663aC84052b52BE4ed1b27BA416505e84a00Bf" as address,
         "0x2ABc42250154752273a4560e875c858623F83ecC" as address,
+        "0x336D414754967C6682B5A665C7DAF6F1409E63e8" as address, // muBOND
+        "0x9c82eB49B51F7Dc61e22Ff347931CA32aDc6cd90" as address, // loAZND
+        "0x9FC74f8Ed616B5BaF52a170caa97d6d3898602d1" as address, // PT-AUSD-8OCT2026
+        "0xDaf216939826AcABA0C2312F7E30A890213845CD" as address, // PT-earnAUSD-8OCT2026
+        "0x0c65A0BC65a5D819235B71F554D210D3F80E0852" as address, // aprMON
     ],
 };
