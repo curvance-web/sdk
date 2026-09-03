@@ -195,6 +195,55 @@ test("SimpleZapper rejects hyAUSD as either side of a swap before DEX quoting", 
     assert.deepEqual(quoteCalls, []);
 });
 
+for (const excludedAddress of chain_config["monad-mainnet"].excluded_zap_addresses ?? []) {
+    test(`Monad policy rejects swap inputs and outputs before DEX calls: ${excludedAddress}`, async () => {
+        const quoteCalls: unknown[][] = [];
+        const unexpectedQuote = async (...args: unknown[]) => {
+            quoteCalls.push(args);
+            throw new Error("DEX quote should not be reached");
+        };
+        const { token } = createBufferedToken();
+        const { zapper } = createZapper(0n, {
+            quote: unexpectedQuote,
+            prepareQuote: unexpectedQuote,
+        });
+        (zapper as any).setup.assets = {
+            ...createSetupAssets(),
+            excluded_zap_symbols: chain_config["monad-mainnet"].excluded_zap_symbols,
+            excluded_zap_addresses: chain_config["monad-mainnet"].excluded_zap_addresses,
+        };
+
+        await assert.rejects(
+            () => zapper.getSimpleZapCalldata(token, excludedAddress, TOKEN, 10_000n, false, 50n, RECEIVER),
+            /excluded zap input token/i,
+        );
+        await assert.rejects(
+            () => zapper.getSimpleZapCalldata(token, TOKEN, excludedAddress, 10_000n, false, 50n, RECEIVER),
+            /excluded zap output token/i,
+        );
+        await assert.rejects(
+            () => zapper.prepareSwapAndRepay(token, excludedAddress, 10_000n, 50n),
+            /excluded zap input token/i,
+        );
+        await assert.rejects(
+            () => zapper.prepareRedeemSwap(token, excludedAddress, 10_000n, 50n),
+            /excluded zap output token/i,
+        );
+
+        // Keep the unrelated TOKEN symbol to prove address enforcement.
+        token.cache.asset.address = excludedAddress;
+        await assert.rejects(
+            () => zapper.prepareSwapAndRepay(token, TOKEN, 10_000n, 50n),
+            /excluded zap output token/i,
+        );
+        await assert.rejects(
+            () => zapper.prepareRedeemSwap(token, TOKEN, 10_000n, 50n),
+            /excluded source asset/i,
+        );
+        assert.deepEqual(quoteCalls, []);
+    });
+}
+
 test("CToken.getZapper binds simple zap quotes to the market DEX aggregator", async () => {
     const { token, calls: shareCalls } = createBufferedToken();
     const originalDexAgg = chain_config["monad-mainnet"].dexAgg;

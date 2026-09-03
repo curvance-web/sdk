@@ -418,11 +418,19 @@ test("Monad mainnet manifest uses the current oracle and optimizer rollout", () 
     });
     assert.ok(chain_config["monad-mainnet"].excluded_zap_symbols.includes("hyAUSD"));
     assert.ok(chain_config["monad-mainnet"].excluded_zap_symbols.includes("aguaUSDCgc"));
+    for (const symbol of ["muBOND", "loAZND", "PT-AUSD-8OCT2026", "PT-earnAUSD-8OCT2026", "aprMON"]) {
+        assert.ok(chain_config["monad-mainnet"].excluded_zap_symbols.includes(symbol));
+    }
     assert.deepEqual(
         chain_config["monad-mainnet"].excluded_zap_addresses,
         [
             monad.Optimizers["High Yield AUSD"],
             "0x2ABc42250154752273a4560e875c858623F83ecC",
+            "0x336D414754967C6682B5A665C7DAF6F1409E63e8",
+            "0x9c82eB49B51F7Dc61e22Ff347931CA32aDc6cd90",
+            "0x9FC74f8Ed616B5BaF52a170caa97d6d3898602d1",
+            "0xDaf216939826AcABA0C2312F7E30A890213845CD",
+            "0x0c65A0BC65a5D819235B71F554D210D3F80E0852",
         ],
     );
     assert.equal(monad["CombinedAggregator-ezETH"], "0xC54481C5425f091DfBE7A8e2B264D7dCf4783cD4");
