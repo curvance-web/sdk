@@ -12,6 +12,7 @@
   "ProtocolManager-Yuzu-IRM-Pause": "0x4DaD55E314CF2FbB8e65B2AAC7d6010cc1b6A012",
   "ProtocolManager-Yuzu-Pause": "0xB68F32416471a6f7a5753BA9e5baE5710219C3A4",
   "ProtocolManager-Reservoir-IRM-Pause": "0x1Cfeaa998b271228c6f4E090B8E5A007a08C38Cc",
+  "ProtocolManager-Valos-IRM-Pause": "0x78787837238c4a8798b582AB84E98065242F2D5C",
   "adaptors": {
     "ChainlinkAdaptor": "0x42B318abFDE82a43B3685eB65a5863B9367B22e1",
     "RedstoneClassicAdaptor": "0x4d48676f7B407A7715E84862dbA42b276B8851aE"
@@ -396,10 +397,12 @@
   },
   "OptimizerReader": "0x821a4a2Be28888917106B3A628c8edaffEbF2e2F",
   "ProtocolReader": "0xC5E6DD26095Cc1fa2369f7885dF263e150228D8b",
+  "MonitorReader": "0x45A27921313F56e5a23C0BB36c8020307Ec11432",
   "CombinedAggregator-ezETH": "0xC54481C5425f091DfBE7A8e2B264D7dCf4783cD4",
   "CombinedAggregator-earnAUSD": "0x4a048D2dFd6cd75A7e239393a14CE913d756f992",
   "CombinedAggregator-savUSD": "0x7CB9a321c30c753c3F7C6af7Ae8776E5C1524999",
   "CombinedAggregator-wstETH" :"0xF1A331c7FBb062e4024e9169027B5a0b1E64B6d3",
+  "CombinedAggregator-syzUSD" : "0xD1ca5FfBBA55D22FEa4B047F70838C9EbFE6CBa2",
   "StaticPriceAggregator-loAZND": "0x6eCb16faf9b0c0F7098204e0FE685D2960b4C0Ba",
   "StaticPriceAggregator-sAUSD": "0x57B546362e562DfccAE46AB69b953cE07F4ffd8a",
   "VaultAggregator-USDC-YZM": "0xae3E9D51f1384a86C44fa7958b61F92be23cb284",
