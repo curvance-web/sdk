@@ -352,6 +352,9 @@
       "irms": {
         "strUSD": "0xFB7698633012db5a725ED2Aa7c2bE18967753703",
         "AUSD": "0x2FD2e9906A94052e7f163a0BE2397F74B747710a"
+      },
+      "plugins": {
+        "simplePositionManager": "0xCe8948F09Ed0F50Df9D02Ebde54Fdb0aaeA82aCA"
       }
     },
     "High Yield AUSD Vault | AUSD": {
