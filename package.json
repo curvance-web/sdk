@@ -1,6 +1,6 @@
 {
   "name": "curvance",
-  "version": "5.11.0",
+  "version": "5.11.1",
   "packageManager": "npm@11.14.1",
   "engines": {
     "npm": ">=11.14.1 <12"
@@ -13,7 +13,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/curvance-web/contract-sdk.git"
+    "url": "git+https://github.com/curvance/sdk.git"
+  },
+  "homepage": "https://app.curvance.com",
+  "bugs": {
+    "url": "https://github.com/curvance/sdk/issues"
   },
   "author": "Austinhs",
   "description": "A SDK to explore the curvance protocol efficently & easily.",
